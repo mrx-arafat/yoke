@@ -1,0 +1,337 @@
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
+
+use anyhow::{bail, ensure, Context, Result};
+use serde_json::Value;
+use yoke_core::config::{self, LoadedConfig};
+use yoke_core::store::{DecisionFilter, Store};
+use yoke_core::{guard, trust};
+
+use crate::{install, memory, presets, update, workflow, AgentArg, Cmd};
+
+pub fn quote(value: &str) -> String {
+    serde_json::to_string(value).expect("strings serialize")
+}
+
+pub fn home() -> Result<PathBuf> {
+    std::env::home_dir().context("cannot determine home directory")
+}
+
+pub fn open_store(home: &Path) -> Result<Store> {
+    let directory = home.join(".yoke");
+    fs::create_dir_all(&directory).context("create Yoke state directory")?;
+    Store::open(directory.join("state.db"))
+}
+
+pub fn load_project() -> Result<(Store, LoadedConfig)> {
+    let home = home()?;
+    let store = open_store(&home)?;
+    let loaded = config::load_trusted(&store, &std::env::current_dir()?, &home)?;
+    Ok((store, loaded))
+}
+
+pub fn require_human(action: &str) -> Result<()> {
+    if let Some(signal) = guard::agent_process_signal() {
+        bail!("{action} requires a human outside an agent tool process ({signal}); run yoke {action} in your own terminal");
+    }
+    ensure!(
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        "{action} requires an interactive human terminal; no noninteractive approval is supported"
+    );
+    Ok(())
+}
+
+pub fn confirm(phrase: &str) -> Result<bool> {
+    print!("Type {phrase} to confirm: ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim() == phrase)
+}
+
+pub fn run(command: Option<Cmd>) -> Result<()> {
+    match command {
+        Some(Cmd::Console { no_open }) => {
+            let home = home()?;
+            let (_, loaded) = load_project()?;
+            crate::console::run(&home, &loaded.project_root, !no_open)
+        }
+        Some(Cmd::Statusline { wrap }) => crate::statusline::run(wrap.as_deref()),
+        Some(Cmd::Plan { command }) => workflow::run(command),
+        Some(Cmd::Review {
+            slug,
+            session,
+            agent,
+        }) => workflow::review(slug, session, agent),
+        Some(Cmd::Remember { text, pinned }) => memory::remember(&text, pinned),
+        Some(Cmd::Recall { query, limit, json }) => memory::recall(&query, limit, json),
+        Some(Cmd::Forget { id }) => memory::forget(id),
+        Some(Cmd::Share { id }) => memory::share(id),
+        Some(Cmd::Memory { command }) => memory::run(command),
+        Some(Cmd::Preset { command }) => presets::run(command),
+        Some(Cmd::Init) => init(),
+        Some(Cmd::Trust { global }) => trust(global),
+        Some(Cmd::Install {
+            agent,
+            dry_run,
+            statusline,
+        }) => install(agent, dry_run, statusline, false),
+        Some(Cmd::Uninstall { agent, dry_run }) => install(agent, dry_run, false, true),
+        Some(Cmd::Update { check }) => update::run(check, &open_store(&home()?)?),
+        Some(Cmd::Log {
+            project,
+            session,
+            outcome,
+            tool,
+            limit,
+            json,
+        }) => {
+            let records = open_store(&home()?)?.decisions(&DecisionFilter {
+                project,
+                session,
+                outcome,
+                tool,
+                limit: usize::from(limit),
+            })?;
+            if json {
+                println!("{}", serde_json::to_string(&records)?);
+            } else {
+                println!("decisions[{}]{{ts,event,outcome,reason}}:", records.len());
+                for row in records {
+                    println!(
+                        "  {},{},{},{}",
+                        row.ts,
+                        quote(&row.event),
+                        quote(&row.outcome),
+                        quote(row.reason.as_deref().unwrap_or(""))
+                    );
+                }
+                println!("help: \"Run yoke log --json for complete stored records; --limit is bounded to 1000.\"");
+            }
+            Ok(())
+        }
+        Some(Cmd::RunHook { .. }) => unreachable!("hook dispatch precedes normal commands"),
+        other => {
+            let home = home()?;
+            let loaded =
+                config::load_trusted(&open_store(&home)?, &std::env::current_dir()?, &home)?;
+            match other {
+                Some(Cmd::Gates) => gates(&loaded),
+                Some(Cmd::Config { json: true }) => println!("{}", serde_json::to_string(&loaded)?),
+                Some(Cmd::Config { json: false }) => config(&loaded)?,
+                None => {
+                    println!(
+                        "bin: {}",
+                        quote(&std::env::current_exe()?.display().to_string())
+                    );
+                    println!("description: \"Local trusted gates for coding agents\"");
+                    println!("mode: {}", loaded.config.mode.as_str());
+                    println!(
+                        "project: {}",
+                        quote(&loaded.project_root.display().to_string())
+                    );
+                    gates(&loaded);
+                    println!("help: \"Run yoke config to inspect trust, yoke log for decisions, or yoke --help for commands.\"");
+                }
+                _ => unreachable!(),
+            }
+            Ok(())
+        }
+    }
+}
+
+fn init() -> Result<()> {
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open("yoke.toml")
+    {
+        Ok(mut file) => {
+            file.write_all(include_bytes!("../starter.toml"))?;
+            println!("config: \"Created yoke.toml; it contributes no gates until a human runs yoke trust.\"");
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            println!("config: \"yoke.toml already exists; unchanged.\"");
+        }
+        Err(error) => return Err(error).context("create yoke.toml"),
+    }
+    Ok(())
+}
+
+fn gates(loaded: &LoadedConfig) {
+    println!(
+        "gates[{}]{{name,event,action,source}}:",
+        loaded.config.gates.len()
+    );
+    for gate in &loaded.config.gates {
+        println!(
+            "  {},{},{},{}",
+            quote(&gate.name),
+            gate.on.as_str(),
+            serde_json::to_string(&gate.action).expect("gate action serializes"),
+            quote(
+                loaded
+                    .origins
+                    .get(&format!("gate.{}", gate.name))
+                    .map(String::as_str)
+                    .unwrap_or("default")
+            )
+        );
+    }
+}
+
+fn config(loaded: &LoadedConfig) -> Result<()> {
+    fn flatten(prefix: &str, value: &Value, rows: &mut BTreeMap<String, String>) {
+        if let Some(object) = value.as_object() {
+            for (key, value) in object {
+                if key == "gate" && prefix.is_empty() {
+                    continue;
+                }
+                flatten(
+                    &if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}.{key}")
+                    },
+                    value,
+                    rows,
+                );
+            }
+        } else {
+            rows.insert(prefix.into(), value.to_string());
+        }
+    }
+    let mut rows = BTreeMap::new();
+    flatten("", &serde_json::to_value(&loaded.config)?, &mut rows);
+    println!("config[{}]{{key,value,source}}:", rows.len());
+    for (key, value) in rows {
+        println!(
+            "  {},{},{}",
+            quote(&key),
+            quote(&value),
+            quote(
+                loaded
+                    .origins
+                    .get(&key)
+                    .map(String::as_str)
+                    .unwrap_or("default")
+            )
+        );
+    }
+    println!(
+        "gate_settings[{}]{{name,settings,source}}:",
+        loaded.config.gates.len()
+    );
+    for gate in &loaded.config.gates {
+        println!(
+            "  {},{},{}",
+            quote(&gate.name),
+            quote(&serde_json::to_string(gate)?),
+            quote(
+                loaded
+                    .origins
+                    .get(&format!("gate.{}", gate.name))
+                    .map(String::as_str)
+                    .unwrap_or("default")
+            )
+        );
+    }
+    println!(
+        "snapshots[{}]{{file,trusted,stale,error}}:",
+        loaded.snapshots.len()
+    );
+    for snapshot in &loaded.snapshots {
+        println!(
+            "  {},{},{},{}",
+            quote(&snapshot.file.display().to_string()),
+            snapshot.trusted,
+            snapshot.stale,
+            quote(snapshot.disk_error.as_deref().unwrap_or(""))
+        );
+    }
+    println!(
+        "help: \"Run yoke config --json for structured configuration and snapshot metadata.\""
+    );
+    Ok(())
+}
+
+fn trust(global: bool) -> Result<()> {
+    require_human("trust")?;
+    let home = home()?;
+    let store = open_store(&home)?;
+    let prepared = if global {
+        trust::prepare_global(&store, &home)?
+    } else {
+        trust::prepare_project(&store, &std::env::current_dir()?)?
+    };
+    for snapshot in &prepared.snapshots {
+        println!(
+            "file: {}\nsha256: {}",
+            quote(&snapshot.file.display().to_string()),
+            snapshot.sha256
+        );
+        if snapshot.previous.as_deref() == Some(&snapshot.content) {
+            println!("change: unchanged");
+            continue;
+        }
+        // Escaped full-line before/after display prevents terminal control injection.
+        if let Some(previous) = &snapshot.previous {
+            for line in previous.lines() {
+                println!("- {}", quote(line));
+            }
+        }
+        for line in snapshot.content.lines() {
+            println!("+ {}", quote(line));
+        }
+    }
+    println!("Trust these exact snapshots?");
+    if !confirm("trust")? {
+        println!("trust: cancelled");
+        return Ok(());
+    }
+    prepared.commit(&store)?;
+    println!("trust: saved");
+    Ok(())
+}
+
+fn install(agents: Vec<AgentArg>, dry_run: bool, statusline: bool, remove: bool) -> Result<()> {
+    let home = home()?;
+    let options = install::InstallOptions {
+        claude_settings: home.join(".claude/settings.json"),
+        codex_hooks: home.join(".codex/hooks.json"),
+        codex_config: home.join(".codex/config.toml"),
+        state_dir: home.join(".yoke"),
+        executable: std::env::current_exe()?,
+        agents: agents
+            .into_iter()
+            .map(|agent| match agent {
+                AgentArg::Claude => install::Agent::Claude,
+                AgentArg::Codex => install::Agent::Codex,
+            })
+            .collect(),
+        dry_run,
+        statusline,
+    };
+    let report = if remove {
+        install::uninstall(&options)?
+    } else {
+        install::install(&options)?
+    };
+    println!("changes: {}\ndry_run: {}", report.changes.len(), dry_run);
+    for change in report.changes {
+        println!("file: {}", quote(&change.path.display().to_string()));
+        if dry_run {
+            println!(
+                "before: {}\nafter: {}",
+                quote(change.before.as_deref().unwrap_or("")),
+                quote(change.after.as_deref().unwrap_or(""))
+            );
+        }
+    }
+    for warning in report.warnings {
+        println!("warning: {}", quote(&warning));
+    }
+    Ok(())
+}

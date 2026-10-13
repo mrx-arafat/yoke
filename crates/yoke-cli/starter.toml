@@ -1,12 +1,13 @@
 # Yoke configuration.
 #
-# Gates run on agent lifecycle events. On blocking events
-# (pre_tool_use, user_prompt_submit, stop), a gate whose `run`
-# command exits non-zero vetoes the action. On other events a
-# failing gate is reported but does not block.
+# Review this file with `yoke trust` in your own terminal before it runs.
+# Observe logs what would be blocked. To block actions, change mode to
+# "enforce" and trust the changed snapshot again.
 #
-# Gate commands receive YOKE_EVENT, YOKE_GATE, YOKE_TOOL_NAME
-# and YOKE_TOOL_INPUT (JSON) in their environment.
+# Gate commands receive YOKE_EVENT, YOKE_GATE, YOKE_TOOL_NAME,
+# YOKE_TOOL_INPUT (JSON), YOKE_SESSION, YOKE_CWD, and YOKE_PROJECT.
+
+mode = "observe"
 
 [meta]
 name = "my-project"
@@ -16,11 +17,12 @@ name = "no-force-push"
 on = "pre_tool_use"
 match_tool = "Bash"
 match_contains = "push --force"
-run = "exit 1"
+action = "deny"
 message = "Force push is blocked by Yoke. Push without --force."
 
-[[gate]]
-name = "format-after-edit"
-on = "post_tool_use"
-match_tool = "Edit"
-run = "cargo fmt --quiet 2>/dev/null || true"
+# Add project-specific checks after choosing the right commands for this repo.
+# [[gate]]
+# name = "format-check"
+# on = "post_tool_use"
+# match_tool = "Edit|Write"
+# run = "cargo fmt --check"

@@ -112,14 +112,15 @@ An error that cannot reach the database is appended to `~/.yoke/error.log` inste
 
 ### 4.2 Wire format
 
-Claude Code and Codex accept the same hook JSON, so one writer serves both.
-Codex rejects unknown fields and rejects a bare `allow`, so yoke prints nothing at all when it allows.
+Claude Code and Codex share the blocking shapes below, but the writer must account for their different rewrite contracts.
+Yoke prints nothing when it allows without context or a rewrite.
 
 | Situation | Output |
 |-----------|--------|
 | Allow | Nothing |
 | PreToolUse deny | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}` |
-| PreToolUse rewrite | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{...}}}` |
+| Claude PreToolUse rewrite | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{...}}}` |
+| Codex PreToolUse rewrite | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{...}}}` |
 | Stop or UserPromptSubmit block | `{"decision":"block","reason":"..."}` |
 | Context for the agent | `{"hookSpecificOutput":{"hookEventName":"<Event>","additionalContext":"..."}}` |
 
@@ -136,7 +137,11 @@ Event support:
 | Stop | yes | yes | Stop guard; on Codex also the debounced digest |
 | SessionStart | yes | yes | Memory and plan context, retention pruning, daily update check |
 | PreCompact | yes | yes | Observing gates |
-| SessionEnd | yes | no | Digest |
+| SessionEnd | yes | yes | Digest; Codex Stop also provides the debounced fallback |
+| Notification | yes | no | Observing gates |
+
+Agent contracts were checked on 2026-10-13 against the [Claude hooks reference](https://code.claude.com/docs/en/hooks) and [Codex hooks reference](https://learn.chatgpt.com/docs/hooks).
+Codex local command hooks require local orchestration; hosted and managed execution can have different coverage.
 
 ### 4.3 Config
 
@@ -171,6 +176,7 @@ Gate keys (existing keys keep their meaning):
 | `message`, `shell` | as in 0.1.0 | |
 | `rewrite_field` | `"command"` | Field of `tool_input` to rewrite |
 | `rewrite_pattern`, `rewrite_to` | none | Regex and replacement for `rewrite` |
+| `require_command` | none | Rewrite prerequisite: executable basename must be available on PATH |
 
 Gate commands also receive `YOKE_SESSION`, `YOKE_CWD` and `YOKE_PROJECT`.
 
@@ -216,7 +222,9 @@ After redaction the payload is cut to `log.payload_cap` bytes on a character bou
 
 - Backs up each file it will change to `~/.yoke/backups/<timestamp>/`.
 - Adds hook entries for the events in section 4.2, each running `yoke run-hook --agent <agent> <Event>`.
-- Only adds or removes entries whose command starts with `yoke `; every other hook stays byte-for-byte untouched.
+- Records exact owned entries in an installation receipt and removes only those entries during uninstall.
+  Existing matching hooks are not adopted; unrelated hook entries remain untouched.
+  Commands use a shell-quoted resolved executable path so an installation does not accidentally invoke a different binary on PATH.
 - Enables Codex's hooks feature flag if it is off; the exact key is read from Codex's documentation at implementation time.
 - With `--statusline`, sets Claude Code's status line to `yoke statusline`, wrapping any existing command with `--wrap "<existing>"`.
 - `--dry-run` prints the diff and writes nothing.
@@ -234,7 +242,7 @@ After install then uninstall, each settings file is semantically identical to it
 ### 4.9 CLI surface
 
 `init`, `gates`, `run-hook`, `install`, `uninstall`, `trust`, `config`, `log`, `update`.
-Later sub-projects add `plan`, `review`, `remember`, `recall`, `share`, `forget`, `memory digest`, `console`, `statusline`, `preset`.
+Later sub-projects add `plan`, `review`, `remember`, `recall`, `share`, `forget`, `memory digest`, `memory export`, `memory import`, `console`, `statusline`, `preset`.
 
 ## 5. Sub-project 2: Workflow
 
@@ -274,15 +282,16 @@ Side states `waiting` and `stalled` leave `building` and return to it.
 | Transition | Who | How |
 |------------|-----|-----|
 | draft to approved | Human | `yoke plan approve <slug>` in a terminal, or the console button. Freezes the header as `approved_header`. |
-| approved to building | Agent | `yoke plan start <slug>`; binds the plan to the session as its active plan |
-| building to waiting | Agent | `yoke plan ask "<question>"`; records the question |
-| waiting or stalled to building | Human | The next user prompt (UserPromptSubmit), or `yoke plan resume <slug>` |
-| building to checking | Agent | `yoke plan check <slug>` |
+| approved to building | Agent | `yoke plan start <slug> --session <session-id>`; binds an existing recorded session |
+| building to waiting | Agent | `yoke plan ask "<question>" --slug <slug>`; records the question |
+| waiting or stalled to building | Human | `yoke plan resume <slug>` in a human terminal, or the authenticated console action |
+| building to checking | Agent | `yoke plan check <slug> --agent <claude-or-codex>` |
 | checking to done | Yoke | Every blocking check passed and the fingerprint did not change during the run |
 | checking to building | Yoke | Any blocking check failed, or files changed during the run |
 | building to stalled | Yoke | The stop guard reached its cap |
 
 Every transition writes a `transitions` row with its actor.
+UserPromptSubmit alone does not authenticate human intent and cannot resume a waiting or stalled plan.
 If the header on disk differs from `approved_header`, `yoke plan check` refuses to run and the plan needs re-approval: an approved plan's checks cannot be weakened by editing the file.
 
 ### 5.3 Checks and evidence
@@ -296,6 +305,10 @@ If they differ, the run is void and the plan returns to `building`.
 
 `blocking = false` checks run and are shown but never decide the outcome.
 `review = true` in the header adds a blocking `review` check (section 5.5).
+Every approvable header requires at least one blocking check or required review.
+Checks can declare relative PNG, JPEG, or WebP paths in `artifacts`; each must be a regular file inside the project of at most 10 MiB.
+Generated screenshots belong in Git-ignored output directories so creating them does not invalidate the working-tree fingerprint.
+Artifact declarations never exclude source files from the fingerprint.
 
 ### 5.4 Stop guard
 
@@ -312,7 +325,8 @@ Plan context (state and next command) is injected at SessionStart and UserPrompt
 
 ### 5.5 Review
 
-`yoke review [<slug>]` runs a reviewer agent headless on `git diff HEAD`:
+`yoke review [<slug>]` runs a reviewer agent headless on tracked changes from `git diff HEAD` and untracked, nonignored source files.
+Review input must cover newly created files as well as edits; unsupported or oversized input fails explicitly instead of silently receiving a passing review.
 
 - The reviewer is `codex exec` or `claude -p`, picked by `review.reviewer`.
 - Yoke supplies its own review prompt and requires JSON output: a list of findings with `severity` (`blocking` or `advisory`), `file`, `line` and `summary`.
@@ -351,6 +365,29 @@ Hooks record facts with no model call:
 - That file reaches agents only through its trusted snapshot, so any edit, whether from a teammate's commit or the agent, needs `yoke trust` first.
 - Yoke never writes to `CLAUDE.md`, `AGENTS.md` or other files it does not own.
 
+### 6.5 Portable export and import
+
+Memory must migrate between devices, servers, and environments without copying a live SQLite database.
+The planned commands are `yoke memory export <file>` and `yoke memory import <file>`.
+Export produces a versioned UTF-8 JSON archive containing memories, facts, timestamps, sources, pinned state, digest state, and portable record identities and relationships.
+Users can export the current project or explicitly select all projects.
+Project roots are recorded as metadata, never interpreted as destination write paths.
+Import supports explicit project mapping so a repository at one path can move to a different path on another machine.
+An ambiguous or missing mapping must be resolved before any writes.
+
+Export reads a consistent database snapshot and writes atomically without overwriting an existing archive unless explicitly requested.
+Import validates the archive version, bounded sizes, record shapes, identities, and relationships before applying one transaction.
+A dry run reports project mappings, additions, duplicates, and conflicts without writing anything.
+Stable export identities make repeated imports idempotent; identical records are skipped, while conflicting records fail with an actionable report rather than silently replacing local data.
+Preserve local IDs through an explicit imported-identity mapping and rebuild the search index from imported records.
+Import does not execute commands or transfer trust approvals, executable config, installation state, or plan approvals.
+Shared knowledge content may travel as reference data, but import never writes project files or marks that content locally trusted or shared automatically.
+Imported facts retain their digest status and references so migration does not silently duplicate generated memories.
+The archive is local plaintext; command help explains that memory content can be sensitive and the user controls its transfer.
+
+Acceptance requires a real CLI export from one temporary home and import into another with a different project root, followed by equivalent recall results and pinned/source/timestamp preservation.
+The focused tests must also cover repeated import, conflicts, malformed or unsupported archives, atomic rollback, and a dry run that leaves destination state unchanged.
+
 ## 7. Sub-project 4: Surfaces
 
 ### 7.1 Console
@@ -371,7 +408,9 @@ No JS build step and no external assets.
 | Trust and config | Effective config with origins; diff between disk and trusted snapshot | None (trust stays a terminal command) |
 | Usage | Tokens and cost per session and project | |
 
-The console uses the `tiny_http` crate.
+The console uses an original bounded `std::net` transport with explicit request-size, connection-count, and I/O deadline limits.
+It closes ordinary connections and rejects unsupported transfer encodings rather than implementing keepalive or chunked request bodies.
+This replaces the initial `tiny_http` prototype because its request-drop behavior could drain an incomplete body without an application-controlled deadline.
 
 ### 7.2 Design bar
 
@@ -380,6 +419,9 @@ These are requirements, not aspirations; the 0.5 release does not ship until eac
 
 **Visual system**
 
+- User-selected reference, 2026-10-13: a pale lavender and mint dashboard shell, white rounded panels, compact vertical navigation, indigo outline icons, and lavender, sage, sky-blue, and amber charts.
+  Apply this direction to Yoke's real data and workflows, with a bold original yoke silhouette for the brand and favicon.
+  Keep the application flat and usable; the reference's laptop perspective and healthcare content are presentation context, not product UI.
 - Yoke's own design system, defined as tokens: a type scale, a 4 px spacing grid, colors in OKLCH, radii, shadows and motion durations.
 - Light and dark themes from the same tokens, following the OS setting with a manual override.
 - One deliberate visual identity, chosen and documented before the first page is built. No default component-library look, no purple gradients, no gradient heading text, no emoji as icons.
@@ -451,7 +493,8 @@ Rewrite rules:
 
 - Rewrites run only after every deny and check gate passed.
 - At most one rewrite applies per event: the first matching gate in config order. It is logged as `rewrite`.
-- A rewrite answers `allow`, which also skips the agent's own permission prompt for that call; the preset documentation states this, and rewrite gates should match narrow patterns.
+- Codex rewrites answer `allow`, which skips its ordinary permission prompt for that call; the preset documentation states this, and rewrite gates should match narrow patterns.
+  Claude rewrites omit the permission decision to preserve normal permission evaluation.
 
 Screenshots referenced by a check's output are shown on the plan's console page.
 
@@ -471,7 +514,7 @@ Each sub-project gets its own implementation plan and ships as a minor version.
 |---------|-------------|-----------|
 | 0.2 | Core | Installed in observe mode next to the old harness on the maintainer's Mac for a full working day; `yoke log` shows every event; uninstall leaves settings identical to the backup |
 | 0.3 | Workflow | A real feature goes from draft to done with checks run by yoke, and the stop guard stalls a looping session at the cap |
-| 0.4 | Memory | A new session starts with relevant memories from the previous day within budget |
+| 0.4 | Memory | A new session starts with relevant memories from the previous day within budget; export/import preserves recall across devices and remapped project paths |
 | 0.5 | Surfaces | Every requirement in section 7.2 is met and proven; console approve, decisions and usage pages work in the browser; statusline refresh measured under 15 ms |
 | 0.6 | Presets | `git-safety` and `token-saver` run in enforce mode for a day with no false denials |
 | 1.0 | Cutover | Old harness removed; yoke in enforce mode for both agents for a week |

@@ -1,0 +1,262 @@
+[
+  {
+    "name": "decisions",
+    "theme": "light",
+    "width": 1440,
+    "screenshot": "artifacts/decisions-light-1440.png",
+    "heading": "  - heading \"Decisions\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 38.100000001490116
+  },
+  {
+    "name": "sessions",
+    "theme": "light",
+    "width": 1440,
+    "screenshot": "artifacts/sessions-light-1440.png",
+    "heading": "  - heading \"Sessions\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 315.20000000298023
+  },
+  {
+    "name": "plans",
+    "theme": "light",
+    "width": 1440,
+    "screenshot": "artifacts/plans-light-1440.png",
+    "heading": "  - heading \"Plans\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.69999999925494
+  },
+  {
+    "name": "memory",
+    "theme": "light",
+    "width": 1440,
+    "screenshot": "artifacts/memory-light-1440.png",
+    "heading": "  - heading \"Memory\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.100000001490116
+  },
+  {
+    "name": "trust",
+    "theme": "light",
+    "width": 1440,
+    "screenshot": "artifacts/trust-light-1440.png",
+    "heading": "  - heading \"Trust & config\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 31.699999999254942
+  },
+  {
+    "name": "usage",
+    "theme": "light",
+    "width": 1440,
+    "screenshot": "artifacts/usage-light-1440.png",
+    "heading": "  - heading \"Usage\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.099999997764826
+  },
+  {
+    "name": "decisions",
+    "theme": "dark",
+    "width": 1440,
+    "screenshot": "artifacts/decisions-dark-1440.png",
+    "heading": "  - heading \"Decisions\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.5
+  },
+  {
+    "name": "sessions",
+    "theme": "dark",
+    "width": 1440,
+    "screenshot": "artifacts/sessions-dark-1440.png",
+    "heading": "  - heading \"Sessions\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.099999997764826
+  },
+  {
+    "name": "plans",
+    "theme": "dark",
+    "width": 1440,
+    "screenshot": "artifacts/plans-dark-1440.png",
+    "heading": "  - heading \"Plans\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.5
+  },
+  {
+    "name": "memory",
+    "theme": "dark",
+    "width": 1440,
+    "screenshot": "artifacts/memory-dark-1440.png",
+    "heading": "  - heading \"Memory\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.599999997764826
+  },
+  {
+    "name": "trust",
+    "theme": "dark",
+    "width": 1440,
+    "screenshot": "artifacts/trust-dark-1440.png",
+    "heading": "  - heading \"Trust & config\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 31.899999998509884
+  },
+  {
+    "name": "usage",
+    "theme": "dark",
+    "width": 1440,
+    "screenshot": "artifacts/usage-dark-1440.png",
+    "heading": "  - heading \"Usage\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 31.900000002235174
+  },
+  {
+    "name": "decisions",
+    "theme": "light",
+    "width": 390,
+    "screenshot": "artifacts/decisions-light-390.png",
+    "heading": "  - heading \"Decisions\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.19999999925494
+  },
+  {
+    "name": "sessions",
+    "theme": "light",
+    "width": 390,
+    "screenshot": "artifacts/sessions-light-390.png",
+    "heading": "  - heading \"Sessions\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.399999998509884
+  },
+  {
+    "name": "plans",
+    "theme": "light",
+    "width": 390,
+    "screenshot": "artifacts/plans-light-390.png",
+    "heading": "  - heading \"Plans\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 31.600000001490116
+  },
+  {
+    "name": "memory",
+    "theme": "light",
+    "width": 390,
+    "screenshot": "artifacts/memory-light-390.png",
+    "heading": "  - heading \"Memory\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 31.600000001490116
+  },
+  {
+    "name": "trust",
+    "theme": "light",
+    "width": 390,
+    "screenshot": "artifacts/trust-light-390.png",
+    "heading": "  - heading \"Trust & config\" [level=1]",
+    "violations": [],
+    "overflow": 299,
+    "navigationMs": 32.19999999925494
+  },
+  {
+    "name": "usage",
+    "theme": "light",
+    "width": 390,
+    "screenshot": "artifacts/usage-light-390.png",
+    "heading": "  - heading \"Usage\" [level=1]",
+    "violations": [
+      {
+        "id": "scrollable-region-focusable",
+        "impact": "serious",
+        "targets": [
+          [
+            ".table-scroll"
+          ]
+        ]
+      }
+    ],
+    "overflow": 0,
+    "navigationMs": 31.699999999254942
+  },
+  {
+    "name": "decisions",
+    "theme": "dark",
+    "width": 390,
+    "screenshot": "artifacts/decisions-dark-390.png",
+    "heading": "  - heading \"Decisions\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.400000002235174
+  },
+  {
+    "name": "sessions",
+    "theme": "dark",
+    "width": 390,
+    "screenshot": "artifacts/sessions-dark-390.png",
+    "heading": "  - heading \"Sessions\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.600000001490116
+  },
+  {
+    "name": "plans",
+    "theme": "dark",
+    "width": 390,
+    "screenshot": "artifacts/plans-dark-390.png",
+    "heading": "  - heading \"Plans\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 32.19999999925494
+  },
+  {
+    "name": "memory",
+    "theme": "dark",
+    "width": 390,
+    "screenshot": "artifacts/memory-dark-390.png",
+    "heading": "  - heading \"Memory\" [level=1]",
+    "violations": [],
+    "overflow": 0,
+    "navigationMs": 31.699999999254942
+  },
+  {
+    "name": "trust",
+    "theme": "dark",
+    "width": 390,
+    "screenshot": "artifacts/trust-dark-390.png",
+    "heading": "  - heading \"Trust & config\" [level=1]",
+    "violations": [],
+    "overflow": 299,
+    "navigationMs": 31.099999997764826
+  },
+  {
+    "name": "usage",
+    "theme": "dark",
+    "width": 390,
+    "screenshot": "artifacts/usage-dark-390.png",
+    "heading": "  - heading \"Usage\" [level=1]",
+    "violations": [
+      {
+        "id": "scrollable-region-focusable",
+        "impact": "serious",
+        "targets": [
+          [
+            ".table-scroll"
+          ]
+        ]
+      }
+    ],
+    "overflow": 0,
+    "navigationMs": 31.599999997764826
+  }
+]

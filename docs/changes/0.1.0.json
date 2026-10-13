@@ -1,0 +1,24 @@
+{
+  "version": "0.1.0",
+  "status": "unreleased",
+  "added": [
+    "Claude Code and Codex hook handling with observe/enforce modes, shell checks, denials, command rewrites, bounded execution, and redacted SQLite decision logs.",
+    "Human-approved global and project configuration snapshots with partial-layer overrides, exact-byte hashes, origin reporting, and stale-file diagnostics.",
+    "Reversible agent hook installation with dry runs, backups, ownership receipts, and optional Claude statusline integration.",
+    "Git-backed plan files with frozen human approval, database-owned states, session binding, explicit human resume, bounded stop guards, and actual check execution before completion.",
+    "Independent review and persisted check evidence bound to working-tree fingerprints, including untracked nonignored files and concurrent-change detection.",
+    "Local facts and remembered notes, full-text recall, optional session digests, explicitly trusted shared knowledge, and portable memory import/export with project mapping and duplicate protection.",
+    "A token-authenticated loopback console for sessions, plans, decisions, memory, trust configuration, and usage, with light/dark themes, keyboard navigation, approval confirmation, and memory deletion Undo.",
+    "A redesigned yoke icon and themed select controls, plus a Sessions view performance fix.",
+    "Statusline mode, plan state, alerts, optional existing-command wrapping, and usage estimates that leave unsupported costs unknown.",
+    "Readable git-safety, web-redirect, token-saver, and UI presets that require explicit configuration trust before activation.",
+    "Checksum-verified self-update with atomic binary replacement."
+  ],
+  "pending_acceptance": [
+    "Version 0.1.0 remains unreleased; local focused checks and browser journeys are not a completed release acceptance run.",
+    "The full-working-day observe-mode trial and a week of real work with Yoke as the only enforce-mode harness for both agents remain pending.",
+    "Cross-platform runtime acceptance across all supported release targets remains pending.",
+    "Lighthouse performance acceptance and a recorded before/after performance baseline remain pending.",
+    "Published release distribution and end-to-end self-update acceptance remain unverified."
+  ]
+}

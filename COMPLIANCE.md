@@ -40,9 +40,9 @@ It is engineering guidance, not legal advice; get an IP lawyer's review before a
   MPL-2.0 is excluded on purpose to keep the graph fully permissive.
 - [ ] The policy is enforced by `deny.toml`.
   Install the checker once with `cargo install cargo-deny --locked`, then run `cargo deny check licenses` locally and in CI.
-- [ ] Zero-install spot check:
-  `cargo metadata --format-version 1 | jq -r '.packages[] | select((.license // "NONE") | test("GPL|MPL|SSPL|BUSL|NONE")) | .name'`
-  must print nothing.
+- [ ] Evaluate SPDX license expressions with `cargo deny check licenses sources`.
+  Do not use forbidden-word substring matching as a pass/fail gate: a package offering `MIT OR Apache-2.0 OR LGPL-2.1-or-later` can satisfy this policy through MIT or Apache-2.0.
+  A passing check permits an allowed alternative; it does not approve the excluded alternatives.
 - [ ] Every new dependency is checked against this list in the PR that adds it.
 
 ## 5. Shipping binaries

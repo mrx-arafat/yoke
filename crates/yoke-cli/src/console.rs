@@ -1,0 +1,307 @@
+//! Local-only human review console. Authentication tokens live only in memory.
+
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{atomic::AtomicUsize, Arc};
+
+use self::http::{Request, Server};
+use anyhow::{ensure, Context, Result};
+use yoke_core::store::Store;
+
+#[path = "console/actions.rs"]
+mod actions;
+#[path = "console/content.rs"]
+mod content;
+#[path = "console/events.rs"]
+mod events;
+#[path = "console/http.rs"]
+mod http;
+#[path = "console/pages.rs"]
+mod pages;
+#[path = "console/render.rs"]
+mod render;
+#[path = "console/views.rs"]
+mod views;
+
+pub(super) struct Console {
+    home: PathBuf,
+    project: PathBuf,
+    database: PathBuf,
+    token: String,
+    csrf: String,
+    host: String,
+}
+
+pub(super) fn random_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Serve the explicit home's state on loopback until the process is stopped.
+pub fn run(home: &Path, project: &Path, open_browser: bool) -> Result<()> {
+    ensure!(
+        home.is_absolute() && project.is_absolute(),
+        "console paths must be absolute"
+    );
+    let project = project.canonicalize().context("resolve console project")?;
+    let state = home.join(".yoke");
+    std::fs::create_dir_all(&state)?;
+    let database = state.join("state.db");
+    let store = Store::open(&database)?;
+    let server = Server::bind_loopback()?;
+    let host = server.local_addr()?.to_string();
+    let console = Console {
+        home: home.to_owned(),
+        project,
+        database,
+        token: random_token()?,
+        csrf: random_token()?,
+        host,
+    };
+    let url = format!("http://{}/decisions?token={}", console.host, console.token);
+    println!("Yoke console: {url}");
+    if open_browser {
+        let command = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let status = std::process::Command::new(command)
+            .arg(&url)
+            .status()
+            .context(
+                "open console browser; use the printed URL if no desktop opener is installed",
+            )?;
+        ensure!(
+            status.success(),
+            "browser opener failed; rerun console --no-open and use its URL"
+        );
+    }
+    let mut actions = actions::Actions::default();
+    let connections = Arc::new(AtomicUsize::new(0));
+    loop {
+        let request = server.recv()?;
+        if let Err(error) = serve(&console, &store, &mut actions, &connections, request) {
+            eprintln!(
+                "yoke console: {}",
+                yoke_core::redact::redact(&error.to_string())
+            );
+        }
+    }
+}
+
+fn header(request: &Request, name: &str) -> Option<String> {
+    request.header(name).map(str::to_owned)
+}
+
+fn constant_eq(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
+}
+
+fn authorize(
+    console: &Console,
+    method: &str,
+    headers: &BTreeMap<String, String>,
+    query: &BTreeMap<String, String>,
+) -> bool {
+    let supplied = headers
+        .get("authorization")
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| query.get("token").map(String::as_str))
+        .unwrap_or("");
+    if !constant_eq(supplied, &console.token) || headers.get("host") != Some(&console.host) {
+        return false;
+    }
+    if headers
+        .get("sec-fetch-site")
+        .is_some_and(|v| v != "same-origin" && v != "none")
+    {
+        return false;
+    }
+    if method == "POST" {
+        return headers.get("origin") == Some(&format!("http://{}", console.host))
+            && headers
+                .get("x-yoke-csrf")
+                .is_some_and(|v| constant_eq(v, &console.csrf))
+            && headers
+                .get("content-type")
+                .is_some_and(|v| v.split(';').next() == Some("application/json"));
+    }
+    method == "GET"
+}
+
+fn decode(input: &str) -> Result<String> {
+    let mut bytes = Vec::new();
+    let mut iter = input.bytes();
+    while let Some(byte) = iter.next() {
+        match byte {
+            b'+' => bytes.push(b' '),
+            b'%' => {
+                let a = iter
+                    .next()
+                    .and_then(|v| (v as char).to_digit(16))
+                    .context("invalid percent encoding")?;
+                let b = iter
+                    .next()
+                    .and_then(|v| (v as char).to_digit(16))
+                    .context("invalid percent encoding")?;
+                bytes.push((a * 16 + b) as u8);
+            }
+            _ => bytes.push(byte),
+        }
+    }
+    Ok(String::from_utf8(bytes)?)
+}
+
+pub(super) fn query(url: &str) -> Result<(&str, BTreeMap<String, String>)> {
+    ensure!(url.len() <= 8192, "request URL too long");
+    let (path, raw) = url.split_once('?').unwrap_or((url, ""));
+    let mut result = BTreeMap::new();
+    for part in raw.split('&').filter(|s| !s.is_empty()) {
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        ensure!(
+            result.insert(decode(key)?, decode(value)?).is_none(),
+            "duplicate query parameter"
+        );
+    }
+    Ok((path, result))
+}
+
+fn serve(
+    console: &Console,
+    store: &Store,
+    actions: &mut actions::Actions,
+    connections: &Arc<AtomicUsize>,
+    request: Request,
+) -> Result<()> {
+    let headers: BTreeMap<String, String> = [
+        "authorization",
+        "host",
+        "origin",
+        "x-yoke-csrf",
+        "content-type",
+        "sec-fetch-site",
+    ]
+    .into_iter()
+    .filter_map(|name| header(&request, name).map(|v| (name.to_owned(), v)))
+    .collect();
+    let url = request.url().to_owned();
+    let (path, params) = match query(&url) {
+        Ok(value) => value,
+        Err(_) => {
+            return respond(
+                request,
+                400,
+                "text/plain; charset=utf-8",
+                "Invalid request URL",
+            )
+        }
+    };
+    if !authorize(console, request.method(), &headers, &params) {
+        return respond(request, 403, "text/plain; charset=utf-8", "Forbidden");
+    }
+    if request.method() == "POST" {
+        if path != "/actions" {
+            return respond(request, 404, "text/plain", "Unknown action endpoint");
+        }
+        let body = std::str::from_utf8(request.body())?;
+        let result = (|| {
+            ensure!(body.len() <= 16384, "Action request too large");
+            actions.apply(store, console, serde_json::from_str(body)?)
+        })();
+        return match result {
+            Ok(value)=>respond(request,200,"application/json",&value.to_string()),
+            Err(error)=>respond(request,409,"application/json",&serde_json::json!({"error":{"code":"action_failed","message":yoke_core::redact::redact(&error.to_string())}}).to_string()),
+        };
+    }
+    match path {
+        "/assets/console.css" => respond(
+            request,
+            200,
+            "text/css; charset=utf-8",
+            include_str!("console/console.css"),
+        ),
+        "/assets/console.js" => respond(
+            request,
+            200,
+            "text/javascript; charset=utf-8",
+            include_str!("console/console.js"),
+        ),
+        "/icon.svg" => respond(
+            request,
+            200,
+            "image/svg+xml",
+            include_str!("console/yoke.svg"),
+        ),
+        "/events" => {
+            events::start(request, console.database.clone(), Arc::clone(connections));
+            Ok(())
+        }
+        "/artifact" => match actions::artifact(store, console, &params) {
+            Ok((bytes, kind)) => {
+                request.respond(200, security_headers(kind), &bytes)?;
+                Ok(())
+            }
+            Err(error) => respond(
+                request,
+                404,
+                "text/plain",
+                &yoke_core::redact::redact(&error.to_string()),
+            ),
+        },
+        "/" | "/decisions" | "/sessions" | "/plans" | "/memory" | "/trust" | "/usage" => {
+            let page = if path == "/" { "decisions" } else { &path[1..] };
+            let result = match page {
+                "sessions" => views::sessions(store, console),
+                "plans" => views::plans(store, console, &params),
+                "memory" => views::memories(store, console, &params),
+                "trust" => views::trust(store, console),
+                "usage" => views::usage(store, console, &params),
+                _ => pages::decisions(store, console, &params),
+            };
+            let (body, status) = match result {
+                Ok(body) => (body, 200),
+                Err(error) => (
+                    render::error(&yoke_core::redact::redact(&error.to_string())),
+                    500,
+                ),
+            };
+            let html = if header(&request, "x-yoke-fragment").as_deref() == Some("1") {
+                body
+            } else {
+                render::shell(console, page, &body)
+            };
+            respond(request, status, "text/html; charset=utf-8", &html)
+        }
+        _ => respond(request, 404, "text/plain; charset=utf-8", "Page not found"),
+    }
+}
+
+fn security_headers(kind: &str) -> Vec<(String, String)> {
+    [
+        ("Content-Type", kind),
+        ("Cache-Control", "no-store"),
+        ("Referrer-Policy", "no-referrer"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+        ("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),
+        ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
+    ].into_iter().map(|(name,value)| (name.to_owned(),value.to_owned())).collect()
+}
+
+fn respond(request: Request, status: u16, kind: &str, body: &str) -> Result<()> {
+    request.respond(status, security_headers(kind), body.as_bytes())?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "console/tests.rs"]
+mod tests;

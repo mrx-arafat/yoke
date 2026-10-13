@@ -22,6 +22,8 @@ pub enum EventKind {
     SessionEnd,
     #[serde(alias = "Notification")]
     Notification,
+    #[serde(alias = "PreCompact")]
+    PreCompact,
 }
 
 impl EventKind {
@@ -34,6 +36,7 @@ impl EventKind {
             "session_start" | "SessionStart" => Some(Self::SessionStart),
             "session_end" | "SessionEnd" => Some(Self::SessionEnd),
             "notification" | "Notification" => Some(Self::Notification),
+            "pre_compact" | "PreCompact" => Some(Self::PreCompact),
             _ => None,
         }
     }
@@ -42,11 +45,48 @@ impl EventKind {
     pub fn is_blocking(self) -> bool {
         matches!(self, Self::PreToolUse | Self::UserPromptSubmit | Self::Stop)
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PreToolUse => "pre_tool_use",
+            Self::PostToolUse => "post_tool_use",
+            Self::UserPromptSubmit => "user_prompt_submit",
+            Self::Stop => "stop",
+            Self::SessionStart => "session_start",
+            Self::SessionEnd => "session_end",
+            Self::Notification => "notification",
+            Self::PreCompact => "pre_compact",
+        }
+    }
+}
+
+/// Agent contracts verified against each vendor's public hook reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agent {
+    Claude,
+    Codex,
+}
+
+impl Agent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    pub fn supports(self, kind: EventKind) -> bool {
+        self != Self::Codex || kind != EventKind::Notification
+    }
 }
 
 /// A hook payload the coding agent sends on stdin.
 #[derive(Debug, Default, Deserialize)]
 pub struct AgentEvent {
+    #[serde(default)]
+    pub transcript_path: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
     #[serde(default)]
     pub session_id: String,
     #[serde(default, alias = "hook_event_name")]

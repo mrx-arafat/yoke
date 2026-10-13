@@ -1,0 +1,478 @@
+<html lang="en" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="yoke-token" content="REDACTED"><meta name="yoke-csrf" content="REDACTED"><meta name="description" content="Yoke local review console: decisions, plans, memory and evidence."><title>Decisions - Yoke</title><link rel="icon" href="/icon.svg?token=REDACTED"><link rel="stylesheet" href="/assets/console.css?token=REDACTED"><script defer="" src="/assets/console.js?token=REDACTED"></script><style>:root {
+  color-scheme: light;
+  --paper: oklch(95% .025 285); --surface: oklch(100% 0 0); --well: oklch(96% .015 285); --mint:oklch(96% .022 165);
+  --ink: oklch(24% .035 275); --muted: oklch(43% .03 275); --line: oklch(87% .025 280);
+  --accent: oklch(43% .15 280); --accent-ink: oklch(100% 0 0); --accent-soft: oklch(92% .045 280);
+  --chart-lavender:oklch(79% .09 280); --chart-sage:oklch(78% .09 145); --chart-sky:oklch(79% .09 240); --chart-amber:oklch(83% .1 80);
+  --danger: oklch(40% .13 28); --danger-soft: oklch(94% .025 28); --warn: oklch(39% .08 75); --warn-soft: oklch(94% .045 85);
+  --space-1:.25rem; --space-2:.5rem; --space-3:.75rem; --space-4:1rem; --space-5:1.5rem; --space-6:2rem; --space-7:3rem; --space-8:4rem;
+  --text-small:.875rem; --text-base:1rem; --text-title:clamp(1.75rem,3vw,2.25rem); --radius:1.5rem;
+  --shadow:0 .75rem 3rem oklch(24% .035 275 / .1); --motion:140ms;
+  --body:"Avenir Next","Trebuchet MS",sans-serif; --display:var(--body); --mono:"SFMono-Regular",Consolas,monospace;
+}
+@media(prefers-color-scheme:dark) { :root:not([data-theme="light"]) {
+  color-scheme:dark; --paper:oklch(19% .025 280); --surface:oklch(24% .026 280); --well:oklch(28% .03 280); --mint:oklch(21% .025 190);
+  --ink:oklch(96% .012 280); --muted:oklch(78% .025 280); --line:oklch(42% .035 280);
+  --accent:oklch(82% .085 280); --accent-ink:oklch(20% .045 280); --accent-soft:oklch(33% .065 280);
+  --danger:oklch(82% .1 28); --danger-soft:oklch(29% .045 28); --warn:oklch(84% .09 85); --warn-soft:oklch(30% .04 75);
+} }
+:root[data-theme="dark"] {
+  color-scheme:dark; --paper:oklch(19% .025 280); --surface:oklch(24% .026 280); --well:oklch(28% .03 280); --mint:oklch(21% .025 190);
+  --ink:oklch(96% .012 280); --muted:oklch(78% .025 280); --line:oklch(42% .035 280);
+  --accent:oklch(82% .085 280); --accent-ink:oklch(20% .045 280); --accent-soft:oklch(33% .065 280);
+  --danger:oklch(82% .1 28); --danger-soft:oklch(29% .045 28); --warn:oklch(84% .09 85); --warn-soft:oklch(30% .04 75);
+}
+* { box-sizing:border-box; }
+body { margin:0; background:linear-gradient(115deg,var(--paper),var(--mint)); background-attachment:fixed; color:var(--ink); font:var(--text-base)/1.5 var(--body); }
+button,input,select { font:inherit; }
+a { color:var(--accent); text-underline-offset:.2em; }
+button,.button { display:inline-flex; align-items:center; justify-content:center; gap:.5rem; min-height:2.75rem; padding:.5rem 1rem; border:1px solid var(--accent); border-radius:.875rem; background:var(--accent); color:var(--accent-ink); text-decoration:none; cursor:pointer; font-weight:600; }
+button:hover,.button:hover { filter:brightness(.94); }
+button:disabled { opacity:.65; cursor:wait; }
+.quiet { background:transparent; border-color:var(--line); color:var(--ink); }
+input,select { min-width:0; min-height:2.75rem; padding:.5rem .75rem; border:1px solid var(--line); border-radius:var(--radius); background:var(--surface); color:var(--ink); }
+select { appearance:none; border-radius:.875rem; padding-right:2.5rem; cursor:pointer; }
+label:has(> select) { position:relative; }
+label:has(> select)::after { content:""; position:absolute; right:1rem; bottom:1.125rem; width:.45rem; height:.45rem; border-right:2px solid var(--accent); border-bottom:2px solid var(--accent); transform:rotate(45deg); pointer-events:none; }
+select:hover { border-color:var(--accent); }
+select:focus-visible { border-color:var(--accent); outline:3px solid var(--accent); outline-offset:3px; }
+option { background:var(--surface); color:var(--ink); }
+input::placeholder { color:var(--muted); opacity:1; }
+:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+[hidden][hidden] { display:none; }
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
+.skip { position:fixed; z-index:10; top:-5rem; left:1rem; background:var(--surface); padding:1rem; }
+.skip:focus { top:1rem; }
+.rail { padding:1rem; }
+.brand { display:flex; gap:.75rem; align-items:center; width:fit-content; color:var(--ink); font:600 1.5rem/1 var(--body); text-decoration:none; }
+.brand small { display:block; margin-top:.4rem; color:var(--muted); font:400 .75rem/1.2 var(--body); }
+.brand-mark { width:2.5rem; height:2.5rem; display:grid; place-items:center; color:var(--accent); }
+.brand-mark svg { width:100%; height:100%; }
+.rail nav { display:flex; overflow:auto; gap:.25rem; margin-top:1rem; }
+.rail nav a { display:flex; min-height:2.75rem; align-items:center; gap:.5rem; padding:.5rem .75rem; color:var(--accent); text-decoration:none; white-space:nowrap; border-radius:var(--radius); }
+.nav-icon { width:1.5rem; height:1.5rem; flex-shrink:0; }
+.rail nav a[aria-current] { background:var(--accent-soft); color:var(--accent); font-weight:700; }
+.rail nav kbd,.rail-bottom { display:none; }
+kbd { font:.75rem/1.3 var(--mono); border:1px solid var(--line); border-radius:.2rem; padding:.15rem .3rem; white-space:nowrap; }
+.workspace { min-width:0; }
+.topbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.75rem; padding:1rem; }
+.project { font-family:var(--mono); font-size:.875rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+.tools { display:flex; align-items:center; gap:.5rem; min-width:0; }
+.tools button { background:var(--surface); color:var(--ink); border-color:var(--line); font-size:.875rem; padding:.5rem .75rem; }
+.tools kbd { display:none; }
+.connection { color:var(--accent); font-size:.8125rem; }
+.connection.offline { color:var(--warn); }
+.theme-label select { max-width:6rem; font-size:.875rem; }
+main { padding:2rem 1rem; max-width:100rem; margin:auto; min-height:70vh; }
+.page-heading { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:2rem; gap:1rem; }
+.kicker { font-size:.8125rem; margin:0 0 .75rem; color:var(--muted); }
+h1 { font:600 var(--text-title)/1.2 var(--display); letter-spacing:-.035em; margin:0 0 .75rem; overflow-wrap:anywhere; }
+h2 { font:600 1.25rem/1.3 var(--display); margin:0 0 1rem; overflow-wrap:anywhere; }
+h3 { font-size:1rem; margin:1.5rem 0 .5rem; }
+.lede { color:var(--muted); max-width:48rem; margin:0; }
+.section-index { display:none; }
+.ledger { background:var(--surface); border-radius:var(--radius); padding:.5rem 1rem; }
+.filters { display:flex; flex-wrap:wrap; align-items:end; gap:.75rem; padding:1rem; background:var(--well); border:1px solid var(--line); border-radius:var(--radius); }
+.filters label { display:flex; flex-direction:column; gap:.35rem; font-size:.875rem; min-width:0; flex:1 1 10rem; }
+.filters .grow { flex:2 1 12rem; }
+.filters input,.filters select { width:100%; }
+.list-caption { display:flex; justify-content:space-between; gap:1rem; margin:1.75rem 0 .75rem; font-size:.8125rem; color:var(--muted); }
+.ledger { border-top:1px solid var(--line); }
+.ledger-labels { display:none; }
+.record { border-bottom:1px solid var(--line); }
+.record>summary { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:.75rem; padding:1rem .5rem; cursor:pointer; list-style:none; }
+.record>summary::-webkit-details-marker { display:none; }
+.record>summary:hover { background:var(--well); }
+.record[open]>summary { background:var(--accent-soft); }
+.record strong { display:block; font-size:.9375rem; font-weight:600; overflow-wrap:anywhere; }
+.record small { color:var(--muted); display:block; font-family:var(--mono); font-size:.8125rem; overflow-wrap:anywhere; }
+.event-cell { display:flex; flex-direction:column; gap:.4rem; align-items:start; }
+.badge { display:inline-flex; align-items:center; min-height:1.5rem; padding:.1rem .45rem; border-radius:.2rem; font:600 .75rem/1.4 var(--mono); background:var(--well); color:var(--ink); white-space:nowrap; }
+.allow,.done,.approved { background:var(--accent-soft); color:var(--accent); }
+.deny,.error,.stalled { background:var(--danger-soft); color:var(--danger); }
+.would_deny,.waiting,.checking { background:var(--warn-soft); color:var(--warn); }
+.mode,time { font: .8125rem/1.5 var(--mono); color:var(--muted); }
+.record-detail { padding:1.5rem; background:var(--surface); border-top:1px solid var(--line); }
+.record-detail>p:first-child { margin-top:0; }
+.facts { display:grid; grid-template-columns:5rem minmax(0,1fr); gap:.5rem; font-size:.875rem; }
+dt { color:var(--muted); } dd { margin:0; overflow-wrap:anywhere; }
+pre { max-width:100%; overflow:auto; padding:1rem; background:var(--well); border-radius:var(--radius); font:.8125rem/1.6 var(--mono); }
+code { font-family:var(--mono); overflow-wrap:anywhere; }
+details>summary { min-height:2.75rem; padding:.6rem 0; cursor:pointer; }
+.pagination { display:flex; justify-content:space-between; gap:1rem; margin-top:1.5rem; }
+.empty { padding:3rem 1.5rem; text-align:center; border:1px dashed var(--line); border-radius:var(--radius); background:var(--surface); }
+.empty-mark { font:3rem var(--display); color:var(--accent); margin-bottom:1rem; }
+.empty p { max-width:36rem; margin:0 auto 1.5rem; color:var(--muted); }
+.empty code { font-size:.875rem; }
+.footer { display:flex; justify-content:space-between; flex-wrap:wrap; gap:1rem; border-top:1px solid var(--line); padding:1rem 2rem; font-size:.75rem; color:var(--muted); }
+.notice { display:flex; justify-content:space-between; align-items:center; gap:1rem; padding:.75rem 1.5rem; background:var(--accent-soft); color:var(--accent); }
+.notice button { min-height:2.75rem; font-size:.875rem; }
+.scope { font-size:.875rem; overflow-wrap:anywhere; }
+.scope a { display:inline-flex; min-height:2.75rem; align-items:center; margin-left:.5rem; }
+dialog { max-width:min(38rem,calc(100% - 2rem)); width:100%; max-height:85vh; overflow:auto; border:1px solid var(--line); border-radius:.75rem; background:var(--surface); color:var(--ink); padding:1.5rem; box-shadow:var(--shadow); }
+dialog::backdrop { background:oklch(10% .01 180 / .6); }
+.dialog-heading { display:flex; align-items:start; justify-content:space-between; gap:1rem; }
+.dialog-heading button { background:transparent; color:var(--ink); border-color:var(--line); min-width:2.75rem; padding:.25rem; }
+#command-search { width:100%; margin: .5rem 0 1rem; }
+.command-list { display:grid; gap:.25rem; }
+.command-list button { justify-content:space-between; background:transparent; color:var(--ink); border:0; text-align:left; }
+.command-list button:hover,.command-list button:focus { background:var(--accent-soft); color:var(--accent); }
+.muted { color:var(--muted); font-size:.875rem; }
+.shortcuts { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:1rem; }
+.toast { position:fixed; bottom:1.5rem; left:50%; transform:translateX(-50%); z-index:8; max-width:calc(100% - 2rem); padding:1rem 1.5rem; background:var(--ink); color:var(--paper); border-radius:var(--radius); box-shadow:var(--shadow); }
+.toast button { margin-left:1rem; border-color:currentColor; color:inherit; background:transparent; }
+.skeleton { min-height:2.5rem; margin:1rem 0; background:var(--well); border-radius:var(--radius); animation:pulse 1s ease-in-out infinite alternate; }
+@keyframes pulse { to { opacity:.45; } }
+.actions { display:flex; flex-wrap:wrap; align-items:center; gap:.75rem; margin:1rem 0; }
+.panel { padding:1.5rem; border:1px solid var(--surface); border-radius:var(--radius); background:var(--surface); margin:1.25rem 0; min-width:0; }
+.table-wrap { overflow:auto; max-width:100%; }
+table { width:100%; border-collapse:collapse; font-size:.875rem; }
+th,td { padding:.75rem; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+th { font-weight:600; color:var(--muted); } td { overflow-wrap:anywhere; }
+.prose { max-width:72ch; line-height:1.7; } .prose img { max-width:100%; }
+.prose h1 { font-size:2rem; } .prose h2 { margin-top:2rem; }
+.confirm { padding:1rem; border:1px solid var(--warn); background:var(--warn-soft); border-radius:var(--radius); margin:1rem 0; }
+.danger-button { background:var(--danger); color:var(--paper); border-color:var(--danger); }
+.diff { font:.8125rem/1.6 var(--mono); overflow:auto; border:1px solid var(--line); }
+.diff-line { display:block; padding:0 .75rem; white-space:pre-wrap; overflow-wrap:anywhere; }
+.diff-add { background:var(--accent-soft); color:var(--accent); } .diff-remove { background:var(--danger-soft); color:var(--danger); }
+.diff[data-mode="split"] .diff-pair { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+.diff-pair > span { min-width:0; }
+.diff[data-mode="split"] .diff-pair > span + span { border-left:1px solid var(--line); }
+.confirmation { flex-basis:100%; border:1px solid var(--line); padding:1rem; margin-top:1rem; background:var(--well); overflow-wrap:anywhere; }
+.action-zone { flex-wrap:wrap; }
+.table-scroll { overflow:auto; }
+.chart-row { display:grid; grid-template-columns:minmax(0,1fr); gap:.5rem; margin:1rem 0; }
+.chart-row > span { overflow-wrap:anywhere; font-size:.875rem; }
+.chart-row svg { width:100%; height:1.5rem; }
+.chart-input { fill:var(--chart-lavender); } .chart-output { fill:var(--chart-sage); }
+.token-keyword { color:var(--accent); font-weight:700; } .token-string { color:var(--danger); } .token-number { color:var(--warn); }
+.chart { width:100%; max-height:18rem; color:var(--accent); } .chart rect { fill:currentColor; }
+.chart text { fill:var(--ink); font:12px var(--body); }
+#lightbox { max-width:calc(100% - 2rem); } #lightbox img { display:block; max-width:100%; max-height:65vh; margin:auto; object-fit:contain; }
+@media(min-width:48rem) {
+  .app { display:grid; grid-template-columns:7rem minmax(0,1fr); }
+  .rail { position:sticky; top:0; height:100vh; display:flex; flex-direction:column; align-items:center; padding:1.5rem .75rem; }
+  .brand { flex-direction:column; font-size:1rem; } .brand small { display:none; }
+  .rail nav { flex-direction:column; margin-top:2rem; overflow:visible; padding:.5rem; background:var(--surface); border-radius:2rem; width:100%; }
+  .rail nav a { flex-direction:column; justify-content:center; gap:.25rem; padding:.75rem .25rem; font-size:.6875rem; white-space:normal; text-align:center; }
+  .rail nav a[aria-current] { background:var(--accent); color:var(--accent-ink); }
+  .rail nav kbd { display:none; }
+  .rail-bottom { display:block; margin-top:auto; color:var(--muted); font-size:.6875rem; text-align:center; }
+  .rail-bottom p { display:none; }
+  .rail-bottom button { width:100%; font-size:.75rem; padding:.5rem; }
+  .local-mark { color:var(--accent); font-weight:600; }
+  .topbar { padding:1rem 2rem; } .tools kbd { display:inline; }
+  main { padding:1.5rem 2rem; }
+  .section-index { display:none; }
+  .ledger-labels,.record>summary { display:grid; grid-template-columns:minmax(0,2fr) minmax(0,1.1fr) minmax(0,.7fr) minmax(0,1fr); gap:1rem; }
+  .ledger-labels { padding:.75rem .5rem; color:var(--muted); font-size:.75rem; border-bottom:1px solid var(--line); }
+  .record>summary { padding:1rem .5rem; align-items:center; }
+}
+@media(min-width:80rem) { main { padding:2rem; } }
+@media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none; transition:none; scroll-behavior:auto; } }
+</style></head><body><a class="skip" href="#main">Skip to content</a><div class="app"><aside class="rail"><a class="brand" data-nav="" href="/decisions?token=REDACTED"><span class="brand-mark" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <rect width="32" height="32" rx="9" fill="#45439b"></rect>
+  <path d="M8 8.5c0 4.7 3.1 8 8 8s8-3.3 8-8M16 16.5v2.25c0 3.75-2.3 6-6 6" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"></path>
+</svg>
+</span><span>yoke<small>Local workbench</small></span></a><nav aria-label="Workspace"><a data-nav="" href="/decisions?token=REDACTED" title="Decisions" aria-current="page"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"></rect><path d="m7 8 1 1 2-2m3 1h4m-10 5 1 1 2-2m3 1h4m-10 5h10"></path></svg><span>Decisions</span><kbd>d</kbd></a><a data-nav="" href="/sessions?token=REDACTED" title="Sessions"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="4"></rect><path d="m7 9 3 3-3 3m6 0h4"></path></svg><span>Sessions</span><kbd>s</kbd></a><a data-nav="" href="/plans?token=REDACTED" title="Plans"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="3"></rect><path d="M9 4V2h6v2M9 10h6m-6 4h6m-6 4h3"></path></svg><span>Plans</span><kbd>p</kbd></a><a data-nav="" href="/memory?token=REDACTED" title="Memory"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3a4 4 0 0 0-4 4v1a4 4 0 0 0-2 7 4 4 0 0 0 6 6h3V3H9Zm6 0a4 4 0 0 1 4 4v1a4 4 0 0 1 2 7 4 4 0 0 1-6 6h-3V3h3ZM7 8l5 3m-5 5 5-2m5-6-5 3m5 5-5-2"></path></svg><span>Memory</span><kbd>m</kbd></a><a data-nav="" href="/trust?token=REDACTED" title="Trust &amp; config"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 8 3v6c0 5-4 9-8 11-4-2-8-6-8-11V5l8-3Z"></path><path d="m8 12 3 3 5-6"></path></svg><span>Trust &amp; config</span><kbd>t</kbd></a><a data-nav="" href="/usage?token=REDACTED" title="Usage"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 3v17h17M8 15v-4m5 4V6m5 9V9"></path></svg><span>Usage</span><kbd>u</kbd></a></nav><div class="rail-bottom"><span class="local-mark">Local only</span><p>Your evidence stays on this machine.</p><button id="help-open" class="quiet" type="button">Keyboard shortcuts <kbd>?</kbd></button></div></aside><div class="workspace"><header class="topbar"><span class="project" title="/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project">project</span><div class="tools"><span id="connection" class="connection" role="status">Live</span><label class="theme-label"><span class="sr-only">Color theme</span><select id="theme" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button id="palette-open" type="button" aria-label="Open command palette">Commands <kbd>Cmd K</kbd></button></div></header><div id="notice" class="notice" hidden=""><span>New activity is available.</span><button type="button" data-refresh="">Refresh view</button></div><div id="view"><main id="main" tabindex="-1" data-page="decisions"><div class="page-heading"><div><p class="kicker">Workspace / Decisions</p><h1>Decisions</h1><p class="lede">Every gate, every outcome. Follow the evidence behind your agent's next move.</p></div><span class="section-index" aria-hidden="true">-&gt;</span></div><form class="filters" data-filter="" action="/decisions" method="get"><input type="hidden" name="token" value="REDACTED"><input type="hidden" name="session" value="fixture-session"><label>Outcome<select name="outcome"><option value="">All outcomes</option><option value="allow" selected="">Allowed</option><option value="deny">Denied</option><option value="would_deny">Would deny</option><option value="rewrite">Rewritten</option><option value="error">Errors</option></select></label><label class="grow">Tool name<input name="tool" value="" placeholder="Filter by exact tool name"></label><button type="submit">Apply filters</button><a data-nav="" class="button quiet" href="/decisions?token=REDACTED">Reset</a></form><div class="list-caption"><span>Decision ledger</span><span>50 records · newest first</span></div><p class="scope">Session: <code>fixture-session</code> <a data-nav="" href="/decisions?token=REDACTED">Clear session filter</a></p><div class="ledger"><div class="ledger-labels" aria-hidden="true"><span>Outcome / event</span><span>Agent / tool</span><span>Mode</span><span>Recorded</span></div><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883907" datetime="2026-10-13T09:31:47.000Z">13 Oct, 15:31:47</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883906" datetime="2026-10-13T09:31:46.000Z">13 Oct, 15:31:46</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883904" datetime="2026-10-13T09:31:44.000Z">13 Oct, 15:31:44</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883901" datetime="2026-10-13T09:31:41.000Z">13 Oct, 15:31:41</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883900" datetime="2026-10-13T09:31:40.000Z">13 Oct, 15:31:40</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883898" datetime="2026-10-13T09:31:38.000Z">13 Oct, 15:31:38</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883895" datetime="2026-10-13T09:31:35.000Z">13 Oct, 15:31:35</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883894" datetime="2026-10-13T09:31:34.000Z">13 Oct, 15:31:34</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883892" datetime="2026-10-13T09:31:32.000Z">13 Oct, 15:31:32</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883889" datetime="2026-10-13T09:31:29.000Z">13 Oct, 15:31:29</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883888" datetime="2026-10-13T09:31:28.000Z">13 Oct, 15:31:28</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883886" datetime="2026-10-13T09:31:26.000Z">13 Oct, 15:31:26</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883883" datetime="2026-10-13T09:31:23.000Z">13 Oct, 15:31:23</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883882" datetime="2026-10-13T09:31:22.000Z">13 Oct, 15:31:22</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883880" datetime="2026-10-13T09:31:20.000Z">13 Oct, 15:31:20</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883877" datetime="2026-10-13T09:31:17.000Z">13 Oct, 15:31:17</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883876" datetime="2026-10-13T09:31:16.000Z">13 Oct, 15:31:16</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883874" datetime="2026-10-13T09:31:14.000Z">13 Oct, 15:31:14</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883871" datetime="2026-10-13T09:31:11.000Z">13 Oct, 15:31:11</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883870" datetime="2026-10-13T09:31:10.000Z">13 Oct, 15:31:10</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883868" datetime="2026-10-13T09:31:08.000Z">13 Oct, 15:31:08</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883865" datetime="2026-10-13T09:31:05.000Z">13 Oct, 15:31:05</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883864" datetime="2026-10-13T09:31:04.000Z">13 Oct, 15:31:04</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883862" datetime="2026-10-13T09:31:02.000Z">13 Oct, 15:31:02</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883859" datetime="2026-10-13T09:30:59.000Z">13 Oct, 15:30:59</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883858" datetime="2026-10-13T09:30:58.000Z">13 Oct, 15:30:58</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883856" datetime="2026-10-13T09:30:56.000Z">13 Oct, 15:30:56</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883853" datetime="2026-10-13T09:30:53.000Z">13 Oct, 15:30:53</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883852" datetime="2026-10-13T09:30:52.000Z">13 Oct, 15:30:52</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883850" datetime="2026-10-13T09:30:50.000Z">13 Oct, 15:30:50</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883847" datetime="2026-10-13T09:30:47.000Z">13 Oct, 15:30:47</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883846" datetime="2026-10-13T09:30:46.000Z">13 Oct, 15:30:46</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883844" datetime="2026-10-13T09:30:44.000Z">13 Oct, 15:30:44</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883841" datetime="2026-10-13T09:30:41.000Z">13 Oct, 15:30:41</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883840" datetime="2026-10-13T09:30:40.000Z">13 Oct, 15:30:40</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883838" datetime="2026-10-13T09:30:38.000Z">13 Oct, 15:30:38</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883835" datetime="2026-10-13T09:30:35.000Z">13 Oct, 15:30:35</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883834" datetime="2026-10-13T09:30:34.000Z">13 Oct, 15:30:34</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883832" datetime="2026-10-13T09:30:32.000Z">13 Oct, 15:30:32</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883829" datetime="2026-10-13T09:30:29.000Z">13 Oct, 15:30:29</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883828" datetime="2026-10-13T09:30:28.000Z">13 Oct, 15:30:28</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883826" datetime="2026-10-13T09:30:26.000Z">13 Oct, 15:30:26</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883823" datetime="2026-10-13T09:30:23.000Z">13 Oct, 15:30:23</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883822" datetime="2026-10-13T09:30:22.000Z">13 Oct, 15:30:22</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883820" datetime="2026-10-13T09:30:20.000Z">13 Oct, 15:30:20</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883817" datetime="2026-10-13T09:30:17.000Z">13 Oct, 15:30:17</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883816" datetime="2026-10-13T09:30:16.000Z">13 Oct, 15:30:16</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Edit</small></span><span class="mode">observe</span><time data-time="1791883814" datetime="2026-10-13T09:30:14.000Z">13 Oct, 15:30:14</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>claude</strong><small>Edit</small></span><span class="mode">enforce</span><time data-time="1791883811" datetime="2026-10-13T09:30:11.000Z">13 Oct, 15:30:11</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details><details class="record"><summary data-row=""><span class="event-cell"><span class="badge allow">allow</span><strong>pre_tool_use</strong></span><span><strong>codex</strong><small>Bash</small></span><span class="mode">observe</span><time data-time="1791883810" datetime="2026-10-13T09:30:10.000Z">13 Oct, 15:30:10</time></summary><div class="record-detail"><p class="reason">No intervention was needed.</p><dl class="facts"><dt>Session</dt><dd>fixture-session</dd><dt>Project</dt><dd>/private/var/folders/hd/w62gtt492l9bqnn9gc6bwsy00000gn/T/yoke-console-w5-n4Afvl/project</dd></dl><details><summary>Gate results</summary><pre><code>[
+  {
+    "ms": 4,
+    "name": "protected-work",
+    "result": "allow"
+  }
+]</code></pre></details><details><summary>Redacted payload</summary><pre><code>{"tool_input":{"command":"cargo test -p example focused_case"}}</code></pre></details></div></details></div><nav class="pagination" aria-label="Decision pages"><a class="button" data-nav="" href="/decisions?token=REDACTED&amp;before=99907&amp;outcome=allow&amp;tool=&amp;session=fixture-session">Older decisions -&gt;</a></nav></main></div><footer class="footer"><span>Evidence before confidence.</span><span>Yoke · Private by design</span></footer></div></div><div id="announcement" class="sr-only" role="status" aria-live="polite">View updated</div><div id="toast" class="toast" role="status" hidden=""></div><dialog id="palette" aria-labelledby="palette-title"><div class="dialog-heading"><h2 id="palette-title">Go to your work</h2><button type="button" data-close="" aria-label="Close command palette">x</button></div><label class="sr-only" for="command-search">Find a page or action</label><input id="command-search" placeholder="Find a page..." autocomplete="off" style=""><div class="command-list"><button type="button" data-destination="/decisions?token=REDACTED"><span>Decisions</span><kbd>g d</kbd></button><button type="button" data-destination="/sessions?token=REDACTED"><span>Sessions</span><kbd>g s</kbd></button><button type="button" data-destination="/plans?token=REDACTED"><span>Plans</span><kbd>g p</kbd></button><button type="button" data-destination="/memory?token=REDACTED"><span>Memory</span><kbd>g m</kbd></button><button type="button" data-destination="/trust?token=REDACTED"><span>Trust &amp; config</span><kbd>g t</kbd></button><button type="button" data-destination="/usage?token=REDACTED"><span>Usage</span><kbd>g u</kbd></button></div><p class="muted">Up Down to move · Enter to open · Escape to close</p></dialog><dialog id="help" aria-labelledby="help-title"><div class="dialog-heading"><h2 id="help-title">Keep your hands on the keyboard</h2><button type="button" data-close="" aria-label="Close shortcuts">x</button></div><dl class="shortcuts"><dt>Command palette</dt><dd><kbd>Cmd / Ctrl K</kbd></dd><dt>Move through records</dt><dd><kbd>j</kbd> <kbd>k</kbd></dd><dt>Open focused record</dt><dd><kbd>Enter</kbd></dd><dt>Go to page</dt><dd><kbd>g</kbd> then <kbd>d / s / p / m / t / u</kbd></dd><dt>Close a dialog</dt><dd><kbd>Esc</kbd></dd></dl></dialog><dialog id="lightbox" aria-label="Check screenshot"><div class="dialog-heading"><p id="image-caption"></p><button type="button" data-close="" aria-label="Close screenshot">x</button></div><img id="lightbox-image" alt="Check evidence screenshot"><div class="actions"><button type="button" id="image-prev">Previous</button><button type="button" id="image-next">Next</button></div></dialog></body></html>

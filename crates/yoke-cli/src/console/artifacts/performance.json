@@ -1,0 +1,16 @@
+{
+  "sessionsBefore": {
+    "clickToFrameMs": 324.2,
+    "fetchMs": 310.2
+  },
+  "sessionsAfter": {
+    "clickToFrameMs": 18.3,
+    "fetchMs": 7.1,
+    "responseMs": 6.5,
+    "decisions": 100006
+  },
+  "firstPaintPrototypeMs": 120,
+  "firstPaintWithAxeInitMs": 204,
+  "lighthouse": "unproven",
+  "approvedBaselineComparison": "unproven"
+}
