@@ -4,6 +4,7 @@ The release workflow builds all four supported targets on native GitHub runners 
 Each target produces `yoke-<target>`, `yoke-<target>.sha256`, a redistribution archive `yoke-<target>.tar.gz`, and `THIRD_PARTY_LICENSES-<target>`.
 The archive and notice asset each also have a `.sha256` file.
 The checksum format is one lowercase SHA-256 digest, two spaces, and the exact asset basename.
+Packaging rejects empty binaries and binaries larger than 64 MiB before creating the output directory, matching the updater's accepted executable size.
 
 The archive contains `yoke`, `LICENSE-MIT`, `LICENSE-APACHE`, and `THIRD_PARTY_LICENSES`.
 Redistribute the archive so license notices travel with the executable.

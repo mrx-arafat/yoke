@@ -112,16 +112,12 @@ fn agent_status(options: &InstallOptions, agent: Agent, project: &Path) -> Agent
             );
         }
         Agent::Codex => {
-            let disabled = files::read(&options.codex_config)
-                .and_then(|raw| features::hooks_disabled(raw.as_deref().unwrap_or("")));
-            match disabled {
-                Ok(false) => {}
-                Ok(true) => status.problems.push(format!(
-                    "Codex hooks are turned off by [features] in {}",
-                    options.codex_config.display()
-                )),
+            let enabled = files::read(&options.codex_config)
+                .and_then(|raw| features::check_enabled(raw.as_deref().unwrap_or("")));
+            match enabled {
+                Ok(()) => {}
                 Err(error) => status.problems.push(format!(
-                    "cannot read {}: {error:#}",
+                    "Codex hooks cannot run with {}: {error:#}",
                     options.codex_config.display()
                 )),
             }

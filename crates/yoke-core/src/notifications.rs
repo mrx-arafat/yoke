@@ -255,9 +255,10 @@ fn sync_bounded(
         plans(tx, now)?;
         configs(tx, loaded, now)?;
         let cutoff = now.saturating_sub(i64::from(loaded.config.log.retention_days) * 86_400);
+        let project = scope(&loaded.project_root)?;
         tx.execute(
-            &format!("DELETE FROM notifications WHERE (kind IN ({EVENT_KINDS}) AND last_seen < ?1) OR resolved_at < ?1"),
-            [cutoff],
+            &format!("DELETE FROM notifications WHERE project IN (?1,?2,'') AND ((kind IN ({EVENT_KINDS}) AND last_seen < ?3) OR resolved_at < ?3)"),
+            params![project.identity, project.legacy, cutoff],
         )?;
         Ok(())
     })?;
@@ -310,20 +311,30 @@ pub fn list(
     unread_only: bool,
     limit: usize,
 ) -> Result<Vec<Notification>> {
+    let project = scope(project)?;
     let mut statement = store.connection().prepare(
         "SELECT id,kind,project,subject,plan_id,title,detail,count,first_seen,last_seen,state,acknowledged_at,actor,resolved_at
-         FROM notifications WHERE project IN (?1,'') AND (?2=0 OR state='unread')
-         ORDER BY state='unread' DESC,last_seen DESC,id DESC LIMIT ?3",
+         FROM notifications WHERE project IN (?1,?2,'') AND (?3=0 OR state='unread')
+         ORDER BY state='unread' DESC,last_seen DESC,id DESC LIMIT ?4",
     )?;
     let rows = statement.query_map(
-        params![scope(project)?, unread_only, limit.min(1000) as i64],
+        params![
+            project.identity,
+            project.legacy,
+            unread_only,
+            limit.min(1000) as i64
+        ],
         |row| {
             let kind: String = row.get(1)?;
             Ok(Notification {
                 id: row.get(0)?,
                 help: help_for(&kind).id,
                 kind,
-                project: row.get(2)?,
+                project: if row.get::<_, String>(2)?.is_empty() {
+                    String::new()
+                } else {
+                    project.display.clone()
+                },
                 subject: row.get(3)?,
                 plan_id: row.get(4)?,
                 title: row.get(5)?,
@@ -342,9 +353,10 @@ pub fn list(
 }
 
 pub fn unread_count(store: &Store, project: &Path) -> Result<i64> {
+    let project = scope(project)?;
     Ok(store.connection().query_row(
-        "SELECT count(*) FROM notifications WHERE project IN (?1,'') AND state='unread'",
-        [scope(project)?],
+        "SELECT count(*) FROM notifications WHERE project IN (?1,?2,'') AND state='unread'",
+        params![project.identity, project.legacy],
         |row| row.get(0),
     )?)
 }
@@ -363,8 +375,8 @@ pub fn acknowledge(store: &Store, project: &Path, target: &Target, now: i64) -> 
             for id in ids {
                 let exists = tx
                     .query_row(
-                        "SELECT 1 FROM notifications WHERE id=?1 AND project IN (?2,'')",
-                        params![id, project],
+                        "SELECT 1 FROM notifications WHERE project IN (?1,?2,'') AND id=?3",
+                        params![project.identity, project.legacy, id],
                         |_| Ok(()),
                     )
                     .optional()?;
@@ -380,17 +392,37 @@ pub fn acknowledge(store: &Store, project: &Path, target: &Target, now: i64) -> 
             Ok(changed)
         }
         Target::All => Ok(tx.execute(
-            "UPDATE notifications SET state='acknowledged',acknowledged_at=?2,actor='human'
-             WHERE project IN (?1,'') AND state='unread'",
-            params![project, now],
+            "UPDATE notifications SET state='acknowledged',acknowledged_at=?3,actor='human'
+             WHERE project IN (?1,?2,'') AND state='unread'",
+            params![project.identity, project.legacy, now],
         )?),
     })
 }
 
-fn scope(project: &Path) -> Result<String> {
-    Ok(redact(
-        project.to_str().context("project path must be UTF-8")?,
-    ))
+struct ProjectScope {
+    identity: String,
+    legacy: Option<String>,
+    display: String,
+}
+
+fn scope(project: &Path) -> Result<ProjectScope> {
+    ensure!(project.is_absolute(), "project path must be absolute");
+    let raw = project.to_str().context("project path must be UTF-8")?;
+    let display = redact(raw);
+    Ok(ProjectScope {
+        identity: project_identity(raw),
+        // A redacted legacy path cannot establish which original project owned it.
+        legacy: (display == raw && !raw.contains("[REDACTED]")).then(|| raw.to_owned()),
+        display,
+    })
+}
+
+fn project_identity(project: &str) -> String {
+    if project.is_empty() {
+        String::new()
+    } else {
+        format!("sha256:{:x}", Sha256::digest(project.as_bytes()))
+    }
 }
 
 /// How a repeated dedupe key changes an existing row.
@@ -418,6 +450,13 @@ struct Occurrence<'a> {
 }
 
 fn record(tx: &Transaction<'_>, row: &Occurrence<'_>, repeat: Repeat) -> Result<()> {
+    let project = project_identity(row.project);
+    // These keys identify an exact source (raw config path, plan id, or unambiguous decision
+    // path). Upgrade its legacy scope without changing acknowledgement or occurrence counts.
+    tx.execute(
+        "UPDATE notifications SET project=?1 WHERE key=?2 AND project<>?1",
+        params![project, row.key],
+    )?;
     let reopen = "state='unread',acknowledged_at=NULL,actor=NULL,resolved_at=NULL";
     let update = match repeat {
         Repeat::Reopen => format!("count=count+excluded.count,first_seen=min(first_seen,excluded.first_seen),last_seen=max(last_seen,excluded.last_seen),title=excluded.title,detail=excluded.detail,{reopen}"),
@@ -430,7 +469,7 @@ fn record(tx: &Transaction<'_>, row: &Occurrence<'_>, repeat: Repeat) -> Result<
         params![
             row.key,
             row.kind,
-            redact(row.project),
+            project,
             redact(row.subject),
             row.plan_id,
             cap(&row.title),
@@ -525,6 +564,10 @@ fn decisions(tx: &Transaction<'_>, from: i64, to: i64) -> Result<()> {
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (project, event, mode, reason, count, first, last) in errors {
+        // The decisions store already redacted this identity; its owner cannot be recovered.
+        if project.contains("[REDACTED]") {
+            continue;
+        }
         record(
             tx,
             &Occurrence {
@@ -558,6 +601,9 @@ fn decisions(tx: &Transaction<'_>, from: i64, to: i64) -> Result<()> {
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (project, count, last, event, tool, reason, first) in observed {
+        if project.contains("[REDACTED]") {
+            continue;
+        }
         let action = if tool.is_empty() {
             event
         } else {
@@ -626,6 +672,8 @@ fn checks(tx: &Transaction<'_>, from: i64, to: i64, now: i64) -> Result<()> {
             "void" => "was voided",
             other => other,
         };
+        // Redact before slicing: a tail can otherwise lose the key that identifies a secret.
+        let output = redact(&output);
         let mut start = output.len().saturating_sub(300);
         while !output.is_char_boundary(start) {
             start += 1;
@@ -739,6 +787,7 @@ fn plans(tx: &Transaction<'_>, now: i64) -> Result<()> {
 }
 
 fn configs(tx: &Transaction<'_>, loaded: &LoadedConfig, now: i64) -> Result<()> {
+    let project = scope(&loaded.project_root)?;
     let project_root = loaded
         .project_root
         .to_str()
@@ -819,9 +868,9 @@ fn configs(tx: &Transaction<'_>, loaded: &LoadedConfig, now: i64) -> Result<()> 
     }
     let open = {
         let mut statement = tx.prepare(
-            "SELECT id,key,subject FROM notifications WHERE kind IN ('config_stale','config_untrusted') AND resolved_at IS NULL",
+            "SELECT id,key,subject FROM notifications WHERE project IN (?1,?2,'') AND kind IN ('config_stale','config_untrusted') AND resolved_at IS NULL",
         )?;
-        let rows = statement.query_map([], |row| {
+        let rows = statement.query_map(params![project.identity, project.legacy], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,

@@ -11,7 +11,7 @@ use yoke_core::{
     trust::SnapshotStatus,
 };
 
-fn snapshot_state(status: &SnapshotStatus) -> (&'static str, &'static str) {
+pub(super) fn snapshot_state(status: &SnapshotStatus) -> (&'static str, &'static str) {
     let present = std::fs::symlink_metadata(&status.file).is_ok();
     match (
         status.trusted,

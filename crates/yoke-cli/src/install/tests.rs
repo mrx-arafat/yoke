@@ -3,6 +3,70 @@ use serde_json::{json, Value};
 use std::fs;
 use tempfile::TempDir;
 
+#[test]
+fn hook_diagnostics_reports_codex_managed_only_after_install() {
+    let (dir, options) = fixture();
+    install(&options).unwrap();
+    let installed = fs::read_to_string(&options.codex_config).unwrap();
+    features::check_enabled(&installed).unwrap();
+    let blocked = format!("allow_managed_hooks_only = true\n{installed}");
+    put(&options.codex_config, &blocked);
+    assert!(features::check_enabled(&blocked)
+        .unwrap_err()
+        .to_string()
+        .contains("managed hooks only"));
+    let codex = status(&options, dir.path())
+        .into_iter()
+        .find(|agent| agent.agent == "codex")
+        .unwrap();
+    assert!(codex.installed);
+    assert!(
+        codex.problems.iter().any(|problem| {
+            problem.contains("managed hooks only")
+                && problem.contains(&options.codex_config.display().to_string())
+        }),
+        "{:?}",
+        codex.problems
+    );
+    assert_eq!(fs::read_to_string(&options.codex_config).unwrap(), blocked);
+}
+
+#[test]
+fn hook_diagnostics_reports_only_missing_claude_post_tool_use_failure() {
+    let (_dir, options) = fixture();
+    install(&options).unwrap();
+    assert!(drift::managed(&options, Agent::Claude)
+        .unwrap()
+        .unwrap()
+        .stale
+        .is_empty());
+    let mut settings: Value =
+        serde_json::from_str(&fs::read_to_string(&options.claude_settings).unwrap()).unwrap();
+    settings["hooks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("PostToolUseFailure")
+        .unwrap();
+    let missing = settings.to_string();
+    put(&options.claude_settings, &missing);
+    let stale = drift::managed(&options, Agent::Claude)
+        .unwrap()
+        .unwrap()
+        .stale;
+    assert_eq!(stale.len(), 1, "{stale:?}");
+    assert_eq!(stale[0].0, "PostToolUseFailure");
+    assert!(stale[0].1.starts_with("managed hook missing or edited"));
+    assert!(drift::managed(&options, Agent::Codex)
+        .unwrap()
+        .unwrap()
+        .stale
+        .is_empty());
+    assert_eq!(
+        fs::read_to_string(&options.claude_settings).unwrap(),
+        missing
+    );
+}
+
 fn fixture() -> (TempDir, InstallOptions) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

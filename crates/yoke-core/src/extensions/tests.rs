@@ -164,3 +164,89 @@ fn scan_shows_programs_origins_and_key_names_but_no_values() {
         .detail
         .ends_with("the local mcp server definition wins"));
 }
+
+#[test]
+fn scan_does_not_walk_a_symlinked_starting_directory() {
+    let (temp, roots) = fixture();
+    let outside = temp.path().join("outside");
+    put(
+        &outside.join("nested/escape.md"),
+        "extension outside the scan",
+    );
+    fs::create_dir_all(&roots.claude_dir).unwrap();
+    let commands = roots.claude_dir.join("commands");
+    std::os::unix::fs::symlink(&outside, &commands).unwrap();
+
+    let report = scan(&roots);
+
+    assert!(!report.items.iter().any(|item| item.kind == Kind::Command));
+    assert!(report
+        .notes
+        .iter()
+        .any(|note| { note.path == commands && note.note == "symlinked directory not walked" }));
+}
+
+#[test]
+fn scan_redacts_metadata_without_conflating_distinct_names() {
+    let (_temp, roots) = fixture();
+    let name_a = "ghp_distinctalpha";
+    let name_b = "ghp_distinctbeta";
+    put(
+        &roots.claude_json,
+        &serde_json::json!({"mcpServers": {
+            name_a: {"env": {"ghp_keysecret": "value"}},
+            name_b: {"env": {"API_KEY": "value"}}
+        }})
+        .to_string(),
+    );
+
+    let report = scan(&roots);
+    let shown = serde_json::to_string(&report).unwrap();
+
+    assert!(report.drift.is_empty(), "{:#?}", report.drift);
+    for secret in [name_a, name_b, "ghp_keysecret"] {
+        assert!(!shown.contains(secret), "metadata leaked {secret}");
+    }
+    assert!(shown.contains("API_KEY"));
+
+    put(
+        &roots.project.join(".mcp.json"),
+        &serde_json::json!({"mcpServers": {name_a: {}}}).to_string(),
+    );
+    let report = scan(&roots);
+    assert_eq!(report.drift.len(), 1);
+    assert_eq!(report.drift[0].origins.len(), 2);
+    assert_eq!(report.drift[0].name, "[REDACTED]");
+}
+
+#[test]
+fn report_redacts_paths_and_link_notes_but_keeps_raw_origins() {
+    let (temp, roots) = fixture();
+    let user_agent = roots.claude_dir.join("agents/ghp_filenamealpha.md");
+    let project_agent = roots.project.join(".claude/agents/ghp_filenamebeta.md");
+    for path in [&user_agent, &project_agent] {
+        put(path, "---\nname: reviewer\n---\n");
+    }
+    let outside = temp.path().join("ghp_linktargetsecret");
+    fs::create_dir(&outside).unwrap();
+    let link = roots.claude_dir.join("rules/ghp_linknamesecret");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    let report = scan(&roots);
+    assert!(report.items.iter().any(|item| item.origin == user_agent));
+    let drift = find(&report, DriftKind::Shadowed, "reviewer");
+    assert!(drift.origins.contains(&user_agent));
+    assert!(drift.origins.contains(&project_agent));
+    assert!(report.notes.iter().any(|note| note.path == link));
+    let shown = serde_json::to_string(&report).unwrap();
+    for secret in [
+        "ghp_filenamealpha",
+        "ghp_filenamebeta",
+        "ghp_linktargetsecret",
+        "ghp_linknamesecret",
+    ] {
+        assert!(!shown.contains(secret), "path leaked {secret}: {shown}");
+    }
+    assert!(shown.contains("[REDACTED].md"));
+}

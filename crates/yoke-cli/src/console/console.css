@@ -200,7 +200,7 @@ code.resume { display:block; max-width:100%; padding:.5rem .65rem; background:va
 .panel > .list-caption:first-child { margin-top:0; flex-wrap:wrap; align-items:baseline; }
 .panel .panel { background:var(--well); border-color:var(--line); }
 dt { overflow-wrap:anywhere; }
-p.error { padding:.5rem .75rem; border-radius:.5rem; }
+p.error { padding:.5rem .75rem; border-radius:.5rem; overflow-wrap:anywhere; }
 .table-scroll td { overflow-wrap:break-word; }
 .table-scroll th[scope="row"] code,.table-scroll .badge { white-space:nowrap; overflow-wrap:normal; }
 .usage-table td,.usage-table th[scope="row"] { white-space:nowrap; }

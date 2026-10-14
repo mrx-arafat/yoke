@@ -1,10 +1,12 @@
 # Upgrade notes
 
-These notes cover every user-visible change since commit `e8b8ee0`, the last committed state, for anyone replacing a Yoke binary built from it or earlier.
+These notes cover user-visible changes since the implementation baseline at commit `e8b8ee0`, for anyone replacing a Yoke binary built from it or earlier.
 No release has been published yet, so they apply to development builds; see [release acceptance](release-acceptance.md).
 Each item says what changed, who is affected, and what to do.
 
 ## Before you replace the binary
+
+Let active plan checks finish before replacing the binary: this build uses stable check-ownership files in Git metadata, while older builds locked the editable plan file, so the two versions cannot coordinate a live check.
 
 1. Replace every Yoke executable that runs hooks at the same time, including any `target/release/yoke` that installed hooks point at.
    The first writable open by the new binary migrates the state database, and an older binary then refuses it on every hook event.
@@ -12,6 +14,16 @@ Each item says what changed, who is affected, and what to do.
 3. After replacing, rerun `yoke install --agent claude,codex` with the same `CLAUDE_CONFIG_DIR` and `CODEX_HOME` you start the agents with, then run `yoke health`.
 
 ## Storage and upgrade
+
+### Notification project identity
+
+- What changed: notification ownership now uses an exact private project identity rather than a display-redacted path, preventing distinct paths from sharing an inbox or acknowledgement authority.
+  Public paths remain redacted.
+- Who is affected: projects whose paths contain text recognized by secret redaction.
+  Unambiguous old rows remain available; ambiguous old rows stay stored but hidden until an exact plan or configuration source establishes ownership.
+  Decision history whose original project was already redacted cannot restore that attribution.
+- What to do: use the same current binary for every hook and console reading this state; older binaries do not understand the new notification identities.
+  Do not delete ambiguous rows to force recovery.
 
 ### Migrations 007 to 012 run on first open
 
@@ -96,9 +108,10 @@ Each item says what changed, who is affected, and what to do.
 
 ### Usage accounting never decides a hook event
 
-- What changed: a transcript over 32 MiB, with a line over 1 MiB, or otherwise unreadable now only warns on Stop, SessionEnd and PreCompact, instead of recording SessionEnd and PreCompact as `error` decisions.
+- What changed: a transcript over 32 MiB or otherwise unreadable now only warns on Stop, SessionEnd and PreCompact, instead of recording SessionEnd and PreCompact as `error` decisions.
   An unterminated last line is left for the next import, because agents append transcripts asynchronously.
-- Who is affected: long sessions; their usage is still not imported, and each import logs `usage ingestion failed`.
+  There is no per-line size limit: large tool results and assistant messages are parsed for accounting fields without retaining their content in the decoded record, so large usage-bearing messages are counted too.
+- Who is affected: sessions beyond the whole-file limit or with unreadable input; their usage is still not imported, and each import logs `usage ingestion failed`.
 - What to do: nothing.
 
 ### New human-only commands

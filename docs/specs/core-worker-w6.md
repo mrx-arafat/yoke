@@ -149,6 +149,7 @@ Available disk space immediately afterward was 652283904 bytes; reported to w4.
 
 `usage.rs` and `statusline.rs` are implemented, formatted and passed coordinated compilation and focused tests.
 Usage imports at most 32 MiB with 1 MiB lines from a regular, non-symlink JSONL file, rejecting malformed snapshots before starting a transaction.
+Follow-up on 2026-10-14: the per-line limit was removed; typed accounting probes discard decoded message content while preserving usage on large assistant records, within the same 32 MiB whole-file bound.
 Claude streaming snapshots deduplicate message ids; Codex cumulative counters become deltas and decreasing counters fail explicitly.
 Only identifiers and counts are persisted, with identifiers redacted and all SQL values parameterized.
 Costs use integer nanodollars from a compiled four-model Claude table, only when standard service, global inference, standard speed and any cache-write TTL split are present.
@@ -178,6 +179,7 @@ w6 completed its focused tests after w3 and w1, then released the slot to w4.
 Integration correction: valid empty or early transcripts now return an empty vector before any transaction, preserving previously imported usage rather than failing lifecycle hooks or deleting samples.
 Malformed JSON, oversized input and invalid supported counters remain errors.
 Added one regression covering both agents, empty/whitespace/early records, preservation of prior token counts, malformed JSON and the line-size limit.
+The 2026-10-14 follow-up replaces the line-size rejection with coverage that large tool outputs and usage-bearing assistant records are both imported correctly.
 The regression was authored before the fix but could not be executed for RED because the shared Cargo slot was held; the eventual focused GREEN run passed.
 
 ## Public API and dependency coordination

@@ -88,6 +88,10 @@ On 2026-10-14, steps 1 to 3 and 6 passed for the `aarch64-apple-darwin` dry-run 
 
 ## Update acceptance
 
+Packaging requires a regular, non-symlink executable between 1 byte and 64 MiB, matching the updater's executable size limit.
+Focused synthetic fixtures exercise asset naming, checksum records, archive contents, and updater replacement without publishing or replacing the installed Yoke executable.
+These fixtures do not establish native execution on another platform, hosted update acceptance, or real-work trial completion.
+
 `yoke update` reads GitHub's latest-release endpoint, which never returns drafts.
 On 2026-10-14 the repository had no published release (`/releases/latest` returned 404), and `yoke update --check` failed with a download error, so update acceptance is not yet possible.
 After the first publication:

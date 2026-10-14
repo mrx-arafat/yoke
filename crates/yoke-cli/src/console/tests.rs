@@ -283,3 +283,39 @@ fn session_secret_never_reaches_rendered_html_links_or_forms() {
         assert!(!html.contains("?token=") && !html.contains(r#"name="token""#));
     }
 }
+
+#[test]
+fn trust_page_shows_the_trusted_bytes_after_the_disk_file_is_deleted() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (home, project) = (root.join("home"), root.join("project"));
+    std::fs::create_dir_all(home.join(".yoke")).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Store::open(home.join(".yoke/state.db")).unwrap();
+    let file = project.join("yoke.toml");
+    std::fs::write(&file, "mode = 'enforce'\n").unwrap();
+    yoke_core::trust::prepare_project(&store, &project)
+        .unwrap()
+        .commit(&store)
+        .unwrap();
+    std::fs::remove_file(&file).unwrap();
+    let c = Console {
+        home,
+        project,
+        database: root.join("unused.db"),
+        token: "token".into(),
+        csrf: "csrf".into(),
+        host: "127.0.0.1:1".into(),
+    };
+    let html = views::trust(&store, &c).unwrap();
+    assert!(
+        html.contains("<p>project / Trusted; missing or unreadable on disk (stale)</p>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("The trusted content below still applies.</p><pre><code>mode = <span class=\"token-string\">&#39;enforce&#39;</span>"),
+        "{html}"
+    );
+    assert!(!html.contains("Disk changed"));
+    assert!(html.contains("<p>global / Not present</p>"), "{html}");
+}

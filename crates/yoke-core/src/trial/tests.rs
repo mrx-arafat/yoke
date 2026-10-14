@@ -44,6 +44,24 @@ fn query() -> TrialQuery {
 }
 
 #[test]
+fn report_rejects_empty_and_reversed_time_windows() {
+    let store = Store::open(":memory:").unwrap();
+    for until in [MONDAY, MONDAY - DAY] {
+        let error = report(
+            &store,
+            &TrialQuery {
+                since: Some(MONDAY),
+                until: Some(until),
+                ..query()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("until must be after since"));
+    }
+}
+
+#[test]
 fn report_counts_working_days_outcomes_and_acceptance_thresholds() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().join("state.db")).unwrap();

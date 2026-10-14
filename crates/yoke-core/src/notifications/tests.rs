@@ -48,6 +48,144 @@ fn by_kind<'a>(rows: &'a [Notification], kind: &str) -> &'a Notification {
 }
 
 #[test]
+fn project_retention_does_not_delete_other_projects_notifications() {
+    let (_directory, store) = store();
+    decide(&store, "/work/other", 1, "error", "disk full");
+    sync(&store, &loaded("/work/other", Vec::new()), 2).unwrap();
+    let mut config = loaded("/work/app", Vec::new());
+    config.config.log.retention_days = 1;
+    sync(&store, &config, 172_800).unwrap();
+    assert_eq!(unread_count(&store, Path::new("/work/other")).unwrap(), 1);
+}
+
+#[test]
+fn redacted_project_paths_do_not_share_notification_identity_or_legacy_authority() {
+    let (_directory, store) = store();
+    let alpha = "/work/ghp_alpha";
+    let beta = "/work/ghp_beta";
+    assert_eq!(redact(alpha), redact(beta));
+    for (id, project) in [(1, alpha), (2, beta)] {
+        store.connection().execute(
+            "INSERT INTO plans(id,project,slug,file,state,created_at,updated_at) VALUES(?1,?2,'ship','p.md','building',1,1)",
+            params![id, project],
+        ).unwrap();
+        store.connection().execute(
+            "INSERT INTO check_runs(plan_id,ts,name,command,output_tail,fingerprint,blocking,ms,result) VALUES(?1,1,'unit','test','failed','f',1,3,'fail')",
+            [id],
+        ).unwrap();
+    }
+    let mut config = loaded(alpha, Vec::new());
+    config.config.log.retention_days = 1;
+    sync(&store, &config, 2).unwrap();
+    let alpha_rows = list(&store, Path::new(alpha), false, 100).unwrap();
+    let beta_rows = list(&store, Path::new(beta), false, 100).unwrap();
+    assert_eq!(alpha_rows.len(), 1);
+    assert_eq!(beta_rows.len(), 1);
+    assert_eq!(alpha_rows[0].plan_id, Some(1));
+    assert_eq!(beta_rows[0].plan_id, Some(2));
+    assert_eq!(alpha_rows[0].project, redact(alpha));
+    assert!(list(&store, Path::new(&project_identity(beta)), false, 100).is_err());
+    assert_eq!(unread_count(&store, Path::new(alpha)).unwrap(), 1);
+    assert!(acknowledge(
+        &store,
+        Path::new(alpha),
+        &Target::Ids(vec![beta_rows[0].id]),
+        3
+    )
+    .is_err());
+    assert_eq!(
+        acknowledge(&store, Path::new(alpha), &Target::All, 3).unwrap(),
+        1
+    );
+    assert_eq!(unread_count(&store, Path::new(beta)).unwrap(), 1);
+
+    store.connection().execute(
+        "INSERT INTO notifications(key,kind,project,subject,title,detail,first_seen,last_seen) VALUES('legacy-ambiguous','hook_error',?1,'pre_tool_use','legacy','unknown owner',1,1)",
+        [redact(alpha)],
+    ).unwrap();
+    let legacy = store.connection().last_insert_rowid();
+    decide(&store, alpha, 4, "error", "ambiguous decision");
+    decide(&store, beta, 5, "error", "ambiguous decision");
+    sync(&store, &config, 172_800).unwrap();
+    assert!(list(&store, Path::new(alpha), false, 100)
+        .unwrap()
+        .is_empty());
+    assert_eq!(unread_count(&store, Path::new(alpha)).unwrap(), 0);
+    assert_eq!(list(&store, Path::new(beta), false, 100).unwrap().len(), 1);
+    assert_eq!(
+        acknowledge(&store, Path::new(alpha), &Target::All, 172_801).unwrap(),
+        0
+    );
+    assert!(acknowledge(&store, Path::new(beta), &Target::Ids(vec![legacy]), 172_801).is_err());
+    let legacy_state: String = store
+        .connection()
+        .query_row(
+            "SELECT state FROM notifications WHERE id=?1",
+            [legacy],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        legacy_state, "unread",
+        "ambiguous legacy rows are neither pruned nor acknowledged"
+    );
+
+    store.connection().execute_batch(
+        "INSERT INTO notifications(key,kind,project,subject,title,detail,first_seen,last_seen) VALUES('legacy-safe','hook_error','/work/plain','pre_tool_use','legacy','known owner',1,1);"
+    ).unwrap();
+    assert_eq!(
+        list(&store, Path::new("/work/plain"), false, 100)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        acknowledge(&store, Path::new("/work/plain"), &Target::All, 172_801).unwrap(),
+        1
+    );
+
+    store.connection().execute(
+        "INSERT INTO plans(id,project,slug,file,state,created_at,updated_at) VALUES(3,?1,'waiting','p.md','waiting',1,1)",
+        [alpha],
+    ).unwrap();
+    store.connection().execute(
+        "INSERT INTO notifications(key,kind,project,subject,plan_id,title,detail,count,first_seen,last_seen,state,acknowledged_at,actor) VALUES('plan:3:waiting:0','plan_waiting',?1,'waiting',3,'legacy','known plan',7,1,1,'acknowledged',6,'human')",
+        [redact(alpha)],
+    ).unwrap();
+    sync(&store, &config, 172_802).unwrap();
+    let recovered = list(&store, Path::new(alpha), false, 100).unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].plan_id, Some(3));
+    assert_eq!(recovered[0].count, 7);
+    assert_eq!(recovered[0].state, "acknowledged");
+    assert_eq!(recovered[0].acknowledged_at, Some(6));
+    assert_eq!(recovered[0].actor.as_deref(), Some("human"));
+    assert_eq!(unread_count(&store, Path::new(alpha)).unwrap(), 0);
+}
+
+#[test]
+fn check_output_redacts_secrets_before_truncating_the_tail() {
+    let (_directory, store) = store();
+    let secret = "x".repeat(350);
+    let output = format!("API_KEY={secret}");
+    store.connection().execute_batch(
+        "INSERT INTO plans(id,project,slug,file,state,created_at,updated_at) VALUES(1,'/work/app','ship','p.md','building',1,1);"
+    ).unwrap();
+    store.connection().execute(
+        "INSERT INTO check_runs(plan_id,ts,name,command,output_tail,fingerprint,blocking,ms,result) VALUES(1,1,'unit','test',?1,'f',1,3,'fail')",
+        [&output],
+    ).unwrap();
+    sync(&store, &loaded("/work/app", Vec::new()), 2).unwrap();
+    let rows = list(&store, Path::new("/work/app"), false, 100).unwrap();
+    assert!(
+        !rows[0].detail.contains(&"x".repeat(20)),
+        "{}",
+        rows[0].detail
+    );
+    assert!(rows[0].detail.contains("[REDACTED]"));
+}
+
+#[test]
 fn repeated_events_share_one_row_reopen_failures_and_stay_project_scoped() {
     let (_directory, store) = store();
     let project = Path::new("/work/app");

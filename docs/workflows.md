@@ -123,6 +123,7 @@ Use `yoke plan ask 'Which behavior should be kept?' --slug <slug>` to record a q
 A human resumes waiting or stalled work with `yoke plan resume <slug>`.
 If a `yoke plan check` process is killed, the plan stays in `checking`; `yoke plan resume <slug>` returns it to `building` and records the interrupted check as invalid evidence.
 Yoke refuses while a live process still owns the check, so a running check is never taken over.
+Recovery also works if the plan header was edited after the interruption; the transition records the mismatch, and the next check still requires a human to approve the edited header with `yoke plan approve <slug>`.
 A human abandons an unfinished plan with `yoke plan cancel <slug> --reason '<why>'`, which records the reason and releases the plan's session.
 A human hands a building, waiting, or stalled plan to a replacement session with `yoke plan reassign <slug> --session <session-id>`.
 Reassignment keeps the approved checks and review base, records the move as a transition, and leaves only the new session bound.
@@ -132,7 +133,9 @@ Committing exactly the bytes the checks passed on keeps a done plan done; a plan
 After any later change, the next Stop in enforce mode reopens the plan as `building` with an audited transition and blocks until `yoke plan check` passes again; observe mode only records the would-be denial.
 Standalone `yoke review` evidence never refreshes a completed plan.
 The plan's own project scopes this enforcement, so a session that worked in another project still finds its plan when it returns.
-`yoke plan check` owns the plan file with an advisory lock that check commands and their leftover children never inherit; on a filesystem without advisory locks it refuses to run rather than start an unowned check.
+`yoke plan check` owns a persistent, private per-plan lock file in Git metadata, so atomically saving the plan cannot release or replace check ownership.
+Check commands and their leftover children never inherit that lock; Yoke refuses to run if Git metadata is not writable or advisory locking is unavailable.
+Do not remove these lock files while checks may be running; process exit releases ownership without removing the file.
 
 ## Project memory
 
@@ -216,6 +219,7 @@ Notifications shows actionable problems with an unread count in the navigation, 
 Notifications and its count cover the launch project and the global configuration only.
 After an upgrade with a long history, older notifications appear over the first few page loads, because each load reads at most a quarter second of history.
 Workflow settings is read-only: it shows observe or enforce activation, each Yoke-owned setting with its effective value and source file, the trust state of every configuration snapshot, and which choices stay with Claude Code or Codex.
+Trust & config uses the same trust-state wording and shows the trusted content that still applies when its disk file has been deleted.
 Projects lists every recorded project; Decisions, Sessions and Usage accept a project selection, while Plans, Memory and Trust & config stay on the launch project.
 Sessions show a resume command to copy (`claude --resume <id>` or `codex resume <id>`); Yoke never runs it.
 Cmd+K or Ctrl+K opens the command palette; `?` shows shortcuts.

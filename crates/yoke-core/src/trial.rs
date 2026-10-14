@@ -154,6 +154,9 @@ pub fn parse_time(store: &Store, text: &str, local_time: bool) -> Result<i64> {
 
 /// Summarize trial evidence without writing; `error_log` is the text of `~/.yoke/error.log`.
 pub fn report(store: &Store, query: &TrialQuery, error_log: Option<&str>) -> Result<TrialReport> {
+    if let (Some(since), Some(until)) = (query.since, query.until) {
+        ensure!(until > since, "until must be after since");
+    }
     let connection = store.connection();
     // One snapshot for every query; a deferred transaction never takes a write lock.
     let snapshot = Transaction::new_unchecked(connection, TransactionBehavior::Deferred)?;

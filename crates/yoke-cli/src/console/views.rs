@@ -143,16 +143,13 @@ pub(super) fn trust(store: &Store, c: &Console) -> Result<String> {
     }
     out.push_str("</dl></section>");
     for status in loaded.snapshots {
+        // One wording for every snapshot state, shared with the Workflow settings table.
+        let (_, state) = super::settings::snapshot_state(&status);
         out.push_str(&format!(
-            "<section class=\"panel\"><h2>{}</h2><p>{} / {}{}</p>",
+            "<section class=\"panel\"><h2>{}</h2><p>{} / {}</p>",
             escape(&status.file.display().to_string()),
             escape(&status.scope),
-            if status.trusted {
-                "Trusted"
-            } else {
-                "Not trusted"
-            },
-            if status.stale { " / Disk changed" } else { "" }
+            state
         ));
         if let Some(error) = status.disk_error {
             out.push_str(&format!("<p class=\"error\">{}</p>", escape(&error)));
@@ -183,7 +180,14 @@ pub(super) fn trust(store: &Store, c: &Console) -> Result<String> {
                     .downcast_ref::<std::io::Error>()
                     .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
             {
-                out.push_str("<p class=\"muted\">Not on disk.</p>")
+                // A trusted snapshot keeps applying after its file is deleted, so show those bytes.
+                match &trusted {
+                    Some(row) => out.push_str(&format!(
+                        "<p class=\"muted\">Not on disk. The trusted content below still applies.</p><pre><code>{}</code></pre>",
+                        content::highlight(&row.content)
+                    )),
+                    None => out.push_str("<p class=\"muted\">Not on disk.</p>"),
+                }
             }
             Err(error) => out.push_str(&format!("<p>{}</p>", escape(&error.to_string()))),
         }

@@ -347,6 +347,7 @@ pub(super) fn progress(
         .iter()
         .rev()
         .find(|run| run.name == RUN)
+        .filter(|run| run.result != "void")
         .filter(|run| run.findings["header"] == digest.as_str())
         .and_then(|run| run.findings["passed_checks"].as_array())
         .map(|names| {

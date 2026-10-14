@@ -150,10 +150,10 @@ pub(super) fn start(
 pub(super) fn recover(
     store: &Store,
     plan: &PlanRecord,
+    note: &str,
     interrupted: &mut CheckRun,
 ) -> Result<PlanRecord> {
     store.transaction(|tx| {
-        let note = "recovered an interrupted check; its results were never recorded";
         update(tx, plan, "building", "human", Some(note), None)?;
         save_run(tx, interrupted)?;
         by_id(tx, plan.id)

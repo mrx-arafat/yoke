@@ -268,7 +268,24 @@ fn tick_in(
             transaction.execute("INSERT INTO stop_guard(session_id,plan_id,blocks,last_fingerprint,last_block_at,last_transition_id,last_check_run_id) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(session_id,plan_id) DO UPDATE SET blocks=excluded.blocks,last_fingerprint=excluded.last_fingerprint,last_block_at=excluded.last_block_at,last_transition_id=excluded.last_transition_id,last_check_run_id=excluded.last_check_run_id",
                     params![session, expected.id, blocks + 1, fingerprint, now, transition, check])?;
         }
-        return Ok(StopDecision { block: true, stalled: false, reason: Some(format!("plan '{}' is {}; finish the work and run `yoke plan check {} --agent {}` (stop block {}/{max_blocks})", expected.slug, expected.state, expected.slug, expected.agent, blocks + 1)) });
+        let advice = if expected.state == "checking" {
+            format!("wait for the active check to finish; if the check is orphaned, a human runs `yoke plan resume {}` after its owner is gone", expected.slug)
+        } else {
+            format!(
+                "finish the work and run `yoke plan check {} --agent {}`",
+                expected.slug, expected.agent
+            )
+        };
+        return Ok(StopDecision {
+            block: true,
+            stalled: false,
+            reason: Some(format!(
+                "plan '{}' is {}; {advice} (stop block {}/{max_blocks})",
+                expected.slug,
+                expected.state,
+                blocks + 1
+            )),
+        });
     }
     if enforce {
         let changed = transaction.execute("UPDATE plans SET state='stalled',revision=revision+1,updated_at=?1 WHERE id=?2 AND revision=?3", params![now, expected.id, expected.revision])?;
@@ -596,6 +613,28 @@ mod tests {
             10,
             enforce,
         )
+    }
+
+    #[test]
+    fn checking_advice_distinguishes_live_checks_from_human_recovery() {
+        let (_dir, store) = fixture();
+        store
+            .connection()
+            .execute("UPDATE plans SET state='checking' WHERE id=1", [])
+            .unwrap();
+        let decision = stop(&store, "a", false).unwrap();
+        assert!(decision.block && !decision.stalled);
+        let reason = decision.reason.unwrap();
+        assert!(
+            reason.contains("wait for the active check to finish"),
+            "{reason}"
+        );
+        assert!(reason.contains("orphaned"), "{reason}");
+        assert!(
+            reason.contains("a human runs `yoke plan resume demo`"),
+            "{reason}"
+        );
+        assert!(!reason.contains("yoke plan check"), "{reason}");
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -75,16 +76,51 @@ fn resolved(plan: &PlanRecord) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Take exclusive advisory ownership of a plan's check through its plan file.
+/// Take exclusive advisory ownership independent of atomic saves to the plan file.
 /// The OS releases it when the owning process exits, so a killed check cannot hold it;
 /// `None` means a live process still owns the check.
 pub(super) fn claim_check(plan: &PlanRecord) -> Result<Option<fs::File>> {
-    let file = fs::File::open(resolved(plan)?).context("opening plan file to own its check")?;
+    resolved(plan)?;
+    let output = git(
+        Path::new(&plan.project),
+        &["rev-parse", "--absolute-git-dir"],
+    )?;
+    let directory = PathBuf::from(OsString::from_vec(
+        output.strip_suffix(b"\n").unwrap_or(&output).to_vec(),
+    ));
+    ensure!(
+        directory.is_absolute(),
+        "Git metadata path must be absolute"
+    );
+    // Git metadata stays outside fingerprints/review. Never unlink this file on release:
+    // future owners must lock the same inode, including after the plan is atomically saved.
+    let path = directory
+        .canonicalize()?
+        .join(format!("yoke-check-{}.lock", hash(plan.file.as_bytes())));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .context("opening plan check ownership lock")?;
+    let metadata = file.metadata()?;
+    // SAFETY: geteuid has no arguments or memory-safety preconditions.
+    let uid = unsafe { libc::geteuid() };
+    ensure!(
+        metadata.is_file()
+            && metadata.nlink() == 1
+            && metadata.uid() == uid
+            && metadata.mode() & 0o077 == 0,
+        "plan check lock must be a private, singly linked regular file owned by this user"
+    );
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(fs::TryLockError::WouldBlock) => Ok(None),
         Err(fs::TryLockError::Error(error)) => {
-            Err(error).context("locking plan file to own its check")
+            Err(error).context("locking plan check ownership file")
         }
     }
 }
@@ -471,6 +507,10 @@ pub(super) fn evidence_status(path: &str, recorded: Option<&String>) -> Evidence
         Err(_) => EvidenceStatus::Tampered,
     }
 }
+
+#[cfg(test)]
+#[path = "files-tests.rs"]
+mod lock_tests;
 
 #[cfg(test)]
 mod tests {

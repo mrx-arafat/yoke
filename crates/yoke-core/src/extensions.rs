@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::preset;
@@ -62,7 +62,11 @@ pub struct Item {
     pub agent: Owner,
     pub kind: Kind,
     pub name: String,
+    /// Original identity for conflict comparisons; redaction must not merge names.
+    #[serde(skip)]
+    identity: String,
     pub scope: Scope,
+    #[serde(serialize_with = "serialize_path")]
     pub origin: PathBuf,
     pub managed: bool,
     /// State, program name with argument count, or URL scheme and host; never argument text,
@@ -90,13 +94,33 @@ pub struct Drift {
     pub agent: Owner,
     pub name: String,
     pub detail: String,
+    #[serde(serialize_with = "serialize_paths")]
     pub origins: Vec<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct Note {
+    #[serde(serialize_with = "serialize_path")]
     pub path: PathBuf,
+    #[serde(serialize_with = "serialize_text")]
     pub note: String,
+}
+
+// Redact only output: filesystem access and managed-hook ownership need the raw paths.
+fn serialize_path<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+    serialize_text(&path.to_string_lossy(), serializer)
+}
+
+fn serialize_paths<S: Serializer>(paths: &[PathBuf], serializer: S) -> Result<S::Ok, S::Error> {
+    paths
+        .iter()
+        .map(|path| redact(&path.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .serialize(serializer)
+}
+
+fn serialize_text<S: Serializer>(text: &str, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&redact(text))
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -205,6 +229,7 @@ impl Scan<'_> {
             agent,
             kind,
             name: redact(&name),
+            identity: name,
             scope,
             origin: origin.to_path_buf(),
             managed: false,
@@ -588,7 +613,7 @@ impl Scan<'_> {
             );
             self.push(agent, Kind::Mcp, scope, origin, name.clone(), detail);
             let item = self.items.last_mut().unwrap();
-            item.keys = keys;
+            item.keys = keys.iter().map(|key| redact(key)).collect();
             item.command = command.map(str::to_owned);
         }
     }
@@ -656,7 +681,7 @@ fn shadowed(items: &[Item]) -> Vec<Drift> {
             _ => continue,
         };
         groups
-            .entry((item.agent, family, &item.name))
+            .entry((item.agent, family, &item.identity))
             .or_default()
             .push(item);
     }
@@ -701,7 +726,7 @@ fn shadowed(items: &[Item]) -> Vec<Drift> {
         drift.push(Drift {
             kind: DriftKind::Shadowed,
             agent,
-            name: name.to_owned(),
+            name: redact(name),
             detail: format!("defined as {}: {resolution}", definitions.join(", ")),
             origins,
         });

@@ -152,6 +152,82 @@ fn extensions_never_prints_command_arguments_or_url_paths_in_text_or_json() {
 }
 
 #[test]
+fn extensions_keeps_redacted_names_distinct_and_skips_symlinked_walk_roots() {
+    let (temp, home, project) = dirs();
+    fs::create_dir(home.join(".claude")).unwrap();
+    let outside = temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("hidden.md"), "outside command").unwrap();
+    std::os::unix::fs::symlink(&outside, home.join(".claude/commands")).unwrap();
+    fs::write(
+        home.join(".claude.json"),
+        serde_json::json!({"mcpServers": {
+            "ghp_distinctalpha": {"env": {"ghp_keysecret": "value"}},
+            "ghp_distinctbeta": {}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = yoke(&home, &project, &["extensions", "--json"], b"");
+
+    assert!(output.status.success(), "{:?}", output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["drift"], serde_json::json!([]));
+    let items = report["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|item| item["name"] == "[REDACTED]"));
+    assert!(report["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| { note["note"] == "symlinked directory not walked" }));
+    let shown = String::from_utf8(output.stdout).unwrap();
+    for secret in ["ghp_distinctalpha", "ghp_distinctbeta", "ghp_keysecret"] {
+        assert!(!shown.contains(secret), "metadata leaked {secret}");
+    }
+}
+
+#[test]
+fn extensions_redacts_file_origins_and_symlink_notes_in_text_and_json() {
+    let (temp, home, project) = dirs();
+    let user_agents = home.join(".claude/agents");
+    let project_agents = project.join(".claude/agents");
+    fs::create_dir_all(&user_agents).unwrap();
+    fs::create_dir_all(&project_agents).unwrap();
+    for path in [
+        user_agents.join("ghp_filenamealpha.md"),
+        project_agents.join("ghp_filenamebeta.md"),
+    ] {
+        fs::write(path, "---\nname: reviewer\n---\n").unwrap();
+    }
+    let outside = temp.path().join("ghp_linktargetsecret");
+    fs::create_dir(&outside).unwrap();
+    let rules = home.join(".claude/rules");
+    fs::create_dir(&rules).unwrap();
+    std::os::unix::fs::symlink(&outside, rules.join("ghp_linknamesecret")).unwrap();
+
+    for args in [vec!["extensions"], vec!["extensions", "--json"]] {
+        let output = yoke(&home, &project, &args, b"");
+        assert_eq!(output.status.code(), Some(1));
+        let shown = String::from_utf8(output.stdout).unwrap();
+        for secret in [
+            "ghp_filenamealpha",
+            "ghp_filenamebeta",
+            "ghp_linktargetsecret",
+            "ghp_linknamesecret",
+        ] {
+            assert!(!shown.contains(secret), "path leaked {secret}: {shown}");
+        }
+        assert!(shown.contains("[REDACTED].md"));
+        if args.len() == 2 {
+            let report: Value = serde_json::from_str(&shown).unwrap();
+            assert_eq!(report["drift"][0]["origins"].as_array().unwrap().len(), 2);
+        }
+    }
+}
+
+#[test]
 fn plan_diff_shows_committed_and_untracked_changes_since_the_plan_base() {
     use yoke_core::{plan, store::Store, trust};
     let (_temp, home, project) = dirs();

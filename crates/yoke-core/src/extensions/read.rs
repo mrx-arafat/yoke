@@ -122,6 +122,10 @@ impl Reader {
 
     /// Files with `extension` below `dir`; directory links are reported, never descended.
     pub(super) fn walk(&mut self, dir: &Path, extension: &str) -> Vec<PathBuf> {
+        if self.link(dir) {
+            self.note(dir, "symlinked directory not walked");
+            return Vec::new();
+        }
         let mut files = Vec::new();
         let mut pending = vec![(dir.to_path_buf(), 0)];
         while let Some((current, depth)) = pending.pop() {

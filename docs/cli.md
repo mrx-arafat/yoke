@@ -57,6 +57,7 @@ yoke log --outcome would_deny --limit 10 --json
 
 `trial report` never creates, migrates or writes state.
 Its dates are `YYYY-MM-DD` (local midnight) or RFC 3339 with an offset; `--since` is inclusive and `--until` exclusive.
+When both are supplied, `--until` must be later than `--since`.
 `--limit` pages flagged decisions (default 100, range 1 through 1000), and `--before` continues from the printed `next_before`.
 [Trials](trials.md) defines working days and how to record the result.
 
@@ -68,7 +69,10 @@ Each row names the next command to run and the section of [troubleshooting](trou
 Acknowledgement requires a human terminal, because an agent that acknowledges an alert hides it from the person it is meant for.
 `ack all` acknowledges only what is already stored; it does not collect new notifications first.
 Notifications follow `log.retention_days`, except that unresolved conditions stay until they clear.
+Cleanup uses the current project's retention policy only for that project's and global notifications; it does not prune another project's inbox.
 The list and the console cover only the project you run them from plus the global configuration; run them from another project to see its notifications.
+Project identity is compared before display redaction, so paths that look identical after redaction do not share an inbox or acknowledgement authority.
+Legacy notifications with an ambiguous redacted project remain stored but hidden until an exact plan or configuration source can establish ownership; decision records whose original project was already redacted cannot reconstruct that ownership.
 Each run reads a bounded slice of new history in short transactions and pauses 110 ms before each one, longer than SQLite's longest busy-retry sleep, so a hook waiting for the database retries while it is free, even when runs follow each other back to back; when more remains it prints `pending: true` (with `--json`, a note on stderr), and the next run continues.
 `yoke notifications` never creates or upgrades the state database: with no state it prints an empty list, and with an older schema it exits 1 and says so, because hooks that still run an older yoke refuse a newer schema.
 
@@ -97,6 +101,7 @@ Each run reads a bounded slice of new history in short transactions and pauses 1
 | `yoke review [<slug>] --agent claude\|codex [--session <session-id>]` | Record independent review evidence |
 
 For `plan ask`, `--session` may replace `--slug` to resolve the active plan.
+Recovering an interrupted `checking` plan preserves its frozen approval even if the file was edited; the next check refuses an edited header until a human re-approves it.
 `plan validate` uses the same reviewer selection as `plan check`.
 For `review`, provide a slug or `--session`.
 The required `--agent` identifies the building agent, allowing automatic selection of the other reviewer.

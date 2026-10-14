@@ -35,7 +35,7 @@ pub(crate) fn managed(options: &InstallOptions, agent: Agent) -> Result<Option<M
     let current = settings(files::read(&receipt.hooks.path)?.as_deref())?;
     let mut events = COMMON_EVENTS.to_vec();
     if agent == Agent::Claude {
-        events.push("Notification");
+        events.extend(["Notification", "PostToolUseFailure"]);
     }
     let mut missing = Vec::new();
     for event in &events {

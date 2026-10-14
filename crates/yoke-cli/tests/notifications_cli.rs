@@ -14,6 +14,107 @@ fn yoke(home: &Path, command: &str) -> Output {
 }
 
 #[test]
+fn notifications_hide_long_check_secrets_and_refuse_noninteractive_ack() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    std::fs::create_dir(home.join(".yoke")).unwrap();
+    let path = home.join(".yoke/state.db");
+    drop(Store::open(&path).unwrap());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    db.execute(
+        "INSERT INTO plans(id,project,slug,file,state,created_at,updated_at) VALUES(1,?1,'ship','p.md','building',?2,?2)",
+        rusqlite::params![home.to_str().unwrap(), now],
+    ).unwrap();
+    db.execute(
+        "INSERT INTO check_runs(plan_id,ts,name,command,output_tail,fingerprint,blocking,ms,result) VALUES(1,?1,'unit','test',?2,'f',1,3,'fail')",
+        rusqlite::params![now, format!("API_KEY={}", "x".repeat(350))],
+    ).unwrap();
+    let list = || {
+        Command::new(env!("CARGO_BIN_EXE_yoke"))
+            .args(["notifications", "--json"])
+            .env("HOME", &home)
+            .current_dir(&home)
+            .output()
+            .unwrap()
+    };
+    let first = list();
+    assert!(first.status.success());
+    let rows: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    let id = rows[0]["id"].as_i64().unwrap();
+    let ack = Command::new(env!("CARGO_BIN_EXE_yoke"))
+        .args(["notifications", "ack", &id.to_string()])
+        .env("HOME", &home)
+        .current_dir(&home)
+        .output()
+        .unwrap();
+    assert_eq!(ack.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&ack.stdout).contains("requires"));
+    let second = list();
+    assert!(second.status.success());
+    assert_eq!(
+        first.stdout, second.stdout,
+        "listing and refused ack preserve state"
+    );
+    assert_eq!(rows[0]["state"], "unread");
+    assert_eq!(rows[0]["count"], 1);
+    assert!(!rows[0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains(&"x".repeat(20)));
+    assert!(rows[0]["detail"].as_str().unwrap().contains("[REDACTED]"));
+}
+
+#[test]
+fn notifications_cli_isolates_projects_with_identical_redacted_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    let alpha = home.join("ghp_alpha");
+    let beta = home.join("ghp_beta");
+    for path in [&alpha, &beta, &home.join(".yoke")] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let path = home.join(".yoke/state.db");
+    drop(Store::open(&path).unwrap());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    for (id, project) in [(1, &alpha), (2, &beta)] {
+        db.execute(
+            "INSERT INTO plans(id,project,slug,file,state,created_at,updated_at) VALUES(?1,?2,'ship','p.md','waiting',?3,?3)",
+            rusqlite::params![id, project.to_str().unwrap(), now],
+        ).unwrap();
+    }
+    for (id, project) in [(1, &alpha), (2, &beta)] {
+        let output = Command::new(env!("CARGO_BIN_EXE_yoke"))
+            .args(["notifications", "--json"])
+            .env("HOME", &home)
+            .current_dir(project)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["plan_id"], id);
+        assert_eq!(
+            rows[0]["project"],
+            yoke_core::redact::redact(project.to_str().unwrap())
+        );
+        let shown = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            !shown.contains("sha256:")
+                && !shown.contains("ghp_alpha")
+                && !shown.contains("ghp_beta")
+        );
+    }
+}
+
+#[test]
 fn listing_commands_never_create_or_migrate_state() {
     for (command, listed) in [("notifications", "unread: 0"), ("jobs", "jobs[0]")] {
         let temp = tempfile::tempdir().unwrap();

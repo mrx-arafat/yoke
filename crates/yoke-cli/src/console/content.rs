@@ -112,7 +112,7 @@ pub(super) fn diff(before: &str, after: &str) -> String {
         .zip(new[prefix..].iter().rev())
         .take_while(|(a, b)| a == b)
         .count();
-    let mut output = String::from("<div class=\"actions\"><button type=\"button\" class=\"quiet\" data-diff-mode=\"unified\">Unified</button><button type=\"button\" class=\"quiet\" data-diff-mode=\"split\">Split</button></div><div class=\"diff\">");
+    let mut output = String::from("<div class=\"actions\"><button type=\"button\" class=\"quiet\" data-diff-mode=\"unified\" aria-pressed=\"true\">Unified</button><button type=\"button\" class=\"quiet\" data-diff-mode=\"split\" aria-pressed=\"false\">Split</button></div><div class=\"diff\" data-mode=\"unified\">");
     fn unchanged(output: &mut String, lines: &[&str]) {
         if lines.is_empty() {
             return;
@@ -171,5 +171,6 @@ mod tests {
         let output = diff("same\n<script>\ntail", "same\nsafe\ntail");
         assert!(output.contains("1 unchanged lines"));
         assert!(output.contains("&lt;script&gt;"));
+        assert!(output.contains(r#"data-diff-mode="unified" aria-pressed="true">Unified</button><button type="button" class="quiet" data-diff-mode="split" aria-pressed="false">Split</button></div><div class="diff" data-mode="unified">"#));
     }
 }

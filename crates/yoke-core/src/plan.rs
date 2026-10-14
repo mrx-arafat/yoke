@@ -312,19 +312,26 @@ pub fn ask(store: &Store, project: &Path, slug: &str, question: &str) -> Result<
 
 /// Human action only: CLI confirmation, authenticated console, or a real user prompt.
 /// A plan left in `checking` resumes only when no live process owns its check; the
-/// interrupted check is recorded as invalid evidence.
+/// interrupted check is recorded as invalid evidence. Recovery does not require the plan file
+/// to still match the approved header: `building` grants nothing by itself, the next check
+/// re-validates the header, and an edited header is re-approved from `building`, whereas a
+/// `checking` plan can be neither approved nor reassigned.
 pub fn resume(store: &Store, project: &Path, slug: &str) -> Result<PlanRecord> {
     let plan = get(store, project, slug)?;
     ensure!(
         matches!(plan.state.as_str(), "waiting" | "stalled" | "checking"),
         "only a waiting, stalled, or interrupted checking plan can resume"
     );
-    files::approved(&plan)?;
     if plan.state == "checking" {
         let _owner = files::claim_check(&plan)?
             .context("a live process still owns this plan's check; wait for it to finish")?;
-        return storage::recover(store, &plan, &mut checks::interrupted_run(&plan)?);
+        let mut note = "recovered an interrupted check; its results were never recorded".to_owned();
+        if let Err(error) = files::approved(&plan) {
+            note.push_str(&format!("; {error:#}"));
+        }
+        return storage::recover(store, &plan, &note, &mut checks::interrupted_run(&plan)?);
     }
+    files::approved(&plan)?;
     storage::transition(store, &plan, "building", "human", None, None, None)
 }
 

@@ -96,7 +96,7 @@ fn print(report: &Report) {
             quote(&item.name),
             tag(item.scope),
             item.managed,
-            quote(&item.origin.display().to_string())
+            quote(&redact(&item.origin.display().to_string()))
         );
     }
     println!("drift[{}]{{kind,agent,name,detail}}:", report.drift.len());
@@ -114,8 +114,8 @@ fn print(report: &Report) {
         for note in &report.notes {
             println!(
                 "  {},{}",
-                quote(&note.path.display().to_string()),
-                quote(&note.note)
+                quote(&redact(&note.path.display().to_string())),
+                quote(&redact(&note.note))
             );
         }
     }

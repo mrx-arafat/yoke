@@ -16,6 +16,7 @@ TARGETS = (
     "aarch64-unknown-linux-gnu",
 )
 LICENSE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE")
+BINARY_LIMIT = 64 * 1024 * 1024
 
 
 def generate_notices(metadata: dict) -> str:
@@ -66,6 +67,10 @@ def package_release(
         raise ValueError("Unsupported target")
     if not binary.is_file() or binary.is_symlink():
         raise ValueError("Binary must be a regular file")
+    if not 0 < binary.stat().st_size <= BINARY_LIMIT:
+        raise ValueError(
+            "Binary size must be between 1 byte and 64 MiB for the updater"
+        )
     output.mkdir(parents=True, exist_ok=False)
     name = f"yoke-{target}"
     executable = output / name

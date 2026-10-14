@@ -427,7 +427,7 @@ fn timeout_and_declared_ignored_artifacts_have_real_evidence() {
 #[test]
 fn concurrent_state_change_preserves_void_check_evidence_without_overwriting_state() {
     let f = Fixture::new();
-    let building = f.building("title='Example'\n[[check]]\nname='proof'\nrun='true'");
+    let building = f.building("title='Example'\n[[check]]\nname='proof'\nrun='true'\n[[requirement]]\nid='proof-passes'\ntext='The proof check passes'\nchecks=['proof']");
     let checking =
         storage::transition(&f.store, &building, "checking", "agent", None, None, None).unwrap();
     storage::transition(
@@ -456,6 +456,20 @@ fn concurrent_state_change_preserves_void_check_evidence_without_overwriting_sta
         artifacts: vec![],
         artifact_hashes: Default::default(),
     }];
+    let (_, findings, _) = acceptance::attempt(
+        &f.store,
+        &checking,
+        &files::approved(&checking).unwrap(),
+        &runs,
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    runs.push(CheckRun {
+        name: "acceptance".into(),
+        findings,
+        ..runs[0].clone()
+    });
     f.store.connection().execute_batch("CREATE TEMP TRIGGER reject_check_fact BEFORE INSERT ON facts WHEN NEW.kind='check_result' BEGIN SELECT RAISE(ABORT,'fixture fact failure'); END;").unwrap();
     assert!(storage::finish(&f.store, &checking, "done", &mut runs, None).is_err());
     assert!(detail(&f.store, &f.root, "example")
@@ -474,6 +488,10 @@ fn concurrent_state_change_preserves_void_check_evidence_without_overwriting_sta
     assert!(detail.checks[0]
         .output_tail
         .contains("actual execution evidence"));
+    assert_eq!(
+        detail.progress.requirements[0].status,
+        RequirementStatus::Unsatisfied
+    );
 }
 
 fn record_session(f: &Fixture, id: &str) {
@@ -912,4 +930,37 @@ fn progress_and_feedback_never_bypass_reapproval_of_edited_checks() {
         (after.state.as_str(), &after.approved_header),
         ("building", &frozen)
     );
+}
+
+#[test]
+fn interrupted_check_recovers_even_after_the_plan_header_was_edited() {
+    let f = Fixture::new();
+    let building = f.building("title='Example'\n[[check]]\nname='proof'\nrun='true'");
+    storage::transition(&f.store, &building, "checking", "agent", None, None, None).unwrap();
+    let plan = get(&f.store, &f.root, "example").unwrap();
+    let content = fs::read_to_string(&plan.file).unwrap();
+    fs::write(
+        &plan.file,
+        content.replace("title='Example'", "title='Edited'"),
+    )
+    .unwrap();
+    // From `checking` neither approval nor reassignment is possible, so recovery must not
+    // depend on the edited header; the frozen approval survives for the next check to compare.
+    let resumed = after_lock_release(|| resume(&f.store, &f.root, "example"));
+    assert_eq!(resumed.state, "building");
+    assert_eq!(resumed.approved_header, plan.approved_header);
+    let detail = detail(&f.store, &f.root, "example").unwrap();
+    assert_eq!(detail.checks.last().unwrap().result, "interrupted");
+    let note = detail.transitions.last().unwrap().note.as_deref().unwrap();
+    assert!(
+        note.contains("interrupted") && note.contains("re-approval required"),
+        "{note}"
+    );
+    let refused = check(&f.store, &f.root, "example", None).unwrap_err();
+    assert!(
+        refused.to_string().contains("header changed"),
+        "{refused:#}"
+    );
+    let prepared = prepare_approval(&f.store, &f.root, "example").unwrap();
+    assert_eq!(approve(&f.store, &prepared).unwrap().state, "approved");
 }

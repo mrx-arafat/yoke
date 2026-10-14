@@ -3,7 +3,7 @@
 //! enforcement stays a human action in the user's own terminal.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -46,6 +46,9 @@ struct AgentReport {
     #[serde(flatten)]
     install: install::AgentStatus,
     last_event: Option<LastEvent>,
+    /// Whether `last_event` was read; `None` then means no event was recorded.
+    #[serde(skip)]
+    event_readable: bool,
 }
 
 #[derive(Serialize)]
@@ -62,9 +65,25 @@ struct PlanReport {
     state: String,
 }
 
+/// Everything the report reads from the environment, so tests build it from a temp home.
+struct Inputs {
+    home: PathBuf,
+    cwd: PathBuf,
+    executable: PathBuf,
+    /// The settings files each agent reads, or why they cannot be located.
+    options: Result<install::InstallOptions>,
+}
+
 /// Print the report; exit 1 when a check fails so scripts can gate on it.
 pub fn run(json_output: bool) -> Result<()> {
-    let report = collect()?;
+    let home = commands::home()?;
+    let executable = std::env::current_exe()?;
+    let report = collect(Inputs {
+        options: install::options(&home, executable.clone(), Vec::new()),
+        cwd: std::env::current_dir()?,
+        home,
+        executable,
+    })?;
     let failing = report.status == "failing";
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -78,10 +97,13 @@ pub fn run(json_output: bool) -> Result<()> {
     Ok(())
 }
 
-fn collect() -> Result<Report> {
-    let home = commands::home()?;
-    let cwd = std::env::current_dir()?;
-    let executable = std::env::current_exe()?;
+fn collect(inputs: Inputs) -> Result<Report> {
+    let Inputs {
+        home,
+        cwd,
+        executable,
+        options,
+    } = inputs;
     let mut problems = Vec::new();
     let mut guidance = Vec::new();
     let path = home.join(".yoke/state.db");
@@ -92,14 +114,27 @@ fn collect() -> Result<Report> {
         guidance.push("No Yoke state exists yet; the first hook event creates it.".into());
         Store::open(":memory:")
     };
-    let (store, readable) = match opened {
-        Ok(store) => (store, true),
+    // `file_schema` is what the file says even when it is unusable; `readable` means the store
+    // answers queries, so trust, decisions and plans are only read from a readable store.
+    let (store, readable, file_schema) = match opened {
+        Ok(store) => match store.schema_version()?.0 {
+            // A file with no committed schema (for example zero bytes after a crash) has no
+            // tables; say so once instead of failing every query against it.
+            0 if path.exists() => {
+                problems.push(format!(
+                    "the Yoke state database {} is empty or incomplete; run yoke config from your own terminal, or start your agent, to initialise it",
+                    path.display()
+                ));
+                (Store::open(":memory:")?, false, Some(0))
+            }
+            schema => (store, true, path.exists().then_some(schema)),
+        },
         Err(error) => {
             problems.push(format!(
                 "cannot read {}: {error:#}; check free disk space and file permissions",
                 path.display()
             ));
-            (Store::open(":memory:")?, false)
+            (Store::open(":memory:")?, false, None)
         }
     };
     let (schema, supported) = store.schema_version()?;
@@ -134,19 +169,17 @@ fn collect() -> Result<Report> {
             policy_guidance(loaded, &mut guidance);
         }
     }
-    let agents = agent_reports(&home, executable.clone(), &project, &store, readable)
-        .unwrap_or_else(|error| {
+    let agents = match &options {
+        Ok(options) => agent_reports(options, &project, &store, readable, &mut problems),
+        Err(error) => {
             problems.push(format!("cannot locate agent settings: {error:#}"));
             Vec::new()
-        });
+        }
+    };
     for agent in &agents {
         let name = agent.install.agent;
-        if !agent.install.installed {
-            guidance.push(format!(
-                "{name} is not protected; run `yoke install --agent {name}`."
-            ));
-            continue;
-        }
+        // An unreadable receipt is a problem to fix, not an absent installation to repeat:
+        // `yoke install` refuses it as well.
         problems.extend(
             agent
                 .install
@@ -154,7 +187,15 @@ fn collect() -> Result<Report> {
                 .iter()
                 .map(|problem| format!("{name}: {problem}")),
         );
-        if readable && agent.last_event.is_none() {
+        if !agent.install.installed {
+            if agent.install.problems.is_empty() {
+                guidance.push(format!(
+                    "{name} is not protected; run `yoke install --agent {name}`."
+                ));
+            }
+            continue;
+        }
+        if agent.event_readable && agent.last_event.is_none() {
             guidance.push(format!(
                 "No {name} hook event is recorded yet; start {name} in a project to confirm its hooks run."
             ));
@@ -163,7 +204,11 @@ fn collect() -> Result<Report> {
             guidance.extend(agent.install.notes.iter().cloned());
         }
     }
-    if !agents.is_empty() && agents.iter().all(|agent| !agent.install.installed) {
+    if !agents.is_empty()
+        && agents
+            .iter()
+            .all(|agent| !agent.install.installed && agent.install.problems.is_empty())
+    {
         problems.push("Yoke hooks are not installed for any agent.".into());
     }
     let plans = (readable && current)
@@ -199,7 +244,7 @@ fn collect() -> Result<Report> {
         state: State {
             path: path.display().to_string(),
             exists: path.exists(),
-            schema: path.exists().then_some(schema),
+            schema: file_schema,
             supported,
         },
         mode: loaded.as_ref().map(|loaded| loaded.config.mode.as_str()),
@@ -227,33 +272,43 @@ fn policy_guidance(loaded: &config::LoadedConfig, guidance: &mut Vec<String>) {
     }
 }
 
+/// Installation state never depends on the database: a failed decision lookup (for example a
+/// locked database) is reported for that agent, and the agent stays in the report.
 fn agent_reports(
-    home: &Path,
-    executable: std::path::PathBuf,
+    options: &install::InstallOptions,
     project: &Path,
     store: &Store,
     readable: bool,
-) -> Result<Vec<AgentReport>> {
-    let options = install::options(home, executable, Vec::new())?;
-    install::status(&options, project)
+    problems: &mut Vec<String>,
+) -> Vec<AgentReport> {
+    install::status(options, project)
         .into_iter()
         .map(|install| {
-            let last_event = if readable {
-                store
-                    .last_decision(install.agent)?
-                    .map(|(ts, event, mode, outcome)| LastEvent {
-                        ts,
-                        event,
-                        mode,
-                        outcome,
-                    })
-            } else {
-                None
-            };
-            Ok(AgentReport {
+            let (last_event, event_readable) =
+                match readable.then(|| store.last_decision(install.agent)) {
+                    None => (None, false),
+                    Some(Ok(last)) => (
+                        last.map(|(ts, event, mode, outcome)| LastEvent {
+                            ts,
+                            event,
+                            mode,
+                            outcome,
+                        }),
+                        true,
+                    ),
+                    Some(Err(error)) => {
+                        problems.push(format!(
+                            "cannot read the last {} decision: {error:#}",
+                            install.agent
+                        ));
+                        (None, false)
+                    }
+                };
+            AgentReport {
                 install,
                 last_event,
-            })
+                event_readable,
+            }
         })
         .collect()
 }
@@ -265,10 +320,16 @@ fn print_text(report: &Report) {
     println!(
         "state: {} schema={} supported={}",
         quote(&report.state.path),
-        report
-            .state
-            .schema
-            .map_or_else(|| "missing".to_owned(), |schema| schema.to_string()),
+        report.state.schema.map_or_else(
+            // An existing file whose schema could not be read is unknown, not missing.
+            || if report.state.exists {
+                "unknown"
+            } else {
+                "missing"
+            }
+            .to_owned(),
+            |schema| schema.to_string()
+        ),
         report.state.supported
     );
     println!("mode: {}", report.mode.unwrap_or("unknown"));
@@ -320,3 +381,7 @@ fn print_text(report: &Report) {
         "help: \"Run yoke health --json for structured output; it exits 1 when a check fails.\""
     );
 }
+
+#[cfg(test)]
+#[path = "health/tests.rs"]
+mod tests;

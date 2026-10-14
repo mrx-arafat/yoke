@@ -57,7 +57,10 @@ Agents cannot trust configuration.
 
 Yoke protects nothing when its hooks do not run.
 Run `yoke health` to see which agents have Yoke hooks installed and what stops them.
+An unreadable installation receipt is reported as a problem rather than a missing installation; repair the reported receipt before retrying installation.
+An empty or zero-byte state database is reported as empty or incomplete without hiding installed agents; initialize it from your own terminal with `yoke config`, or let the next agent hook initialize it.
 Yoke reads Claude Code settings from `CLAUDE_CONFIG_DIR` and Codex settings from `CODEX_HOME` when they are set to absolute paths, and from `~/.claude` and `~/.codex` otherwise.
+Codex's top-level `allow_managed_hooks_only = true` also prevents Yoke's user hooks from running; `yoke health` reports the same blocker as installation.
 
 For Claude Code, the highest-precedence file that sets `disableAllHooks` decides: the project `.claude/settings.local.json`, then the project `.claude/settings.json`, then the user `settings.json`.
 If that file sets it to `true`, Yoke's hooks do not run; remove the key or set it to `false` there.
@@ -97,6 +100,7 @@ For required review, verify the selected agent CLI is installed and authenticate
 A plan waits after the agent runs `yoke plan ask`, and stalls after `stop.max_blocks` Stop attempts without progress (default 5).
 Waiting or stalled plans need human resume rather than editing a state label in Markdown: run `yoke plan resume <slug>` in your own terminal, or use Resume work on the console plan page.
 A plan stuck in `checking` after its check process was killed also needs `yoke plan resume <slug>`, or Recover interrupted check on the console plan page; both are refused while a live check still owns the plan.
+If its header changed after the interruption, recovery records that mismatch without approving it; review and approve the edited header with `yoke plan approve <slug>` before running checks again.
 When the plan declares requirements or tasks, the `acceptance` check run lists each unsatisfied requirement and unfinished task with the command that completes it.
 Use `yoke plan cancel <slug> --reason '<why>'` to abandon a plan, or `yoke plan reassign <slug> --session <session-id>` to give it to a replacement session.
 

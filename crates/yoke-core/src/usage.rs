@@ -7,13 +7,12 @@ use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
 use rusqlite::params;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{redact::redact, store::Store};
 
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_LINE: usize = 1024 * 1024;
 const MAX_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Serialize)]
@@ -162,8 +161,8 @@ struct Sample {
 
 /// RFC 3339 line timestamp with an explicit zone. Anything else stays "time unknown";
 /// SQLite would read bare numbers as Julian days, so the shape is checked first.
-fn timestamp(row: &Value) -> Option<String> {
-    let value = row["timestamp"].as_str()?;
+fn timestamp(timestamp: &Value) -> Option<String> {
+    let value = timestamp.as_str()?;
     let bytes = value.as_bytes();
     let digit = |index: usize| bytes.get(index).is_some_and(u8::is_ascii_digit);
     let shape = bytes.len() <= 40
@@ -268,6 +267,42 @@ struct Snapshot {
     samples: BTreeMap<String, Sample>,
 }
 
+/// The accounting fields of one transcript line. Everything else, including tool results and
+/// file writes of any size, streams past serde without being kept, so the only size bound is
+/// the whole file and no usage record is ever skipped for being large. A `message` or
+/// `payload` that is not an object is malformed.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Line {
+    #[serde(rename = "type")]
+    kind: Value,
+    #[serde(rename = "sessionId")]
+    session_id: Value,
+    timestamp: Value,
+    /// Claude: the message carrying `id`, `model` and `usage`.
+    message: Option<Message>,
+    /// Codex: the payload carrying the session id, model and token counts.
+    payload: Option<Payload>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Message {
+    id: Value,
+    model: Value,
+    usage: Value,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Payload {
+    id: Value,
+    model: Value,
+    #[serde(rename = "type")]
+    kind: Value,
+    info: Value,
+}
+
 /// Import a complete bounded JSONL snapshot atomically. No message content is persisted.
 /// Valid snapshots without usage are no-ops, returning no newly imported summaries.
 /// A snapshot is only committed while the transcript is still the file it was read from,
@@ -317,22 +352,19 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path) -> Result<Snapsh
     let mut ordinal = 0u64;
     loop {
         bytes.clear();
-        let read = reader
-            .by_ref()
-            .take((MAX_LINE + 1) as u64)
-            .read_until(b'\n', &mut bytes)?;
+        let read = reader.read_until(b'\n', &mut bytes)?;
         if read == 0 {
             break;
         }
         total += read as u64;
         ensure!(
-            total <= MAX_BYTES && read <= MAX_LINE,
+            total <= MAX_BYTES,
             "usage transcript exceeds bounded import limits"
         );
         if bytes.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let row: Value = match serde_json::from_slice(&bytes) {
+        let row: Line = match serde_json::from_slice(&bytes) {
             Ok(row) => row,
             // Agents append transcripts asynchronously; an unterminated last line may still
             // be in flight, and the next import reads it whole.
@@ -340,19 +372,19 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path) -> Result<Snapsh
             Err(error) => return Err(error).context("malformed usage transcript JSON"),
         };
         if agent == "claude" {
-            if row["type"] != "assistant" || row["message"]["usage"].is_null() {
+            let message = row.message.unwrap_or_default();
+            if row.kind != "assistant" || message.usage.is_null() {
                 continue;
             }
-            if let Some(found) = row["sessionId"].as_str() {
+            if let Some(found) = row.session_id.as_str() {
                 ensure!(
                     identifier(found)? == session,
                     "transcript session does not match requested session"
                 );
             }
-            let message = &row["message"];
-            let key = identifier(message["id"].as_str().context("usage message lacks id")?)?;
-            let model = identifier(message["model"].as_str().unwrap_or("unknown"))?;
-            let usage = &message["usage"];
+            let key = identifier(message.id.as_str().context("usage message lacks id")?)?;
+            let model = identifier(message.model.as_str().unwrap_or("unknown"))?;
+            let usage = &message.usage;
             let counts = [
                 count(usage, "input_tokens", false)?,
                 count(usage, "output_tokens", false)?,
@@ -367,25 +399,26 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path) -> Result<Snapsh
                     model,
                     counts,
                     cost,
-                    ts: timestamp(&row),
+                    ts: timestamp(&row.timestamp),
                 },
             );
         } else {
-            if row["type"] == "session_meta" {
-                if let Some(found) = row["payload"]["id"].as_str() {
+            let payload = row.payload.unwrap_or_default();
+            if row.kind == "session_meta" {
+                if let Some(found) = payload.id.as_str() {
                     ensure!(
                         identifier(found)? == session,
                         "transcript session does not match requested session"
                     );
                 }
             }
-            if row["type"] == "turn_context" {
-                model = identifier(row["payload"]["model"].as_str().unwrap_or("unknown"))?;
+            if row.kind == "turn_context" {
+                model = identifier(payload.model.as_str().unwrap_or("unknown"))?;
             }
-            if row["type"] != "event_msg" || row["payload"]["type"] != "token_count" {
+            if row.kind != "event_msg" || payload.kind != "token_count" {
                 continue;
             }
-            let usage = &row["payload"]["info"]["total_token_usage"];
+            let usage = &payload.info["total_token_usage"];
             if usage.is_null() {
                 continue;
             }
@@ -426,7 +459,7 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path) -> Result<Snapsh
                     model: model.clone(),
                     counts: delta,
                     cost: None,
-                    ts: timestamp(&row),
+                    ts: timestamp(&row.timestamp),
                 },
             );
         }
@@ -668,15 +701,74 @@ mod tests {
                     .unwrap()
                     .is_empty());
             }
-            for invalid in ["{bad\n".to_owned(), " ".repeat(MAX_LINE + 1)] {
-                std::fs::write(&path, invalid).unwrap();
-                assert!(ingest(&store, agent, "s", "/project", &path).is_err());
-            }
+            std::fs::write(&path, "{bad\n").unwrap();
+            assert!(ingest(&store, agent, "s", "/project", &path).is_err());
         }
         let persisted = summaries(&store, None, Some("s")).unwrap();
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0].input_tokens, 7);
         assert_eq!(persisted[0].output_tokens, 3);
+    }
+
+    #[test]
+    fn oversized_lines_never_fail_the_import_or_drop_a_usage_record() {
+        const BIG: usize = 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        let row = |id: &str, input: u64, content: usize| {
+            json!({"type":"assistant","sessionId":"s","message":{"id":id,"model":"unknown","content":"x".repeat(content),"usage":{"input_tokens":input,"output_tokens":1}}}).to_string()
+        };
+        // A huge tool result carries no accounting, while an assistant record with a huge
+        // file write still carries billable usage; neither may stop or shrink the import.
+        let tool_result =
+            json!({"type":"user","sessionId":"s","message":{"content":"x".repeat(BIG)}})
+                .to_string();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{tool_result}\n{}\n{}\n",
+                row("m1", 5, 0),
+                row("m2", 7, 0),
+                row("m3", 9, BIG)
+            ),
+        )
+        .unwrap();
+        let imported = ingest(&store, "claude", "s", "/project", &path).unwrap();
+        assert_eq!((imported.len(), imported[0].input_tokens), (1, 21));
+        // Codex rollouts carry the same oversized outputs between token counts.
+        let token_count = |input: u64| {
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":input,"output_tokens":1}}}}).to_string()
+        };
+        let output = json!({"type":"response_item","payload":{"type":"function_call_output","output":"x".repeat(BIG)}}).to_string();
+        std::fs::write(
+            &path,
+            format!("{}\n{output}\n{}\n", token_count(3), token_count(10)),
+        )
+        .unwrap();
+        assert_eq!(
+            ingest(&store, "codex", "c", "/project", &path).unwrap()[0].input_tokens,
+            10
+        );
+        // An oversized line still being written waits like any other partial last line.
+        std::fs::write(
+            &path,
+            format!("{}\n{}", row("m1", 5, 0), &tool_result[..BIG + 10]),
+        )
+        .unwrap();
+        assert_eq!(
+            ingest(&store, "claude", "s", "/project", &path).unwrap()[0].input_tokens,
+            5
+        );
+        std::fs::write(
+            &path,
+            format!("{}\n{}\n", " ".repeat(BIG + 1), row("m1", 6, 0)),
+        )
+        .unwrap();
+        assert_eq!(
+            ingest(&store, "claude", "s", "/project", &path).unwrap()[0].input_tokens,
+            6
+        );
     }
 
     #[test]

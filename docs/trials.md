@@ -41,6 +41,7 @@ yoke trial report --since 2026-10-20 --until 2026-10-27 --agent codex --json
 The report opens `~/.yoke/state.db` read-only.
 It never creates, migrates or writes state, so it is safe to run while hooks are active.
 `--since` is inclusive and `--until` exclusive; each takes `YYYY-MM-DD` (local midnight) or an RFC 3339 time with an offset, such as `2026-10-20T09:00:00+06:00`.
+When both bounds are supplied, `--until` must be later than `--since`; empty or reversed windows are rejected instead of producing an empty acceptance report.
 It prints, per agent and mode, the calendar span, sessions, active days and hours, working days and outcome counts per event.
 It then lists flagged decisions newest first with their failing gates and redacted reasons, recovery incidents, and the acceptance status of each criterion.
 Flagged decisions are paged; `--limit` sets the page size (default 100, at most 1000) and `--before <id>` continues from the `next_before` the previous page printed.

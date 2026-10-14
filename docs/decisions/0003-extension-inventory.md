@@ -13,16 +13,19 @@ Issue #17 asks for that inventory and a read-only drift report before any team d
 `yoke extensions [--json]` reads the documented locations below, prints one row per definition with agent, kind, name, scope, Yoke ownership and origin path, then a drift table.
 It exits 0 when no drift is found and 1 when any drift is found, after printing the full report.
 It never writes extension files, never executes extension code, and never starts MCP servers.
-The only state it touches is the usual `~/.yoke/state.db` open that every project command performs to resolve the project root.
+It reads existing `~/.yoke/state.db` state without creating or migrating it to resolve the project root.
 
 ### Safety rules
 
 Configuration files are read only when they are regular files of at most 4 MiB; Markdown files are read only up to their first 64 KiB to find the frontmatter `name`.
-Symlinks are reported when their target leaves every scanned root, and symlinked directories are listed but never walked.
+Symlinks are reported when their target leaves every scanned root, and recursive directory walks never descend through a linked directory, including a linked starting directory.
+Direct `SKILL.md` manifests in linked skill directories remain inventoried, with an external-target note when applicable.
 Directory walks stop at 8 levels and 2000 files per location, with a note.
 Shape-based redaction cannot recognise every secret (webhook paths, `curl -u` credentials, cookies, unknown key formats), so values are never displayed.
 Hook and MCP commands are reported as the program name and an argument count, MCP URLs as scheme and `host[:port]` only, and MCP environment variables and headers as key names only.
 Every displayed name and summary still passes through `yoke_core::redact::redact`.
+Environment and header key names are also redacted before display; original definition names are compared before display redaction so distinct names cannot become false conflicts.
+Displayed origin paths and symlink diagnostics are redacted too; filesystem access and ownership comparisons retain the original paths internally.
 Hook and MCP commands are kept unredacted only in memory for the existence check and ownership match; they are never serialized.
 
 ### Locations scanned
@@ -79,7 +82,7 @@ Hook commands are shell lines, so only the first word is resolved, `$CLAUDE_PROJ
 Project files are listed even when the agent would ignore them until the project is trusted or `.mcp.json` servers are approved; trust and approval state is not read.
 Only the project root is scanned, not parent or nested directories between the working directory and the root.
 Plugin contents, `--agents` and `--add-dir` sessions, Codex profiles, `requirements.toml` and `managed_config.toml` are not inventoried.
-`yoke install` always writes `~/.claude/settings.json` and `~/.codex/hooks.json`, so with `CLAUDE_CONFIG_DIR` or `CODEX_HOME` set, receipted hooks live in a file the agent does not read and are not marked managed.
+Installation and ownership checks follow absolute `CLAUDE_CONFIG_DIR` and `CODEX_HOME` overrides, using the same settings paths as the agent inventory.
 
 ## Team distribution and conflict handling (design only, no write path)
 

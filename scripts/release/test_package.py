@@ -10,6 +10,22 @@ from package import TARGETS, generate_notices, package_release
 
 
 class ReleasePackagingTests(unittest.TestCase):
+    def test_rejects_binaries_outside_updater_size_limit_before_creating_output(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "binary"
+            for name in ("LICENSE-MIT", "LICENSE-APACHE"):
+                (root / name).write_text(name)
+            for size in (0, 64 * 1024 * 1024 + 1):
+                with binary.open("wb") as fixture:
+                    fixture.truncate(size)
+                output = root / "dist"
+                with self.assertRaisesRegex(ValueError, "Binary size"):
+                    package_release(root, binary, output, TARGETS[0], "Fixture notices")
+                self.assertFalse(output.exists())
+
     def test_all_targets_bundle_notices_and_matching_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
