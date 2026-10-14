@@ -300,6 +300,7 @@ Read the [upgrade notes](docs/upgrade-notes.md) before replacing an existing Yok
 | [Workflows](docs/workflows.md) | Use plans, independent review, memory, presets, and the console |
 | [Troubleshooting](docs/troubleshooting.md) | Diagnose inactive gates, failed checks, and storage problems |
 | [Upgrade notes](docs/upgrade-notes.md) | See every behavior change before replacing a binary |
+| [Development handoff](docs/next-steps.md) | Find the current checkpoint and remaining acceptance roadmap |
 | [Decision records](docs/decisions/README.md) | Read why each design choice was made and where it stops |
 | [Design](docs/specs/2026-10-13-yoke-design.md) | Read the full design and the road to 1.0 |
 

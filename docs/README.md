@@ -14,6 +14,7 @@ It runs as a command rather than a background daemon; the optional console runs 
 | [Workflows](workflows.md) | Use plans, independent review, memory, presets, and the console |
 | [Troubleshooting](troubleshooting.md) | Diagnose inactive gates, failed checks, and storage problems |
 | [Release acceptance](release-acceptance.md) | Check builds, checksums, notices, install and update before publishing |
+| [Development handoff](next-steps.md) | Resume from the hardening checkpoint and complete outstanding acceptance |
 | [Upgrade notes](upgrade-notes.md) | See every behaviour change and upgrade step before replacing a binary |
 | [Trials](trials.md) | Collect and record the observe-day and enforce-week trial evidence |
 | [Contributing](../CONTRIBUTING.md) | Navigate the code and validate a focused change |
