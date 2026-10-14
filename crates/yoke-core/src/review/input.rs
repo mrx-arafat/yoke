@@ -11,14 +11,21 @@ use crate::engine::execute_bounded;
 
 const INPUT_CAP: usize = 1024 * 1024;
 
-pub(super) fn collect(project: &Path) -> Result<String> {
+/// Diff tracked files against `base_ref` (the commit the plan started from) so work committed
+/// during the plan stays visible; plans without a recorded base fall back to `HEAD`.
+pub(super) fn collect(project: &Path, base_ref: Option<&str>) -> Result<String> {
+    let base = base_ref.unwrap_or("HEAD");
+    ensure!(
+        base == "HEAD" || (!base.is_empty() && base.bytes().all(|byte| byte.is_ascii_hexdigit())),
+        "review base must be a commit id"
+    );
     let cwd = project.canonicalize().context("resolve review project")?;
     let root = git(&cwd, &["rev-parse", "--show-toplevel"])?;
     let root = std::str::from_utf8(&root).context("review repository root is not UTF-8")?;
     let project = Path::new(root.strip_suffix('\n').unwrap_or(root)).canonicalize()?;
     let diff = git(
         &project,
-        &["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--"],
+        &["diff", "--no-ext-diff", "--no-textconv", base, "--"],
     )?;
     let diff = String::from_utf8(diff).context("review diff is not UTF-8")?;
     ensure!(

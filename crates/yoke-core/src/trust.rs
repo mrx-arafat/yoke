@@ -142,7 +142,9 @@ fn prepare_snapshot(
     let content =
         String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", file.display()))?;
     if config {
-        Config::parse(&content).with_context(|| format!("validating {}", file.display()))?;
+        Config::parse(&content)
+            .and_then(|config| config.check_hook_budgets())
+            .with_context(|| format!("validating {}", file.display()))?;
     } else {
         validate_knowledge(&content)?;
     }

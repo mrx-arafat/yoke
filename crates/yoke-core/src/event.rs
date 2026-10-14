@@ -12,6 +12,9 @@ pub enum EventKind {
     PreToolUse,
     #[serde(alias = "PostToolUse")]
     PostToolUse,
+    /// Claude Code only: a tool that started executing failed.
+    #[serde(alias = "PostToolUseFailure")]
+    PostToolUseFailure,
     #[serde(alias = "UserPromptSubmit")]
     UserPromptSubmit,
     #[serde(alias = "Stop")]
@@ -31,6 +34,7 @@ impl EventKind {
         match s.trim() {
             "pre_tool_use" | "PreToolUse" => Some(Self::PreToolUse),
             "post_tool_use" | "PostToolUse" => Some(Self::PostToolUse),
+            "post_tool_use_failure" | "PostToolUseFailure" => Some(Self::PostToolUseFailure),
             "user_prompt_submit" | "UserPromptSubmit" => Some(Self::UserPromptSubmit),
             "stop" | "Stop" => Some(Self::Stop),
             "session_start" | "SessionStart" => Some(Self::SessionStart),
@@ -50,6 +54,7 @@ impl EventKind {
         match self {
             Self::PreToolUse => "pre_tool_use",
             Self::PostToolUse => "post_tool_use",
+            Self::PostToolUseFailure => "post_tool_use_failure",
             Self::UserPromptSubmit => "user_prompt_submit",
             Self::Stop => "stop",
             Self::SessionStart => "session_start",
@@ -76,7 +81,11 @@ impl Agent {
     }
 
     pub fn supports(self, kind: EventKind) -> bool {
-        self != Self::Codex || kind != EventKind::Notification
+        self != Self::Codex
+            || !matches!(
+                kind,
+                EventKind::Notification | EventKind::PostToolUseFailure
+            )
     }
 }
 

@@ -278,6 +278,21 @@ fn stop_schedules_bounded_digest_with_off_and_debounces_repeat() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+    loop {
+        let jobs = json(run(&home, &project, &["jobs", "--all", "--json"], b""));
+        let jobs = jobs.as_array().unwrap();
+        assert_eq!(jobs.len(), 1, "one deduplicated digest job");
+        if jobs[0]["state"] == "succeeded" {
+            assert_eq!(jobs[0]["kind"], "memory_digest");
+            assert_eq!(jobs[0]["attempts"], 1);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "digest job did not finish: {jobs:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(
         fs::read_to_string(home.join("digest-calls")).unwrap(),
         "1\n"
@@ -410,6 +425,17 @@ fn plan_cli_records_session_waits_for_human_and_completes_real_check() {
     )
     .status
     .success());
+    for args in [
+        &["plan", "cancel", "fixture"][..],
+        &["plan", "reassign", "fixture", "--session", "other"][..],
+    ] {
+        let input = b"cancel fixture\nreassign fixture\n";
+        assert!(!run(&home, &project, args, input).status.success());
+    }
+    assert_eq!(
+        plan::get(&store, &project, "fixture").unwrap().state,
+        "waiting"
+    );
     plan::resume(&store, &project, "fixture").unwrap();
     use std::os::unix::fs::PermissionsExt;
     let fake_bin = temp.path().join("fake-bin");
@@ -431,34 +457,25 @@ fn plan_cli_records_session_waits_for_human_and_completes_real_check() {
             if mode == "enforce" && index == 1 {
                 let before = plan::detail(&store, &project, "fixture").unwrap();
                 let invalid = serde_json::json!({"session_id":"plan-fixture","transcript_path":home.join("missing-transcript")});
-                let rejected = run_with_path(
+                let capped = run_with_path(
                     &home,
                     &project,
                     &["run-hook", "Stop", "--agent", "codex"],
                     invalid.to_string().as_bytes(),
                     Some(&fake_path),
                 );
-                let wire: Value = serde_json::from_slice(&rejected.stdout).unwrap();
-                assert_eq!(wire["decision"], "block");
+                assert!(capped.status.success());
+                assert!(String::from_utf8_lossy(&capped.stderr).contains("usage ingestion failed"));
+                assert!(
+                    capped.stdout.is_empty(),
+                    "unreadable usage data must not block a capped stop"
+                );
                 let after = plan::detail(&store, &project, "fixture").unwrap();
                 assert_eq!(
-                    after.plan.state, "building",
-                    "invalid transcript must not stall a plan"
+                    after.plan.state, "stalled",
+                    "the stop guard cap must still apply"
                 );
-                assert_eq!(after.transitions.len(), before.transitions.len());
-                assert!(!home.join("digest-started").exists());
-                use sha2::{Digest, Sha256};
-                let key = format!(
-                    "memory.digest.attempt.{:x}",
-                    Sha256::digest(format!(
-                        "{}\0plan-fixture",
-                        project.canonicalize().unwrap().display()
-                    ))
-                );
-                assert!(
-                    store.get_kv(&key).unwrap().is_none(),
-                    "invalid transcript must not claim or spawn a digest"
-                );
+                assert_eq!(after.transitions.len(), before.transitions.len() + 1);
             }
             let stopped = run_with_path(
                 &home,
@@ -525,4 +542,224 @@ fn plan_cli_records_session_waits_for_human_and_completes_real_check() {
         .checks
         .iter()
         .any(|check| check.result == "void" && check.name == "review"));
+}
+
+#[test]
+fn plan_cli_validates_tracks_tasks_and_keeps_human_actions_human() {
+    use std::os::unix::fs::PermissionsExt;
+    use yoke_core::{plan, store::Store, trust};
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    fs::create_dir_all(home.join(".yoke")).unwrap();
+    fs::create_dir(&project).unwrap();
+    assert!(project.starts_with(std::env::temp_dir()));
+    fs::write(project.join("yoke.toml"), "mode='enforce'\n").unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["add", "yoke.toml"],
+        &["commit", "-qm", "fixture"],
+    ] {
+        let output = Command::new("git")
+            .current_dir(&project)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgSign=false",
+            ])
+            .args([
+                "-c",
+                "user.name=Yoke Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let store = Store::open(home.join(".yoke/state.db")).unwrap();
+    trust::prepare_project(&store, &project)
+        .unwrap()
+        .commit(&store)
+        .unwrap();
+    assert!(run(&home, &project, &["plan", "new", "fixture"], b"")
+        .status
+        .success());
+    let row = plan::get(&store, &project, "fixture").unwrap();
+    fs::write(&row.file, "+++\ntitle='Fixture'\n[[check]]\nname='unit'\nrun='true'\n[[requirement]]\nid='works'\ntext='Unit check passes'\nchecks=['unit']\n[[requirement]]\nid='copy'\ntext='A human approves the copy'\nhuman=true\n[[task]]\nid='build'\ntitle='Build it'\n[[task]]\nid='signoff'\ntitle='Sign off'\ndepends_on=['build']\nowner='human'\n+++\n\n## Rollout\n").unwrap();
+    let fake_bin = temp.path().join("fake-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    fs::write(fake_bin.join("codex"), "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s' '[{\"severity\":\"blocking\",\"anchor\":\"requirement:copy\",\"summary\":\"Name the copy reviewer\"}]'\n").unwrap();
+    fs::set_permissions(fake_bin.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_path = std::path::PathBuf::from(format!("{}:/usr/bin:/bin", fake_bin.display()));
+    let validated = run_with_path(
+        &home,
+        &project,
+        &["plan", "validate", "fixture", "--agent", "claude"],
+        b"",
+        Some(&fake_path),
+    );
+    assert!(
+        validated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&validated.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&validated.stdout);
+    let report: Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(report["blocking"], 1);
+    let finding = report["findings"][0]["id"].as_i64().unwrap().to_string();
+    for args in [
+        &["plan", "resolve", "fixture", finding.as_str()][..],
+        &["plan", "acknowledge", "fixture", finding.as_str()],
+    ] {
+        assert!(!run(&home, &project, args, b"resolve 1\nacknowledge 1\n")
+            .status
+            .success());
+    }
+    assert!(plan::prepare_approval(&store, &project, "fixture").is_err());
+    let comment = json(run(
+        &home,
+        &project,
+        &[
+            "plan",
+            "comment",
+            "fixture",
+            "--anchor",
+            "heading:rollout",
+            "--text",
+            "Stage first?",
+        ],
+        b"",
+    ));
+    assert_eq!(
+        (comment["author"].as_str(), comment["state"].as_str()),
+        (Some("agent"), Some("open"))
+    );
+    // Fixture preparation uses the human core APIs, never bypassing CLI human checks.
+    let id = finding.parse().unwrap();
+    plan::close(
+        &store,
+        &project,
+        "fixture",
+        id,
+        plan::Closure::Acknowledged,
+        None,
+    )
+    .unwrap();
+    plan::approve(
+        &store,
+        &plan::prepare_approval(&store, &project, "fixture").unwrap(),
+    )
+    .unwrap();
+    let hook = run(
+        &home,
+        &project,
+        &["run-hook", "PostToolUse", "--agent", "codex"],
+        br#"{"session_id":"tasks","tool_name":"Bash","tool_input":{"command":"true"}}"#,
+    );
+    assert!(hook.status.success());
+    json(run(
+        &home,
+        &project,
+        &["plan", "start", "fixture", "--session", "tasks"],
+        b"",
+    ));
+    let done = json(run(
+        &home,
+        &project,
+        &[
+            "plan",
+            "task",
+            "done",
+            "fixture",
+            "build",
+            "--evidence",
+            "built",
+        ],
+        b"",
+    ));
+    assert_eq!(done["state"], "done");
+    for args in [
+        &["plan", "task", "done", "fixture", "signoff"][..],
+        &[
+            "plan",
+            "accept",
+            "fixture",
+            "copy",
+            "--evidence",
+            "approved",
+        ],
+    ] {
+        assert!(!run(&home, &project, args, b"done signoff\naccept copy\n")
+            .status
+            .success());
+    }
+    let status = run(&home, &project, &["plan", "status", "fixture"], b"");
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(status.status.success(), "{text}");
+    for line in [
+        "  tasks: 1/2 done",
+        "  \"build\",agent,done,\"Build it\"",
+        "  \"signoff\",human,ready,\"Sign off\"",
+        "  \"copy\",unsatisfied,\"A human approves the copy\"",
+        "open_feedback[1]{id,author,severity,state,anchor,text}:",
+    ] {
+        assert!(
+            text.lines().any(|candidate| candidate == line),
+            "missing {line:?} in\n{text}"
+        );
+    }
+    let detail = json(run(
+        &home,
+        &project,
+        &["plan", "status", "fixture", "--json"],
+        b"",
+    ));
+    assert_eq!(
+        detail["progress"]["tasks"][0]["completion"]["evidence"],
+        "built"
+    );
+    assert_eq!(detail["feedback"][0]["state"], "acknowledged");
+}
+
+#[test]
+fn console_refuses_agent_processes_before_serving_or_printing_a_url() {
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir(&project).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_yoke"))
+        .args(["console", "--no-open"])
+        .env("HOME", &home)
+        .current_dir(&project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("console kept serving for a noninteractive caller");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{stdout}");
+    assert!(stdout.contains("console requires"), "{stdout}");
+    assert!(!stdout.contains("http://"), "{stdout}");
 }

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
@@ -7,7 +8,8 @@ use super::{now, CheckRun, PlanRecord, TransitionRecord};
 use crate::redact::redact_payload;
 use crate::store::Store;
 
-const COLUMNS: &str = "id,project,slug,file,state,approved_header,revision,created_at,updated_at";
+const COLUMNS: &str =
+    "id,project,slug,file,state,approved_header,revision,created_at,updated_at,base_ref";
 
 fn row(row: &Row<'_>) -> rusqlite::Result<PlanRecord> {
     Ok(PlanRecord {
@@ -20,6 +22,7 @@ fn row(row: &Row<'_>) -> rusqlite::Result<PlanRecord> {
         revision: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+        base_ref: row.get(9)?,
     })
 }
 
@@ -60,12 +63,14 @@ pub(super) fn insert(store: &Store, project: &Path, slug: &str, file: &Path) -> 
     })
 }
 
+/// The plan's project, not the session's latest project, scopes enforcement, so a session
+/// that visited another project still finds its plan when it returns.
 pub(super) fn active(store: &Store, project: &Path, session: &str) -> Result<Option<PlanRecord>> {
     let id: Option<i64> = store
         .connection()
         .query_row(
-            "SELECT active_plan FROM sessions WHERE id=?1 AND project=?2",
-            params![session, project.to_str()],
+            "SELECT active_plan FROM sessions WHERE id=?1",
+            [session],
             |row| row.get(0),
         )
         .optional()?
@@ -91,6 +96,20 @@ fn by_id(tx: &Transaction<'_>, id: i64) -> Result<PlanRecord> {
     )?)
 }
 
+/// Freeze the approved header only if `allowed` still holds inside the approving transaction.
+pub(super) fn approve(
+    store: &Store,
+    plan: &PlanRecord,
+    header: &str,
+    allowed: impl FnOnce(&Transaction<'_>) -> Result<()>,
+) -> Result<PlanRecord> {
+    store.transaction(|tx| {
+        allowed(tx)?;
+        update(tx, plan, "approved", "human", None, Some(header))?;
+        by_id(tx, plan.id)
+    })
+}
+
 pub(super) fn transition(
     store: &Store,
     plan: &PlanRecord,
@@ -102,30 +121,107 @@ pub(super) fn transition(
 ) -> Result<PlanRecord> {
     store.transaction(|tx| {
         if let Some(session) = session {
-            let active: Option<Option<i64>> = tx
-                .query_row(
-                    "SELECT active_plan FROM sessions WHERE id=?1 AND project=?2",
-                    params![session, plan.project],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let active = active.context("session not found for this project; run a hook first")?;
-            if let Some(id) = active.filter(|id| *id != plan.id) {
-                let previous = by_id(tx, id)?;
-                ensure!(
-                    previous.state == "done",
-                    "session already has unfinished plan {}",
-                    previous.slug
-                );
-            }
-            tx.execute(
-                "UPDATE sessions SET active_plan=?1 WHERE id=?2 AND project=?3",
-                params![plan.id, session, plan.project],
-            )?;
+            bind_session(tx, plan, session)?;
         }
         update(tx, plan, state, actor, note, header)?;
         by_id(tx, plan.id)
     })
+}
+
+/// Begin building and pin the commit the plan started from; a later restart keeps the first base.
+pub(super) fn start(
+    store: &Store,
+    plan: &PlanRecord,
+    session: &str,
+    base_ref: &str,
+) -> Result<PlanRecord> {
+    store.transaction(|tx| {
+        bind_session(tx, plan, session)?;
+        update(tx, plan, "building", "agent", None, None)?;
+        tx.execute(
+            "UPDATE plans SET base_ref=COALESCE(base_ref,?1) WHERE id=?2",
+            params![base_ref, plan.id],
+        )?;
+        by_id(tx, plan.id)
+    })
+}
+
+/// Return an interrupted `checking` plan to `building` and keep the interrupted run as evidence.
+pub(super) fn recover(
+    store: &Store,
+    plan: &PlanRecord,
+    interrupted: &mut CheckRun,
+) -> Result<PlanRecord> {
+    store.transaction(|tx| {
+        let note = "recovered an interrupted check; its results were never recorded";
+        update(tx, plan, "building", "human", Some(note), None)?;
+        save_run(tx, interrupted)?;
+        by_id(tx, plan.id)
+    })
+}
+
+/// Cancel the plan, then release every session bound to it.
+pub(super) fn cancel(store: &Store, plan: &PlanRecord, reason: &str) -> Result<PlanRecord> {
+    store.transaction(|tx| {
+        // Transition first so the audit fact still names the session that owned the plan.
+        update(tx, plan, "cancelled", "human", Some(reason), None)?;
+        tx.execute(
+            "UPDATE sessions SET active_plan=NULL WHERE active_plan=?1",
+            [plan.id],
+        )?;
+        by_id(tx, plan.id)
+    })
+}
+
+/// Bind the plan to one replacement session and release all others, so only it owns the stop guard.
+pub(super) fn reassign(store: &Store, plan: &PlanRecord, session: &str) -> Result<PlanRecord> {
+    store.transaction(|tx| {
+        let previous: Vec<String> = tx
+            .prepare("SELECT id FROM sessions WHERE active_plan=?1 ORDER BY id")?
+            .query_map([plan.id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        ensure!(
+            !previous.iter().any(|id| id == session),
+            "plan is already assigned to that session"
+        );
+        bind_session(tx, plan, session)?;
+        tx.execute(
+            "UPDATE sessions SET active_plan=NULL WHERE active_plan=?1 AND id!=?2",
+            params![plan.id, session],
+        )?;
+        let from = if previous.is_empty() {
+            "no session".to_owned()
+        } else {
+            previous.join(", ")
+        };
+        let note = format!("reassigned from {from} to {session}");
+        update(tx, plan, &plan.state, "human", Some(&note), None)?;
+        by_id(tx, plan.id)
+    })
+}
+
+fn bind_session(tx: &Transaction<'_>, plan: &PlanRecord, session: &str) -> Result<()> {
+    let active: Option<Option<i64>> = tx
+        .query_row(
+            "SELECT active_plan FROM sessions WHERE id=?1 AND project=?2",
+            params![session, plan.project],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let active = active.context("session not found for this project; run a hook first")?;
+    if let Some(id) = active.filter(|id| *id != plan.id) {
+        let previous = by_id(tx, id)?;
+        ensure!(
+            previous.state == "done",
+            "session already has unfinished plan {}",
+            previous.slug
+        );
+    }
+    tx.execute(
+        "UPDATE sessions SET active_plan=?1 WHERE id=?2 AND project=?3",
+        params![plan.id, session, plan.project],
+    )?;
+    Ok(())
 }
 
 fn update(
@@ -168,11 +264,35 @@ pub(super) fn finish(
             return Ok((current, false));
         }
         update(tx, plan, state, "yoke", note, None)?;
+        if state == "done" {
+            // Every run of one check shares the tree fingerprint taken before it started.
+            let fingerprint = &runs
+                .first()
+                .context("a completed plan needs check runs")?
+                .fingerprint;
+            ensure!(
+                runs.iter().all(|run| &run.fingerprint == fingerprint),
+                "check runs disagree on the completed tree"
+            );
+            tx.execute(
+                "UPDATE plans SET done_fingerprint=?1 WHERE id=?2",
+                params![fingerprint, plan.id],
+            )?;
+        }
         for run in runs.iter_mut() {
             save_run(tx, run)?;
         }
         Ok((by_id(tx, plan.id)?, true))
     })
+}
+
+/// Replace the completed tree's anchor with its content anchor while the plan is still done.
+pub(super) fn anchor_done(store: &Store, plan: &PlanRecord, anchor: &str) -> Result<()> {
+    store.connection().execute(
+        "UPDATE plans SET done_fingerprint=?1 WHERE id=?2 AND revision=?3 AND state='done'",
+        params![anchor, plan.id, plan.revision],
+    )?;
+    Ok(())
 }
 
 pub(super) fn save_review(store: &Store, run: &mut CheckRun) -> Result<()> {
@@ -187,13 +307,32 @@ fn save_run(tx: &Transaction<'_>, run: &mut CheckRun) -> Result<()> {
     run.findings = findings;
     tx.execute("INSERT INTO check_runs(plan_id,ts,name,command,exit_code,output_tail,fingerprint,blocking,ms,result,findings,artifacts) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![run.plan_id,run.ts,run.name,run.command,run.exit_code,run.output_tail,run.fingerprint,run.blocking,run.ms.min(i64::MAX as u64) as i64,run.result,run.findings.to_string(),serde_json::to_string(&run.artifacts)?])?;
     run.id = tx.last_insert_rowid();
+    for (path, hash) in &run.artifact_hashes {
+        tx.execute(
+            "INSERT INTO evidence(check_run_id,path,content_hash) VALUES(?1,?2,?3)",
+            params![run.id, path, hash],
+        )?;
+    }
     let plan = by_id(tx, run.plan_id)?;
     fact(tx, &plan, run.ts, "check_result", &serde_json::json!({"plan": plan.slug, "check": run.name, "result": run.result, "exit_code": run.exit_code, "blocking": run.blocking, "output": run.output_tail}).to_string())?;
     Ok(())
 }
 
-fn fact(tx: &Transaction<'_>, plan: &PlanRecord, ts: i64, kind: &str, detail: &str) -> Result<()> {
-    let session: String = tx.query_row("SELECT id FROM sessions WHERE active_plan=?1 AND project=?2 ORDER BY started_at DESC,id LIMIT 1", params![plan.id,plan.project], |row| row.get(0)).optional()?.unwrap_or_default();
+pub(super) fn fact(
+    tx: &Transaction<'_>,
+    plan: &PlanRecord,
+    ts: i64,
+    kind: &str,
+    detail: &str,
+) -> Result<()> {
+    let session: String = tx
+        .query_row(
+            "SELECT id FROM sessions WHERE active_plan=?1 ORDER BY started_at DESC,id LIMIT 1",
+            [plan.id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
     tx.execute(
         "INSERT INTO facts(ts,session_id,project,kind,detail) VALUES(?1,?2,?3,?4,?5)",
         params![
@@ -241,17 +380,35 @@ pub(super) fn checks(store: &Store, id: i64) -> Result<Vec<CheckRun>> {
                 result: row.get(10)?,
                 findings: serde_json::Value::Null,
                 artifacts: Vec::new(),
+                artifact_hashes: BTreeMap::new(),
             },
             row.get::<_, String>(11)?,
             row.get::<_, String>(12)?,
         ))
     })?;
-    rows.map(|row| {
-        let (mut run, findings, artifacts) = row?;
-        run.findings = serde_json::from_str(&findings).context("invalid saved review findings")?;
-        run.artifacts =
-            serde_json::from_str(&artifacts).context("invalid saved check artifacts")?;
-        Ok(run)
-    })
-    .collect()
+    let mut runs: Vec<CheckRun> = rows
+        .map(|row| {
+            let (mut run, findings, artifacts) = row?;
+            run.findings =
+                serde_json::from_str(&findings).context("invalid saved review findings")?;
+            run.artifacts =
+                serde_json::from_str(&artifacts).context("invalid saved check artifacts")?;
+            Ok(run)
+        })
+        .collect::<Result<_>>()?;
+    let mut statement = store.connection().prepare("SELECT check_run_id,path,content_hash FROM evidence WHERE check_run_id IN (SELECT id FROM check_runs WHERE plan_id=?1)")?;
+    let hashes = statement.query_map([id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for hash in hashes {
+        let (run_id, path, hash) = hash?;
+        if let Some(run) = runs.iter_mut().find(|run| run.id == run_id) {
+            run.artifact_hashes.insert(path, hash);
+        }
+    }
+    Ok(runs)
 }

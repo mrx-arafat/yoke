@@ -10,6 +10,7 @@ fn fixture() -> (TempDir, InstallOptions) {
         claude_settings: root.join("claude/settings.json"),
         codex_hooks: root.join("codex/hooks.json"),
         codex_config: root.join("codex/config.toml"),
+        claude_managed: root.join("managed"),
         state_dir: root.join("state"),
         executable: root.join("bin/yoke's executable"),
         agents: vec![Agent::Claude, Agent::Codex],
@@ -36,11 +37,20 @@ fn roundtrip_preserves_existing_settings_and_is_idempotent() {
     let installed = fs::read_to_string(&options.claude_settings).unwrap();
     assert!(installed
         .contains("{ \"hooks\": [{\"type\":\"command\",\"command\":\"yoke custom-user-hook\"}] }"));
+    let claude: Value = serde_json::from_str(&installed).unwrap();
+    assert!(claude["hooks"]["PostToolUseFailure"].is_array());
     let hooks: Value =
         serde_json::from_str(&fs::read_to_string(&options.codex_hooks).unwrap()).unwrap();
     assert!(hooks["hooks"].get("SessionEnd").is_some());
     assert!(hooks["hooks"].get("Notification").is_none());
+    assert!(hooks["hooks"].get("PostToolUseFailure").is_none());
     assert_eq!(hooks["hooks"].as_object().unwrap().len(), 7);
+    for (event, groups) in hooks["hooks"].as_object().unwrap() {
+        assert_eq!(
+            groups[0]["hooks"][0]["statusMessage"],
+            format!("Yoke: {event}")
+        );
+    }
     assert!(install(&options).unwrap().changes.is_empty());
     let backup_root = options.state_dir.join("backups");
     let backup_count = fs::read_dir(&backup_root).unwrap().count();
@@ -245,4 +255,185 @@ fn interrupted_install_recovers_from_receipt_and_refuses_symlink_targets() {
     std::os::unix::fs::symlink(&target, &options.claude_settings).unwrap();
     assert!(install(&options).is_err());
     assert_eq!(fs::read_to_string(target).unwrap(), "{}");
+}
+
+fn unlabeled_install(options: &InstallOptions) {
+    install(options).unwrap();
+    for agent in selected(options) {
+        let path = receipt_path(options, agent);
+        let mut receipt: Receipt =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let mut installed = settings(receipt.hooks.after.as_deref()).unwrap();
+        for owned in &mut receipt.added {
+            let old = owned.group.clone();
+            owned.group["hooks"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("statusMessage");
+            let groups = installed["hooks"][&owned.event].as_array_mut().unwrap();
+            *groups.iter_mut().find(|group| **group == old).unwrap() = owned.group.clone();
+        }
+        receipt.hooks.after = Some(installed.to_string());
+        put(&receipt.hooks.path, receipt.hooks.after.as_deref().unwrap());
+        put(&path, &serde_json::to_string(&receipt).unwrap());
+    }
+}
+
+#[test]
+fn labels_upgrade_owned_hooks_without_duplicates_and_recover_interrupted_writes() {
+    let (_dir, mut options) = fixture();
+    unlabeled_install(&options);
+    let mut previous = Vec::new();
+    for agent in selected(&options) {
+        let path = hook_path(&options, agent);
+        let mut value = settings(files::read(path).unwrap().as_deref()).unwrap();
+        value["theme"] = json!("user edit");
+        value["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"hooks":[{"type":"command","command":"echo keep"}]}));
+        let raw = value.to_string();
+        put(path, &raw);
+        previous.push((path.to_path_buf(), raw));
+    }
+    options.dry_run = true;
+    assert_eq!(install(&options).unwrap().changes.len(), 2);
+    for (path, raw) in &previous {
+        assert_eq!(fs::read_to_string(path).unwrap(), *raw);
+    }
+    options.dry_run = false;
+    install(&options).unwrap();
+    // Ownership persisted but settings replacement did not complete.
+    for (path, raw) in &previous {
+        put(path, raw);
+    }
+    install(&options).unwrap();
+    for agent in selected(&options) {
+        let value = settings(files::read(hook_path(&options, agent)).unwrap().as_deref()).unwrap();
+        assert_eq!(value["theme"], "user edit");
+        for (event, groups) in value["hooks"].as_object().unwrap() {
+            assert_eq!(
+                groups.as_array().unwrap().len(),
+                if event == "Stop" { 2 } else { 1 }
+            );
+            assert_eq!(
+                groups[0]["hooks"][0]["statusMessage"],
+                format!("Yoke: {event}")
+            );
+        }
+    }
+    assert!(install(&options).unwrap().changes.is_empty());
+    uninstall(&options).unwrap();
+    for agent in selected(&options) {
+        let value = settings(files::read(hook_path(&options, agent)).unwrap().as_deref()).unwrap();
+        assert_eq!(
+            value,
+            json!({"theme":"user edit","hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo keep"}]}]}})
+        );
+    }
+}
+
+#[test]
+fn interrupted_label_upgrade_can_uninstall_and_user_handler_edits_are_not_overwritten() {
+    let (_dir, options) = fixture();
+    unlabeled_install(&options);
+    let previous: Vec<_> = selected(&options)
+        .into_iter()
+        .map(|agent| {
+            let path = hook_path(&options, agent).to_path_buf();
+            let raw = fs::read_to_string(&path).unwrap();
+            (path, raw)
+        })
+        .collect();
+    install(&options).unwrap();
+    for (path, raw) in &previous {
+        put(path, raw);
+    }
+    uninstall(&options).unwrap();
+    assert!(!options.claude_settings.exists());
+    assert!(!options.codex_hooks.exists());
+
+    unlabeled_install(&options);
+    let mut value = settings(files::read(&options.claude_settings).unwrap().as_deref()).unwrap();
+    value["hooks"]["Stop"][0]["hooks"][0]["statusMessage"] = json!("My custom label");
+    let edited = value.to_string();
+    put(&options.claude_settings, &edited);
+    let receipt = files::read(&receipt_path(&options, Agent::Claude)).unwrap();
+    assert!(install(&options).is_err());
+    assert_eq!(
+        fs::read_to_string(&options.claude_settings).unwrap(),
+        edited
+    );
+    assert_eq!(
+        files::read(&receipt_path(&options, Agent::Claude)).unwrap(),
+        receipt
+    );
+}
+
+#[test]
+fn preexisting_unlabeled_hooks_remain_unowned_without_duplicate_commands() {
+    let (_dir, options) = fixture();
+    let mut group = prepare(&options, Agent::Claude)
+        .unwrap()
+        .added
+        .into_iter()
+        .find(|owned| owned.event == "Stop")
+        .unwrap()
+        .group;
+    group["hooks"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("statusMessage");
+    let original = json!({"hooks":{"Stop":[group]}}).to_string();
+    put(&options.claude_settings, &original);
+    install(&options).unwrap();
+    let value = settings(files::read(&options.claude_settings).unwrap().as_deref()).unwrap();
+    assert_eq!(value["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    assert!(value["hooks"]["Stop"][0]["hooks"][0]
+        .get("statusMessage")
+        .is_none());
+    uninstall(&options).unwrap();
+    assert_eq!(
+        fs::read_to_string(&options.claude_settings).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn install_reports_user_and_managed_hook_blockers_without_changing_them() {
+    let (_dir, options) = fixture();
+    let managed = options.claude_managed.join("managed-settings.json");
+    put(&managed, r#"{"allowManagedHooksOnly": true}"#);
+    let refused = install(&options).unwrap_err().to_string();
+    assert!(refused.contains("allowManagedHooksOnly"), "{refused}");
+    assert!(!options.claude_settings.exists());
+    fs::remove_file(&managed).unwrap();
+    install(&options).unwrap();
+    let mut settings: Value =
+        serde_json::from_str(&fs::read_to_string(&options.claude_settings).unwrap()).unwrap();
+    settings["disableAllHooks"] = json!(true);
+    put(
+        &options.claude_settings,
+        &serde_json::to_string_pretty(&settings).unwrap(),
+    );
+    put(
+        &options
+            .claude_managed
+            .join("managed-settings.d/50-policy.json"),
+        r#"{"allowManagedHooksOnly": true}"#,
+    );
+    let disabled = fs::read_to_string(&options.claude_settings).unwrap();
+    let report = install(&options).unwrap();
+    assert!(report.changes.is_empty());
+    for key in ["disableAllHooks", "allowManagedHooksOnly"] {
+        assert!(
+            report.warnings.iter().any(|warning| warning.contains(key)),
+            "{key}: {:?}",
+            report.warnings
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&options.claude_settings).unwrap(),
+        disabled
+    );
 }

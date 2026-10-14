@@ -1,6 +1,5 @@
 "use strict";
 (() => {
-  const token = document.querySelector('meta[name="yoke-token"]').content;
   const csrf = document.querySelector('meta[name="yoke-csrf"]').content;
   const view = document.getElementById("view");
   const announce = text => { document.getElementById("announcement").textContent = text; };
@@ -20,7 +19,6 @@
     navigation = new AbortController();
     const url = new URL(href, location.href);
     if (url.origin !== location.origin) return;
-    url.searchParams.set("token", token);
     view.setAttribute("aria-busy", "true");
     const loader = setTimeout(() => {
       const loading = document.createElement("div");
@@ -29,13 +27,15 @@
       view.prepend(loading);
     }, 120);
     try {
-      const response = await fetch(url, {headers:{"X-Yoke-Fragment":"1","Authorization":`Bearer ${token}`},signal:navigation.signal});
+      const response = await fetch(url, {headers:{"X-Yoke-Fragment":"1"},signal:navigation.signal});
       const text = await response.text();
       const parsed = new DOMParser().parseFromString(text, "text/html");
       if (!response.ok) throw new Error(parsed.querySelector("main")?.textContent || text || `Request failed (${response.status})`);
       const main = parsed.querySelector("main");
       if (!main) throw new Error("The server returned an incomplete page.");
       view.replaceChildren(main);
+      const unread=parsed.querySelector("[data-unread-update]"),badge=document.querySelector("[data-unread-count]");
+      if(unread&&badge){badge.hidden=unread.dataset.unreadUpdate==="0";badge.querySelector("[data-unread-value]").textContent=unread.dataset.unreadUpdate;}
       if (history) window.history.pushState({}, "", url);
       document.querySelectorAll("nav[aria-label='Workspace'] a").forEach(a => {
         if (new URL(a.href).pathname === url.pathname) a.setAttribute("aria-current","page");
@@ -115,7 +115,7 @@
     }
     if (document.querySelector("dialog[open]") || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
     if(event.key==="?") {help.showModal();return;}
-    if(prefix) {prefix=false;const pages={d:"decisions",s:"sessions",p:"plans",m:"memory",t:"trust",u:"usage"};if(pages[event.key]){event.preventDefault();navigate(`/${pages[event.key]}`);}return;}
+    if(prefix) {prefix=false;const pages={d:"decisions",o:"projects",s:"sessions",p:"plans",m:"memory",t:"trust",u:"usage",n:"notifications",w:"settings"};if(pages[event.key]){event.preventDefault();navigate(pages[event.key]);}return;}
     if(event.key==="g") {prefix=true;return;}
     if(event.key==="j" || event.key==="k") {
       event.preventDefault();const rows=[...document.querySelectorAll("[data-row]")];const at=rows.indexOf(document.activeElement);
@@ -123,28 +123,33 @@
     }
   });
   hydrate();
+  const identity=el=>["action","id","ids","slug"].map(name=>el.dataset[name]||"").join("\n");
   async function perform(button) {
     button.disabled=true;
     const zone=button.closest(".action-zone") || button.parentElement;
+    let focusTarget=button;
     zone.querySelector(".action-error")?.remove();
     try {
       const body={action:button.dataset.action};
       if(button.dataset.id)body.id=Number(button.dataset.id);
+      if(button.dataset.ids)body.ids=button.dataset.ids.split(",").map(Number);
       if(button.dataset.slug)body.slug=button.dataset.slug;
       if(button.dataset.ticket)body.ticket=button.dataset.ticket;
       if(button.dataset.value)body.value=button.dataset.value==="true";
-      const response=await fetch(`/actions?token=${token}`,{method:"POST",headers:{"Authorization":`Bearer ${token}`,"X-Yoke-CSRF":csrf,"Content-Type":"application/json"},body:JSON.stringify(body)});
+      const response=await fetch("actions",{method:"POST",headers:{"X-Yoke-CSRF":csrf,"Content-Type":"application/json"},body:JSON.stringify(body)});
       const result=await response.json();
       if(!response.ok)throw new Error(result.error?.message || "Action failed. Try again.");
-      if(result.data.confirmation){zone.querySelector(".confirmation")?.remove();zone.insertAdjacentHTML("beforeend",result.data.confirmation);zone.querySelector("[data-action='approve']").focus();return;}
+      if(result.data.confirmation){zone.querySelector(".confirmation")?.remove();zone.insertAdjacentHTML("beforeend",result.data.confirmation);focusTarget=zone.querySelector("[data-action='approve']");return;}
       await navigate(location.href,false,false);
+      // Re-rendering drops focus to <body>: return to the same control if it survived, else the view.
+      focusTarget=[...view.querySelectorAll("[data-action]")].find(el=>(el===button||!el.disabled)&&identity(el)===identity(button)) || view.querySelector("main");
       const toast=document.getElementById("toast");toast.replaceChildren(document.createTextNode(result.data.message));toast.hidden=false;
       const dismiss=document.createElement("button");dismiss.textContent="Dismiss";dismiss.setAttribute("aria-label","Dismiss notification");dismiss.addEventListener("click",()=>{toast.hidden=true;});toast.append(dismiss);
       if(result.data.undo){const undo=document.createElement("button");undo.textContent="Undo forget";undo.dataset.action="undo-forget";undo.dataset.ticket=result.data.undo;toast.append(undo);setTimeout(()=>{undo.remove();},30000);}
       announce(result.data.message);
     } catch(error) {
       const message=document.createElement("p");message.className="action-error error";message.setAttribute("role","alert");message.textContent=error.message;zone.append(message);
-    } finally {button.disabled=false;}
+    } finally {button.disabled=false;focusTarget?.focus({preventScroll:true});}
   }
   let currentImage;
   const lightbox=document.getElementById("lightbox");
@@ -160,13 +165,26 @@
   lightbox.addEventListener("keydown",event=>{if(event.key==="ArrowLeft"){event.preventDefault();moveImage(-1);}if(event.key==="ArrowRight"){event.preventDefault();moveImage(1);}});
   document.getElementById("lightbox-image").addEventListener("error",()=>{document.getElementById("image-caption").textContent="Screenshot unavailable or changed. Close this view and refresh the check evidence.";});
   const connection=document.getElementById("connection");
-  const events=new EventSource(`/events?token=${token}`);
-  events.addEventListener("ready",()=>{connection.textContent="Live";connection.classList.remove("offline");});
-  events.onerror=()=>{connection.textContent="Reconnecting...";connection.classList.add("offline");};
-  events.addEventListener("change",()=>{
-    const reading=window.scrollY>0 || document.querySelector("details[open],dialog[open],.confirmation") || /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName);
-    if(reading){document.getElementById("notice").hidden=false;announce("New activity is available. Refresh when ready.");}
-    else navigate(location.href,false,false);
-  });
+  let events;
+  function listen() {
+    events=new EventSource("events");
+    events.addEventListener("ready",()=>{connection.textContent="Live";connection.classList.remove("offline");});
+    events.onerror=()=>{
+      connection.textContent="Reconnecting...";connection.classList.add("offline");
+      // Browsers never retry a refused stream (for example 503 while other tabs hold every slot).
+      if(events.readyState===EventSource.CLOSED)setTimeout(listen,3000);
+    };
+    events.addEventListener("change",async()=>{
+      const reading=window.scrollY>0 || document.querySelector("details[open],dialog[open],.confirmation") || /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName);
+      if(reading){document.getElementById("notice").hidden=false;announce("New activity is available. Refresh when ready.");return;}
+      // A live refresh replaces the view; keep keyboard focus on the same control, else the view.
+      const focused=view.contains(document.activeElement)?document.activeElement:null;
+      const key=focused?.dataset.action?identity(focused):null;
+      await navigate(location.href,false,false);
+      if(focused)((key&&[...view.querySelectorAll("[data-action]")].find(el=>!el.disabled&&identity(el)===key))||view.querySelector("main"))?.focus({preventScroll:true});
+    });
+  }
+  listen();
   window.addEventListener("pagehide",()=>events.close());
+  window.addEventListener("pageshow",event=>{if(event.persisted)listen();});
 })();

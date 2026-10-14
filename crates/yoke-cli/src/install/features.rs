@@ -26,6 +26,19 @@ fn parse(raw: &str) -> Result<DocumentMut> {
     Ok(doc)
 }
 
+/// Codex enables hooks by default; only an explicit `false` flag turns them off.
+pub(super) fn hooks_disabled(raw: &str) -> Result<bool> {
+    let doc = parse(raw)?;
+    Ok(doc
+        .get("features")
+        .and_then(Item::as_table_like)
+        .is_some_and(|table| {
+            ["hooks", "codex_hooks"]
+                .iter()
+                .any(|key| table.get(key).and_then(Item::as_bool) == Some(false))
+        }))
+}
+
 pub(super) fn check_enabled(raw: &str) -> Result<()> {
     let doc = parse(raw)?;
     ensure!(

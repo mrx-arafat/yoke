@@ -16,7 +16,45 @@ pub fn quote(value: &str) -> String {
 }
 
 pub fn home() -> Result<PathBuf> {
-    std::env::home_dir().context("cannot determine home directory")
+    config::home()
+}
+
+/// Existing state opened read-only, or an empty in-memory store when there is none; it never
+/// creates, migrates or writes the state database.
+pub fn inspect_store(home: &Path) -> Result<Store> {
+    let path = home.join(".yoke/state.db");
+    if path.exists() {
+        read_existing(&path)
+    } else {
+        Store::open(":memory:")
+    }
+}
+
+/// A file with no committed schema (for example zero bytes after a crash) is reported as such,
+/// not as a version mismatch or a missing table.
+fn read_existing(path: &Path) -> Result<Store> {
+    let store = Store::open_read_only(path).context("read Yoke state without changing it")?;
+    ensure!(
+        store.schema_version()?.0 > 0,
+        "the Yoke state database {} is empty or incomplete; run yoke config from your own terminal, or start your agent, to initialise it",
+        path.display()
+    );
+    Ok(store)
+}
+
+/// Existing state at the schema this binary writes, or `None` when there is no state yet.
+/// Never creates or migrates: hooks that run an older yoke refuse a newer schema.
+pub fn open_current(home: &Path) -> Result<Option<Store>> {
+    let path = home.join(".yoke/state.db");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let (schema, supported) = read_existing(&path)?.schema_version()?;
+    ensure!(
+        schema == supported,
+        "the state database is at schema {schema} and this yoke needs schema {supported}; this command does not upgrade it, because hooks running an older yoke refuse a newer schema. Update the yoke your hooks run; its next hook event upgrades the database"
+    );
+    Store::open(&path).map(Some)
 }
 
 pub fn open_store(home: &Path) -> Result<Store> {
@@ -54,6 +92,8 @@ pub fn confirm(phrase: &str) -> Result<bool> {
 pub fn run(command: Option<Cmd>) -> Result<()> {
     match command {
         Some(Cmd::Console { no_open }) => {
+            // The console can approve, resume and acknowledge, so only a human may start it.
+            require_human("console")?;
             let home = home()?;
             let (_, loaded) = load_project()?;
             crate::console::run(&home, &loaded.project_root, !no_open)
@@ -66,10 +106,16 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
             agent,
         }) => workflow::review(slug, session, agent),
         Some(Cmd::Remember { text, pinned }) => memory::remember(&text, pinned),
-        Some(Cmd::Recall { query, limit, json }) => memory::recall(&query, limit, json),
+        Some(Cmd::Recall {
+            query,
+            limit,
+            json,
+            explain,
+        }) => memory::recall(&query, limit, json, explain),
         Some(Cmd::Forget { id }) => memory::forget(id),
         Some(Cmd::Share { id }) => memory::share(id),
         Some(Cmd::Memory { command }) => memory::run(command),
+        Some(Cmd::Jobs { command, all, json }) => crate::jobs::run(command, all, json),
         Some(Cmd::Preset { command }) => presets::run(command),
         Some(Cmd::Init) => init(),
         Some(Cmd::Trust { global }) => trust(global),
@@ -79,7 +125,15 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
             statusline,
         }) => install(agent, dry_run, statusline, false),
         Some(Cmd::Uninstall { agent, dry_run }) => install(agent, dry_run, false, true),
+        Some(Cmd::Health { json }) => crate::health::run(json),
+        Some(Cmd::Extensions { json }) => crate::extensions::run(json),
+        Some(Cmd::Notifications {
+            command,
+            unread,
+            json,
+        }) => crate::notifications::run(command, unread, json),
         Some(Cmd::Update { check }) => update::run(check, &open_store(&home()?)?),
+        Some(Cmd::Trial { command }) => crate::trial::run(command),
         Some(Cmd::Log {
             project,
             session,
@@ -297,22 +351,17 @@ fn trust(global: bool) -> Result<()> {
 }
 
 fn install(agents: Vec<AgentArg>, dry_run: bool, statusline: bool, remove: bool) -> Result<()> {
-    let home = home()?;
+    let agents = agents
+        .into_iter()
+        .map(|agent| match agent {
+            AgentArg::Claude => install::Agent::Claude,
+            AgentArg::Codex => install::Agent::Codex,
+        })
+        .collect();
     let options = install::InstallOptions {
-        claude_settings: home.join(".claude/settings.json"),
-        codex_hooks: home.join(".codex/hooks.json"),
-        codex_config: home.join(".codex/config.toml"),
-        state_dir: home.join(".yoke"),
-        executable: std::env::current_exe()?,
-        agents: agents
-            .into_iter()
-            .map(|agent| match agent {
-                AgentArg::Claude => install::Agent::Claude,
-                AgentArg::Codex => install::Agent::Codex,
-            })
-            .collect(),
         dry_run,
         statusline,
+        ..install::options(&home()?, std::env::current_exe()?, agents)?
     };
     let report = if remove {
         install::uninstall(&options)?

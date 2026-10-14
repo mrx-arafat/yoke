@@ -13,7 +13,7 @@ use crate::event::{AgentEvent, EventKind};
 
 #[path = "review/process.rs"]
 mod process;
-pub use process::{execute_bounded, ProcessOutput};
+pub use process::{execute_bounded, kill_running_groups, ProcessOutput};
 
 /// Paths supplied by the hook integration, independent of the process cwd.
 #[derive(Debug, Clone)]
@@ -146,8 +146,8 @@ fn run_gate(
 
 /// Evaluate using process paths; hook callers should supply explicit context.
 pub fn evaluate(cfg: &Config, kind: EventKind, ev: &AgentEvent) -> Outcome {
-    match (std::env::current_dir(), std::env::home_dir()) {
-        (Ok(cwd), Some(home)) => evaluate_with_context(
+    match (std::env::current_dir(), crate::config::home()) {
+        (Ok(cwd), Ok(home)) => evaluate_with_context(
             cfg,
             kind,
             ev,
@@ -363,6 +363,31 @@ fn rewrite(gate: &Gate, input: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evaluate_without_an_absolute_home_fails_closed() {
+        // Re-execute so HOME changes only in a child; a relative HOME never reaches the
+        // platform's fallback to the real home, so the old behaviour is safe to observe.
+        if std::env::var_os("YOKE_TEST_RELATIVE_HOME").is_some() {
+            let outcome = evaluate(&Config::default(), EventKind::PreToolUse, &bash_event("ls"));
+            assert!(outcome.error && !outcome.allow, "{outcome:?}");
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "engine::tests::evaluate_without_an_absolute_home_fails_closed",
+            ])
+            .env("HOME", "relative/home")
+            .env("YOKE_TEST_RELATIVE_HOME", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 
     fn bash_event(command: &str) -> AgentEvent {
         AgentEvent {

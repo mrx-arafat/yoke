@@ -668,6 +668,7 @@ dependencies = [
  "clap",
  "libc",
  "pulldown-cmark",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

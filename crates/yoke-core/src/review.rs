@@ -11,6 +11,8 @@ use crate::engine::{execute_bounded, ProcessOutput};
 
 const RESPONSE_CAP: usize = 256 * 1024;
 mod input;
+mod plan;
+pub use plan::{validate_plan, PlanFinding, PlanReview, PlanSeverity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reviewer {
@@ -26,6 +28,13 @@ impl Reviewer {
             ("codex", _) | ("auto", "claude") => Ok(Self::Codex),
             ("auto", _) => bail!("automatic review needs a known claude/codex building agent"),
             _ => bail!("unknown reviewer: {configured}"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
         }
     }
 }
@@ -54,11 +63,18 @@ pub struct ReviewReport {
     pub exit_code: Option<i32>,
     pub output_tail: String,
     pub ms: u64,
+    /// Reviewer agent Yoke launched; absent for a caller-supplied command.
+    pub agent: Option<String>,
+    /// Model Yoke requested; absent means the CLI default. Text output does not report the
+    /// model that actually ran.
+    pub model: Option<String>,
 }
 
 /// Build a headless command reading stdin and returning the final plain-text response.
 /// The response must itself be JSON; no agent-specific output envelope is requested.
-pub fn command(reviewer: Reviewer) -> Command {
+/// A configured model is passed as-is and no fallback model is ever added, so an unavailable
+/// model fails with the CLI's own error.
+pub fn command(reviewer: Reviewer, model: Option<&str>) -> Command {
     let mut command = match reviewer {
         Reviewer::Claude => {
             let mut command = Command::new("claude");
@@ -73,6 +89,9 @@ pub fn command(reviewer: Reviewer) -> Command {
                 "",
                 "--no-session-persistence",
             ]);
+            if let Some(model) = model {
+                command.args(["--model", model]);
+            }
             command
         }
         Reviewer::Codex => {
@@ -99,6 +118,9 @@ pub fn command(reviewer: Reviewer) -> Command {
             ] {
                 command.args(["--disable", feature]);
             }
+            if let Some(model) = model {
+                command.args(["--model", model]);
+            }
             command.arg("-");
             command
         }
@@ -107,9 +129,28 @@ pub fn command(reviewer: Reviewer) -> Command {
     command
 }
 
-/// Review tracked changes and untracked nonignored files with an independent agent.
-pub fn run(project: &Path, reviewer: Reviewer) -> Result<ReviewReport> {
-    run_with_command(project, &mut command(reviewer), Duration::from_secs(600))
+/// Review changes since `base_ref` (default `HEAD`) and untracked nonignored files with an
+/// independent agent.
+pub fn run(
+    project: &Path,
+    reviewer: Reviewer,
+    model: Option<&str>,
+    base_ref: Option<&str>,
+) -> Result<ReviewReport> {
+    let mut report = run_with_command(
+        project,
+        &mut command(reviewer, model),
+        Duration::from_secs(600),
+        base_ref,
+    )?;
+    report.agent = Some(reviewer.as_str().into());
+    report.model = model.map(str::to_owned);
+    Ok(report)
+}
+
+/// The exact change text `run` sends to the reviewer, for read-only inspection.
+pub fn input(project: &Path, base_ref: Option<&str>) -> Result<String> {
+    input::collect(project, base_ref)
 }
 
 /// Run a caller-supplied reviewer executable, retaining failures as check evidence.
@@ -117,10 +158,11 @@ pub fn run_with_command(
     project: &Path,
     command: &mut Command,
     timeout: Duration,
+    base_ref: Option<&str>,
 ) -> Result<ReviewReport> {
     let start = Instant::now();
     let result = (|| {
-        let diff = input::collect(project)?;
+        let diff = input::collect(project, base_ref)?;
         review_diff(project, command, timeout, &diff)
     })();
     let mut report = match result {
@@ -132,6 +174,8 @@ pub fn run_with_command(
             exit_code: None,
             output_tail: String::new(),
             ms: 0,
+            agent: None,
+            model: None,
         },
     };
     report.ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
@@ -184,6 +228,8 @@ fn report_output(output: ProcessOutput) -> ReviewReport {
         exit_code: output.exit_code,
         output_tail: text[offset..].to_owned(),
         ms: output.ms,
+        agent: None,
+        model: None,
     }
 }
 

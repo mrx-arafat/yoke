@@ -28,6 +28,7 @@ pub(super) struct Action {
     id: Option<i64>,
     value: Option<bool>,
     ticket: Option<String>,
+    ids: Option<Vec<i64>>,
 }
 
 impl Actions {
@@ -48,8 +49,25 @@ impl Actions {
                     action.slug.as_deref().context("Missing plan")?,
                 )?;
                 let ticket = random_token()?;
+                let feedback: String = prepared
+                    .open_feedback
+                    .iter()
+                    .map(|item| {
+                        format!(
+                            "<li>#{} <code>{}</code> {}</li>",
+                            item.id,
+                            escape(&item.anchor),
+                            escape(&item.text)
+                        )
+                    })
+                    .collect();
+                let feedback = if feedback.is_empty() {
+                    feedback
+                } else {
+                    format!("<h4>Open advice and comments</h4><ul>{feedback}</ul>")
+                };
                 let html = format!(
-                    r#"<div class="confirmation"><h3>Approve this exact contract?</h3><p>This freezes the displayed header. A changed header or plan revision cancels approval. Approval cannot be undone.</p><pre><code>{}</code></pre><p class="muted">SHA-256: <code>{}</code></p><div class="actions"><button data-action="approve" data-ticket="{ticket}">Confirm approval</button><button class="quiet" data-cancel>Cancel</button></div></div>"#,
+                    r#"<div class="confirmation"><h3>Approve this exact contract?</h3><p>This freezes the displayed header. A changed header or plan revision cancels approval. Approval cannot be undone.</p><pre><code>{}</code></pre><p class="muted">SHA-256: <code>{}</code></p>{feedback}<div class="actions"><button data-action="approve" data-ticket="{ticket}">Confirm approval</button><button class="quiet" data-cancel>Cancel</button></div></div>"#,
                     content::highlight(&prepared.header),
                     escape(&prepared.digest)
                 );
@@ -73,6 +91,28 @@ impl Actions {
                     action.slug.as_deref().context("Missing plan")?,
                 )?;
                 Ok(json!({"data":{"message":"Plan resumed."}}))
+            }
+            "acknowledge" | "acknowledge-all" => {
+                // Acknowledge exactly what was shown, never items that arrived after rendering.
+                let ids = match action.action.as_str() {
+                    "acknowledge" => vec![action.id.context("Missing notification ID")?],
+                    _ => action.ids.context("Missing notification IDs")?,
+                };
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs() as i64;
+                let changed = yoke_core::notifications::acknowledge(
+                    store,
+                    &c.project,
+                    &yoke_core::notifications::Target::Ids(ids),
+                    now,
+                )?;
+                let message = match changed {
+                    0 => "Already acknowledged.".to_owned(),
+                    1 => "Notification acknowledged.".to_owned(),
+                    n => format!("{n} notifications acknowledged."),
+                };
+                Ok(json!({"data":{"message":message}}))
             }
             "undo-forget" => {
                 let ticket = action.ticket.as_deref().context("Missing undo token")?;
@@ -141,15 +181,15 @@ pub(super) fn artifact(
         .get("index")
         .context("Missing screenshot index")?
         .parse::<usize>()?;
-    let path = detail
+    let run = detail
         .checks
         .iter()
         .find(|v| v.id == check_id)
-        .context("Unknown check")?
-        .artifacts
-        .get(index)
-        .context("Unknown screenshot")?;
-    let canonical = std::path::Path::new(path).canonicalize()?;
+        .context("Unknown check")?;
+    let path = run.artifacts.get(index).context("Unknown screenshot")?;
+    let canonical = std::path::Path::new(path)
+        .canonicalize()
+        .context("Screenshot no longer exists on disk.")?;
     ensure!(
         canonical.starts_with(&c.project),
         "Screenshot is outside this project."
@@ -199,6 +239,11 @@ pub(super) fn artifact(
     ensure!(
         bytes.len() <= 10 * 1024 * 1024,
         "Screenshot grew beyond its size limit."
+    );
+    // Hash the exact bytes being served so a replaced file is never shown as evidence.
+    ensure!(
+        plan::evidence_matches(run, path, &bytes) != plan::EvidenceStatus::Tampered,
+        "Screenshot changed after its check captured it; it is not served as evidence."
     );
     let kind = if ext == "png" && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "image/png"

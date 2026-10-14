@@ -2,6 +2,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// Bounded byte tails and execution evidence from one child process.
@@ -17,6 +18,21 @@ pub struct ProcessOutput {
     pub ms: u64,
 }
 
+/// Process groups started here that may still be running, so a process that has to exit
+/// early can stop them first instead of leaving them orphaned.
+static RUNNING_GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+/// Kill every process group `execute_bounded` started that has not been reaped yet.
+pub fn kill_running_groups() {
+    let mut groups = RUNNING_GROUPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    for group in groups.drain(..) {
+        // SAFETY: each id is a private process group created by `execute_bounded`.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+    }
+}
+
 struct ChildGroup(Child, bool);
 
 impl ChildGroup {
@@ -24,6 +40,11 @@ impl ChildGroup {
         if self.1 {
             return Ok(());
         }
+        let group = self.0.id() as i32;
+        RUNNING_GROUPS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|running| *running != group);
         // SAFETY: spawn creates a private process group whose id is the child's pid.
         if unsafe { libc::kill(-(self.0.id() as i32), libc::SIGKILL) } == -1 {
             let error = io::Error::last_os_error();
@@ -109,6 +130,10 @@ pub fn execute_bounded(
             .spawn()?,
         false,
     );
+    RUNNING_GROUPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(child.0.id() as i32);
     let mut stdout = child.0.stdout.take().expect("piped stdout");
     let mut stderr = child.0.stderr.take().expect("piped stderr");
     let mut stdin = child.0.stdin.take();

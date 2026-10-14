@@ -171,3 +171,44 @@ th { font-weight:600; color:var(--muted); } td { overflow-wrap:anywhere; }
 }
 @media(min-width:80rem) { main { padding:2rem; } }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none; transition:none; scroll-behavior:auto; } }
+/* Cross-project oversight and usage history */
+.facts.oversight { grid-template-columns:minmax(6.5rem,9rem) minmax(0,1fr); }
+.project-path { margin:.25rem 0 1rem; font:.8125rem/1.5 var(--mono); overflow-wrap:anywhere; }
+.project-links { display:flex; flex-wrap:wrap; gap:.75rem 1.25rem; margin:1rem 0 0; }
+code.resume { display:block; max-width:100%; padding:.5rem .65rem; background:var(--well); border-radius:var(--radius); white-space:pre-wrap; overflow-wrap:anywhere; user-select:all; }
+/* Notifications and workflow settings */
+.nav-count { min-width:1.25rem; padding:0 .35rem; border-radius:1rem; background:var(--danger); color:var(--paper); font:600 .6875rem/1.25rem var(--mono); text-align:center; }
+.ntf-item.ntf-unread { box-shadow:inset .25rem 0 0 var(--warn); }
+.ntf-item h2 { margin-bottom:.5rem; }
+.ntf-detail { overflow-wrap:anywhere; }
+.ntf-state-unread { background:var(--warn-soft); color:var(--warn); }
+.ntf-state-acknowledged { background:var(--well); color:var(--muted); }
+.ntf-toolbar { align-items:center; flex-wrap:wrap; }
+.ntf-steps,.ntf-commands { padding-left:1.25rem; }
+.ntf-steps li,.ntf-commands li { margin:.25rem 0; }
+.ntf-topic + .ntf-topic { border-top:1px solid var(--line); margin-top:1.25rem; }
+.settings-facts { grid-template-columns:minmax(6rem,10rem) minmax(0,1fr); }
+.settings-trust-trusted { color:var(--accent); }
+.settings-trust-stale { color:var(--warn); font-weight:600; }
+.settings-trust-untrusted { color:var(--danger); font-weight:600; }
+.settings-trust-absent { color:var(--muted); }
+@media(min-width:48rem) { .rail { overflow-y:auto; } }
+/* Browser pass fixes */
+.rail nav { position:relative; }
+.theme-label select { max-width:7.5rem; }
+.list-caption h2 { margin:0; color:var(--ink); }
+.panel > .list-caption:first-child { margin-top:0; flex-wrap:wrap; align-items:baseline; }
+.panel .panel { background:var(--well); border-color:var(--line); }
+dt { overflow-wrap:anywhere; }
+p.error { padding:.5rem .75rem; border-radius:.5rem; }
+.table-scroll td { overflow-wrap:break-word; }
+.table-scroll th[scope="row"] code,.table-scroll .badge { white-space:nowrap; overflow-wrap:normal; }
+.usage-table td,.usage-table th[scope="row"] { white-space:nowrap; }
+.usage-table td { text-align:right; font-variant-numeric:tabular-nums; }
+.usage-table thead th:not(:first-child) { text-align:right; }
+.usage-filters label { flex:1 1 8.5rem; }
+pre.plan-header { margin:0 0 1.5rem; }
+@media(max-width:30rem) { .facts.oversight { grid-template-columns:minmax(0,1fr); gap:.1rem; } .facts.oversight dd:not(:last-child) { margin-bottom:.65rem; } }
+.filters label:has(> select[name="project"]) { flex:2 1 12rem; }
+@media(min-width:48rem) { .rail nav { margin-top:1.5rem; } .rail nav a { padding:.6rem .25rem; } }
+input[type="date"]:focus-within { outline:3px solid var(--accent); outline-offset:3px; }

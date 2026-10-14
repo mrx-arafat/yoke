@@ -28,7 +28,7 @@ fn real_codex_acceptance(isolate_auth: bool) {
     fs::create_dir_all(project.join(".git/refs/heads")).unwrap();
     fs::write(project.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     fs::write(project.join("answer.rs"), "pub fn answer() -> u32 { 42 }\n").unwrap();
-    let mut child = command(Reviewer::Codex);
+    let mut child = command(Reviewer::Codex, None);
     if isolate_auth {
         child
             .env_clear()
@@ -140,25 +140,83 @@ fn fixture_timeout_and_truncated_valid_tail_cannot_pass_review() {
 #[test]
 fn real_git_diff_feeds_fixture_and_missing_executable_returns_failed_evidence() {
     let root = tempfile::tempdir().unwrap();
-    let project = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo = tempfile::tempdir().unwrap();
+    let project = repo.path();
+    git(project, &["init", "-q"]);
+    fs::write(project.join("a.rs"), "fn a() {}\n").unwrap();
+    git(project, &["add", "a.rs"]);
+    git(project, &["commit", "-qm", "seed"]);
+    fs::write(project.join("a.rs"), "fn edited() {}\n").unwrap();
     let report = run_with_command(
         project,
         &mut fixture(root.path(), "[]", 0),
         Duration::from_secs(2),
+        None,
     )
     .unwrap();
     assert!(report.passed, "{:?}", report.error);
-    assert!(fs::read_to_string(root.path().join("received"))
-        .unwrap()
-        .contains("DIFF DATA:"));
+    let received = fs::read_to_string(root.path().join("received")).unwrap();
+    assert!(received.contains("DIFF DATA:") && received.contains("fn edited()"));
     let report = run_with_command(
         project,
         &mut Command::new(root.path().join("missing-reviewer")),
         Duration::from_secs(2),
+        None,
     )
     .unwrap();
     assert!(!report.passed);
     assert!(report.error.unwrap().contains("execute reviewer"));
+}
+
+fn git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .args([
+            "-c",
+            "user.name=Yoke Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+        ])
+        .args([
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn review_input_since_base_ref_keeps_work_committed_during_the_plan() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path();
+    git(dir, &["init", "-q"]);
+    fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+    git(dir, &["add", "a.rs"]);
+    git(dir, &["commit", "-qm", "base"]);
+    let base = git(dir, &["rev-parse", "HEAD"]);
+    fs::write(dir.join("a.rs"), "fn committed_during_plan() {}\n").unwrap();
+    git(dir, &["commit", "-qam", "work"]);
+    fs::write(dir.join("new.rs"), "fn still_untracked() {}\n").unwrap();
+
+    let since_base = input::collect(dir, Some(&base)).unwrap();
+    assert!(since_base.contains("committed_during_plan"));
+    assert!(since_base.contains("still_untracked"));
+    assert!(!input::collect(dir, None)
+        .unwrap()
+        .contains("committed_during_plan"));
+    assert!(input::collect(dir, Some("--output=leak")).is_err());
 }
 
 #[test]
@@ -195,7 +253,26 @@ fn reviewer_selection_and_commands_keep_the_public_readonly_contract() {
     assert!(Reviewer::select("auto", "unknown").is_err());
     assert!(Reviewer::select("unknown", "claude").is_err());
     for reviewer in [Reviewer::Claude, Reviewer::Codex] {
-        let command = command(reviewer);
+        let args = |model| {
+            command(reviewer, model)
+                .get_args()
+                .map(|arg| arg.to_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(!args(None).iter().any(|arg| arg == "--model"));
+        let modelled = args(Some("model-1"));
+        assert!(modelled
+            .windows(2)
+            .any(|args| args == ["--model", "model-1"]));
+        assert!(!modelled.iter().any(|arg| arg == "--fallback-model"));
+        if reviewer == Reviewer::Codex {
+            assert_eq!(
+                modelled.last().map(String::as_str),
+                Some("-"),
+                "prompt stays on stdin"
+            );
+        }
+        let command = command(reviewer, None);
         assert!(command
             .get_envs()
             .any(|(key, value)| key == "YOKE_OFF" && value == Some(std::ffi::OsStr::new("1"))));

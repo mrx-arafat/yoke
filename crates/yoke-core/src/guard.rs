@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::event::{AgentEvent, EventKind};
 
 static HUMAN_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?:^|[\s/;|&()'\"])yoke['\"]?\s+(?:trust\b|plan\s+(?:approve|resume)\b)"#)
+    Regex::new(r#"(?:^|[\s/;|&()'\"])yoke['\"]?\s+(?:trust\b|console\b|jobs\s+retry\b|notifications\s+ack\b|plan\s+(?:approve|resume|cancel|reassign|accept|resolve|acknowledge)\b)"#)
         .expect("constant human-command regex")
 });
 
@@ -39,7 +39,7 @@ pub fn evaluate(kind: EventKind, event: &AgentEvent, home: &Path, cwd: &Path) ->
                 };
                 if HUMAN_COMMAND.is_match(&text) {
                     return Some(
-                        "Yoke trust and plan approval/resume commands require a human terminal"
+                        "this Yoke command is human-only; a human runs it in their own terminal"
                             .into(),
                     );
                 }
@@ -178,11 +178,28 @@ mod tests {
             "yoke trust",
             "/usr/local/bin/yoke plan approve demo",
             "yoke plan resume demo",
+            "yoke plan cancel demo",
+            "yoke plan reassign demo --session s2",
+            "yoke plan accept demo copy --evidence checked",
+            "yoke plan acknowledge demo 3",
+            "yoke console --no-open &",
+            "yoke jobs retry 4",
+            "cd /tmp && yoke notifications ack all",
             "sqlite3 ~/.yoke/state.db '.tables'",
         ] {
             event.tool_input = json!({"command": command});
             assert!(evaluate(EventKind::PreToolUse, &event, home.path(), home.path()).is_some());
             assert!(evaluate(EventKind::PostToolUse, &event, home.path(), home.path()).is_none());
+        }
+        for command in [
+            "yoke plan task done demo build",
+            "yoke plan reply demo 3 --text fixed",
+            "yoke jobs --all --json",
+            "yoke notifications --json",
+            "yoke consoles",
+        ] {
+            event.tool_input = json!({"command": command});
+            assert!(evaluate(EventKind::PreToolUse, &event, home.path(), home.path()).is_none());
         }
         event.prompt = Some("yoke trust".into());
         event.tool_input = json!({"command":"yoke config"});

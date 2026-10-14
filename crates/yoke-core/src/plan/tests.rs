@@ -148,6 +148,28 @@ fn approval_is_bound_to_displayed_header_and_database_revision() {
 }
 
 #[test]
+fn start_pins_the_head_commit_as_the_review_base() {
+    let f = Fixture::new();
+    let head = |root: &Path| {
+        let out = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    let at_start = head(&f.root);
+    let started = f.building("title='Example'\n[[check]]\nname='proof'\nrun='true'");
+    assert_eq!(started.base_ref.as_deref(), Some(at_start.as_str()));
+    fs::write(f.root.join("later.txt"), "later\n").unwrap();
+    git(&f.root, &["add", "later.txt"]);
+    git(&f.root, &["commit", "-qm", "work during plan"]);
+    assert_ne!(head(&f.root), at_start);
+    let stored = get(&f.store, &f.root, "example").unwrap();
+    assert_eq!(stored.base_ref.as_deref(), Some(at_start.as_str()));
+}
+
+#[test]
 fn real_checks_drive_state_and_preserve_advisory_failure_evidence() {
     let f = Fixture::new();
     f.building("title='Example'\n[[check]]\nname='proof'\nrun='test -f tracked.txt && printf verified'\n[[check]]\nname='advice'\nrun='printf advisory >&2; exit 7'\nblocking=false");
@@ -283,6 +305,8 @@ fn mid_run_edits_and_missing_review_never_mark_done() {
         exit_code: Some(2),
         output_tail: "invalid output".into(),
         ms: 4,
+        agent: Some("codex".into()),
+        model: Some("o3".into()),
     };
     let before = fingerprint(&f.root).unwrap();
     assert!(
@@ -296,6 +320,10 @@ fn mid_run_edits_and_missing_review_never_mark_done() {
         .output_tail
         .contains("malformed reviewer response"));
     assert_eq!(detail.checks.last().unwrap().result, "fail");
+    assert_eq!(
+        detail.checks.last().unwrap().command,
+        "independent review by codex (requested model: o3; reported model: unknown)"
+    );
     let passing = crate::review::ReviewReport {
         passed: true,
         error: None,
@@ -303,6 +331,8 @@ fn mid_run_edits_and_missing_review_never_mark_done() {
         findings: vec![],
         output_tail: "invalid output".into(),
         ms: 4,
+        agent: None,
+        model: None,
     };
     assert!(
         record_review_with_fingerprint(&f.store, &f.root, "example", &passing, &before).unwrap()
@@ -424,6 +454,7 @@ fn concurrent_state_change_preserves_void_check_evidence_without_overwriting_sta
         result: "pass".into(),
         findings: serde_json::json!([]),
         artifacts: vec![],
+        artifact_hashes: Default::default(),
     }];
     f.store.connection().execute_batch("CREATE TEMP TRIGGER reject_check_fact BEFORE INSERT ON facts WHEN NEW.kind='check_result' BEGIN SELECT RAISE(ABORT,'fixture fact failure'); END;").unwrap();
     assert!(storage::finish(&f.store, &checking, "done", &mut runs, None).is_err());
@@ -443,4 +474,442 @@ fn concurrent_state_change_preserves_void_check_evidence_without_overwriting_sta
     assert!(detail.checks[0]
         .output_tail
         .contains("actual execution evidence"));
+}
+
+fn record_session(f: &Fixture, id: &str) {
+    f.store
+        .record_decision(
+            &DecisionRecord {
+                ts: 2,
+                session_id: id.into(),
+                agent: "codex".into(),
+                project: f.root.canonicalize().unwrap().to_str().unwrap().into(),
+                event: "session_start".into(),
+                tool: None,
+                mode: "observe".into(),
+                outcome: "allow".into(),
+                reason: None,
+                gates: serde_json::json!([]),
+                payload: "{}".into(),
+            },
+            4096,
+        )
+        .unwrap();
+}
+
+#[test]
+fn interrupted_check_recovers_only_after_its_owner_is_gone() {
+    let f = Fixture::new();
+    let building = f.building("title='Example'\n[[check]]\nname='proof'\nrun='true'");
+    storage::transition(&f.store, &building, "checking", "agent", None, None, None).unwrap();
+    let owner = files::claim_check(&get(&f.store, &f.root, "example").unwrap())
+        .unwrap()
+        .unwrap();
+    let refused = resume(&f.store, &f.root, "example").unwrap_err();
+    assert!(refused.to_string().contains("live process"), "{refused:#}");
+    assert_eq!(get(&f.store, &f.root, "example").unwrap().state, "checking");
+    drop(owner);
+    let resumed = after_lock_release(|| resume(&f.store, &f.root, "example"));
+    assert_eq!(resumed.state, "building");
+    let detail = detail(&f.store, &f.root, "example").unwrap();
+    let last = detail.transitions.last().unwrap();
+    assert_eq!(
+        (
+            last.from_state.as_str(),
+            last.to_state.as_str(),
+            last.actor.as_str()
+        ),
+        ("checking", "building", "human")
+    );
+    assert!(last.note.as_deref().unwrap().contains("interrupted"));
+    assert_eq!(detail.checks.last().unwrap().result, "interrupted");
+    assert!(after_lock_release(|| check(&f.store, &f.root, "example", None)).passed);
+}
+
+/// Children forked by concurrent test threads hold a duplicate of a just-released
+/// flock descriptor until they exec, so a free lock can look owned for a moment.
+/// Single-threaded `yoke` processes never see this; a lock held past the deadline still fails.
+fn after_lock_release<T>(mut attempt: impl FnMut() -> anyhow::Result<T>) -> T {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match attempt() {
+            Err(error)
+                if (error.to_string().contains("live process")
+                    || error.to_string().contains("already checking"))
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            result => return result.unwrap(),
+        }
+    }
+}
+
+#[test]
+fn running_check_owns_its_plan_so_resume_cannot_take_it() {
+    let f = Fixture::new();
+    f.building("title='Example'\n[[check]]\nname='slow'\nrun='sleep 2'\ntimeout=10");
+    let database = f.root.parent().unwrap().join("state.db");
+    let root = f.root.clone();
+    let runner = std::thread::spawn(move || {
+        let store = Store::open(database).unwrap();
+        check(&store, &root, "example", None).unwrap()
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while get(&f.store, &f.root, "example").unwrap().state != "checking" {
+        assert!(std::time::Instant::now() < deadline, "check never started");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let refused = resume(&f.store, &f.root, "example").unwrap_err();
+    assert!(refused.to_string().contains("live process"), "{refused:#}");
+    assert!(runner.join().unwrap().passed);
+    assert_eq!(get(&f.store, &f.root, "example").unwrap().state, "done");
+}
+
+#[test]
+fn reassign_moves_ownership_and_cancel_releases_the_session() {
+    let f = Fixture::new();
+    let started = f.building("title='Example'\n[[check]]\nname='proof'\nrun='true'");
+    record_session(&f, "replacement");
+    let same = reassign(&f.store, &f.root, "example", "fixture-session").unwrap_err();
+    assert!(same.to_string().contains("already assigned"), "{same:#}");
+    let moved = reassign(&f.store, &f.root, "example", "replacement").unwrap();
+    assert_eq!(moved.state, "building");
+    assert_eq!(moved.approved_header, started.approved_header);
+    assert_eq!(moved.base_ref, started.base_ref);
+    assert!(active(&f.store, &f.root, "fixture-session")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        active(&f.store, &f.root, "replacement")
+            .unwrap()
+            .unwrap()
+            .slug,
+        "example"
+    );
+    let note = detail(&f.store, &f.root, "example")
+        .unwrap()
+        .transitions
+        .pop()
+        .unwrap()
+        .note
+        .unwrap();
+    assert_eq!(note, "reassigned from fixture-session to replacement");
+
+    let cancelled = cancel(&f.store, &f.root, "example", "scope was dropped").unwrap();
+    assert_eq!(cancelled.state, "cancelled");
+    assert!(active(&f.store, &f.root, "replacement").unwrap().is_none());
+    let last = detail(&f.store, &f.root, "example")
+        .unwrap()
+        .transitions
+        .pop()
+        .unwrap();
+    assert_eq!(
+        (
+            last.to_state.as_str(),
+            last.actor.as_str(),
+            last.note.as_deref()
+        ),
+        ("cancelled", "human", Some("scope was dropped"))
+    );
+    assert!(cancel(&f.store, &f.root, "example", "again").is_err());
+    assert!(prepare_approval(&f.store, &f.root, "example").is_err());
+    assert!(resume(&f.store, &f.root, "example").is_err());
+    assert!(reassign(&f.store, &f.root, "example", "fixture-session").is_err());
+
+    create(&f.store, &f.root, ".yoke/plans", "second", "Second").unwrap();
+    let prepared = prepare_approval(&f.store, &f.root, "second").unwrap();
+    approve(&f.store, &prepared).unwrap();
+    assert_eq!(
+        start(&f.store, &f.root, "second", "replacement")
+            .unwrap()
+            .state,
+        "building"
+    );
+}
+
+#[test]
+fn artifacts_are_hashed_at_capture_and_later_changes_are_reported() {
+    let f = Fixture::new();
+    f.building("title='Example'\n[[check]]\nname='image'\nrun='mkdir -p output; printf fixture > output/result.png'\nartifacts=['output/result.png']");
+    let summary = check(&f.store, &f.root, "example", None).unwrap();
+    assert!(summary.passed);
+    let path = f.root.join("output/result.png").canonicalize().unwrap();
+    assert_eq!(
+        summary.checks[0].artifact_hashes[path.to_str().unwrap()],
+        "f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d"
+    );
+    let statuses = |f: &Fixture| {
+        verify_evidence(&f.store, &f.root, "example")
+            .unwrap()
+            .into_iter()
+            .map(|report| report.status)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(statuses(&f), [EvidenceStatus::Verified]);
+    fs::write(&path, "replaced").unwrap();
+    assert_eq!(statuses(&f), [EvidenceStatus::Tampered]);
+    assert_eq!(
+        detail(&f.store, &f.root, "example").unwrap().evidence[0].status,
+        EvidenceStatus::Tampered
+    );
+    fs::remove_file(&path).unwrap();
+    assert_eq!(statuses(&f), [EvidenceStatus::Missing]);
+    f.store
+        .connection()
+        .execute("DELETE FROM evidence", [])
+        .unwrap();
+    assert_eq!(statuses(&f), [EvidenceStatus::Unrecorded]);
+}
+
+const TRACKED: &str = "title='Example'\n[[check]]\nname='proof'\nrun='true'\n[[requirement]]\nid='proof-passes'\ntext='The proof check passes'\nchecks=['proof']\n[[requirement]]\nid='copy'\ntext='A human approves the copy'\nhuman=true\n[[task]]\nid='build'\ntitle='Build it'\nrequirements=['proof-passes']\n[[task]]\nid='signoff'\ntitle='Sign off the copy'\nrequirements=['copy']\ndepends_on=['build']\nowner='human'";
+
+#[test]
+fn requirement_and_task_headers_reject_bad_ids_links_and_cycles() {
+    let (_, header) = files::parse(&format!("+++\n{TRACKED}\n+++\n")).unwrap();
+    assert_eq!(header.tasks[1].owner, Actor::Human);
+    for (from, to) in [
+        ("id='build'", "id='Build'"),
+        ("id='signoff'", "id='build'"),
+        ("requirements=['copy']", "requirements=['missing']"),
+        ("depends_on=['build']", "depends_on=['signoff']"),
+        ("checks=['proof']", "checks=['other']"),
+        ("human=true", "human=true\nchecks=['proof']"),
+        ("name='proof'", "name='acceptance'"),
+    ] {
+        let header = TRACKED.replacen(from, to, 1);
+        assert_ne!(header, TRACKED, "{from}");
+        assert!(
+            files::parse(&format!("+++\n{header}\n+++\n")).is_err(),
+            "{to}"
+        );
+    }
+    let cycle = TRACKED.replace(
+        "requirements=['proof-passes']",
+        "requirements=['proof-passes']\ndepends_on=['signoff']",
+    );
+    let error = files::parse(&format!("+++\n{cycle}\n+++\n")).unwrap_err();
+    assert!(format!("{error:#}").contains("cycle"), "{error:#}");
+    let advisory = TRACKED.replace(
+        "run='true'",
+        "run='true'\nblocking=false\n[[check]]\nname='gate'\nrun='true'",
+    );
+    assert!(files::parse(&format!("+++\n{advisory}\n+++\n")).is_err());
+}
+
+#[test]
+fn tasks_and_human_requirements_gate_done_with_dependencies_and_ownership() {
+    let f = Fixture::new();
+    f.building(TRACKED);
+    let blocked = complete_task(&f.store, &f.root, "example", "signoff", None, Actor::Human);
+    assert!(format!("{:#}", blocked.unwrap_err()).contains("unfinished tasks: build"));
+    let built = complete_task(
+        &f.store,
+        &f.root,
+        "example",
+        "build",
+        Some("added it"),
+        Actor::Agent,
+    )
+    .unwrap();
+    assert_eq!(built.state, TaskState::Done);
+    complete_task(&f.store, &f.root, "example", "build", None, Actor::Agent).unwrap();
+    let owned = complete_task(&f.store, &f.root, "example", "signoff", None, Actor::Agent);
+    assert!(format!("{:#}", owned.unwrap_err()).contains("owned by a human"));
+    assert!(accept_requirement(&f.store, &f.root, "example", "proof-passes", "ok").is_err());
+
+    let summary = check(&f.store, &f.root, "example", None).unwrap();
+    assert!(!summary.passed);
+    assert_eq!(summary.plan.state, "building");
+    let acceptance = summary.checks.last().unwrap();
+    assert_eq!(
+        (acceptance.name.as_str(), acceptance.result.as_str()),
+        ("acceptance", "fail")
+    );
+    assert!(acceptance
+        .output_tail
+        .contains("yoke plan accept example copy"));
+    let progress = detail(&f.store, &f.root, "example").unwrap().progress;
+    let statuses: Vec<_> = progress
+        .requirements
+        .iter()
+        .map(|item| item.status)
+        .collect();
+    assert_eq!(
+        statuses,
+        [RequirementStatus::Check, RequirementStatus::Unsatisfied]
+    );
+    assert_eq!(progress.tasks[1].state, TaskState::Ready);
+
+    accept_requirement(&f.store, &f.root, "example", "copy", "reviewed in staging").unwrap();
+    complete_task(&f.store, &f.root, "example", "signoff", None, Actor::Human).unwrap();
+    let summary = check(&f.store, &f.root, "example", None).unwrap();
+    assert!(summary.passed, "{:?}", summary.checks.last());
+    assert_eq!(summary.plan.state, "done");
+    let progress = detail(&f.store, &f.root, "example").unwrap().progress;
+    let statuses: Vec<_> = progress
+        .requirements
+        .iter()
+        .map(|item| item.status)
+        .collect();
+    assert_eq!(
+        statuses,
+        [RequirementStatus::Check, RequirementStatus::Human]
+    );
+    assert_eq!(
+        progress.requirements[1]
+            .completion
+            .as_ref()
+            .unwrap()
+            .evidence
+            .as_deref(),
+        Some("reviewed in staging")
+    );
+}
+
+fn reviewer(output: &str) -> Command {
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(format!("cat >/dev/null; printf '%s' '{output}'"));
+    command
+}
+
+#[test]
+fn blocking_validation_findings_hold_approval_until_a_human_closes_them() {
+    let f = Fixture::new();
+    let plan = create(&f.store, &f.root, ".yoke/plans", "example", "Example").unwrap();
+    fs::write(
+        &plan.file,
+        format!("+++\n{TRACKED}\n+++\n\n## Rollout plan\n\nShip it.\n"),
+    )
+    .unwrap();
+    let timeout = std::time::Duration::from_secs(10);
+    let malformed = reviewer(r#"[{"severity":"advice","anchor":"task:nope","summary":"x"}]"#);
+    assert!(validate(&f.store, &f.root, "example", &mut { malformed }, timeout).is_err());
+    assert!(detail(&f.store, &f.root, "example")
+        .unwrap()
+        .feedback
+        .is_empty());
+    let findings = r#"[{"severity":"blocking","anchor":"requirement:copy","summary":"No one owns copy review"},{"severity":"advice","anchor":"heading:rollout-plan","summary":"Name a rollback"}]"#;
+    let result = validate(
+        &f.store,
+        &f.root,
+        "example",
+        &mut reviewer(findings),
+        timeout,
+    )
+    .unwrap();
+    assert_eq!(result.blocking, 1);
+    let blocking = result.findings[0].id;
+    // Editing the plan cannot hide a finding written against an earlier revision.
+    let original = fs::read_to_string(&plan.file).unwrap();
+    fs::write(
+        &plan.file,
+        original.replace("Ship it.", "Ship it carefully."),
+    )
+    .unwrap();
+    let refused = prepare_approval(&f.store, &f.root, "example").unwrap_err();
+    assert!(format!("{refused:#}").contains("No one owns copy review"));
+    assert!(comment(
+        &f.store,
+        &f.root,
+        "example",
+        "heading:missing",
+        "x",
+        Actor::Human
+    )
+    .is_err());
+    let note = comment(
+        &f.store,
+        &f.root,
+        "example",
+        "task:signoff",
+        "Who signs?",
+        Actor::Human,
+    )
+    .unwrap();
+    assert!(note.current && note.anchored);
+    reply(
+        &f.store,
+        &f.root,
+        "example",
+        note.id,
+        "Design lead",
+        Actor::Agent,
+    )
+    .unwrap();
+    close(
+        &f.store,
+        &f.root,
+        "example",
+        blocking,
+        Closure::Acknowledged,
+        Some("accepted risk"),
+    )
+    .unwrap();
+    let item = close(
+        &f.store,
+        &f.root,
+        "example",
+        blocking,
+        Closure::Acknowledged,
+        None,
+    )
+    .unwrap();
+    assert_eq!(item.state.as_deref(), Some("acknowledged"));
+    assert!(!item.current);
+    assert!(close(
+        &f.store,
+        &f.root,
+        "example",
+        blocking,
+        Closure::Resolved,
+        None
+    )
+    .is_err());
+    let prepared = prepare_approval(&f.store, &f.root, "example").unwrap();
+    let open: Vec<_> = prepared
+        .open_feedback
+        .iter()
+        .map(|item| item.anchor.as_str())
+        .collect();
+    assert_eq!(open, ["heading:rollout-plan", "task:signoff"]);
+    assert_eq!(approve(&f.store, &prepared).unwrap().state, "approved");
+}
+
+#[test]
+fn progress_and_feedback_never_bypass_reapproval_of_edited_checks() {
+    let f = Fixture::new();
+    let plan = f.building(TRACKED);
+    let item = comment(
+        &f.store,
+        &f.root,
+        "example",
+        "check:proof",
+        "Is true enough?",
+        Actor::Human,
+    )
+    .unwrap();
+    close(
+        &f.store,
+        &f.root,
+        "example",
+        item.id,
+        Closure::Resolved,
+        None,
+    )
+    .unwrap();
+    complete_task(&f.store, &f.root, "example", "build", None, Actor::Agent).unwrap();
+    let frozen = get(&f.store, &f.root, "example").unwrap().approved_header;
+    let content = fs::read_to_string(&plan.file).unwrap();
+    fs::write(&plan.file, content.replace("run='true'", "run='false'")).unwrap();
+    assert!(complete_task(&f.store, &f.root, "example", "signoff", None, Actor::Human).is_err());
+    assert!(accept_requirement(&f.store, &f.root, "example", "copy", "ok").is_err());
+    assert!(check(&f.store, &f.root, "example", None).is_err());
+    let after = get(&f.store, &f.root, "example").unwrap();
+    assert_eq!(
+        (after.state.as_str(), &after.approved_header),
+        ("building", &frozen)
+    );
 }

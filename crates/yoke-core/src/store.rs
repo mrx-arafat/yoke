@@ -16,10 +16,16 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/004-guard-usage.sql"),
     include_str!("store/005-read-models.sql"),
     include_str!("store/006-session-counts.sql"),
+    include_str!("store/007-plan-base-ref.sql"),
+    include_str!("store/008-plan-lifecycle.sql"),
+    include_str!("store/009-plan-acceptance.sql"),
+    include_str!("store/010-jobs-recall.sql"),
+    include_str!("store/011-notifications.sql"),
+    include_str!("store/012-usage-time.sql"),
 ];
 
 mod read;
-pub use read::{DecisionRow, SessionSummary, StatusSnapshot};
+pub use read::{DecisionRow, ProjectSummary, SessionSummary, StatusSnapshot};
 
 pub struct Store {
     connection: Connection,
@@ -111,6 +117,14 @@ impl Store {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
         )?;
         connection.busy_timeout(Duration::from_millis(5))?;
+        let version: usize =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > MIGRATIONS.len() {
+            bail!(
+                "state database schema {version} is newer than supported {}",
+                MIGRATIONS.len()
+            );
+        }
         Ok(Self { connection })
     }
 
@@ -120,7 +134,9 @@ impl Store {
         let mut connection = Connection::open(path).context("open state database")?;
         connection.busy_timeout(Duration::from_secs(2))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "foreign_keys", true)?;
+        // Table rebuilds in migrations must not cascade into child rows; enforcement is
+        // restored once the migrated schema passes a foreign key check.
+        connection.pragma_update(None, "foreign_keys", false)?;
         if path != Path::new(":memory:") && !path.as_os_str().is_empty() {
             let mut persist: std::ffi::c_int = 1;
             // SAFETY: the live connection owns the handle; SQLite reads this int synchronously.
@@ -145,11 +161,23 @@ impl Store {
                 MIGRATIONS.len()
             );
         }
+        let pending = version < MIGRATIONS.len();
+        // Only violations a migration introduced refuse the upgrade, so older damage can
+        // never lock every hook out of a database it could still use.
+        let before = if pending {
+            foreign_key_violations(&transaction)?
+        } else {
+            0
+        };
         for (index, sql) in MIGRATIONS.iter().enumerate().skip(version) {
             transaction.execute_batch(sql)?;
             transaction.pragma_update(None, "user_version", index + 1)?;
         }
+        if pending && foreign_key_violations(&transaction)? > before {
+            bail!("migration left foreign key violations; state database was not changed");
+        }
         transaction.commit()?;
+        connection.pragma_update(None, "foreign_keys", true)?;
         Ok(Self { connection })
     }
 
@@ -203,7 +231,7 @@ impl Store {
         let mut gates = row.gates.clone();
         redact_value(&mut gates);
         transaction.execute(
-            "INSERT INTO sessions(id,agent,project,started_at) VALUES (?1,?2,?3,?4) ON CONFLICT(id) DO NOTHING",
+            "INSERT INTO sessions(id,agent,project,started_at) VALUES (?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET project=excluded.project",
             params![session, agent, project, row.ts],
         )?;
         transaction.execute(
@@ -264,12 +292,98 @@ impl Store {
         .collect()
     }
 
-    /// Remove only decisions strictly older than the retention boundary.
-    pub fn prune_decisions(&self, now: i64, retention_days: u32) -> Result<usize> {
-        let cutoff = now.saturating_sub(i64::from(retention_days) * 86_400);
+    /// One bounded retention pass. Decisions, facts and the check runs of done or cancelled
+    /// plans older than the boundary are deleted in short transactions until the budget is
+    /// spent, so a large backlog drains over several passes without holding the write lock.
+    /// Trusted policy, memories and the check runs of unfinished plans are never deleted here.
+    pub fn prune_history(
+        &self,
+        now: i64,
+        retention_days: u32,
+        budget: Duration,
+    ) -> Result<PruneReport> {
+        let cutoff = retention_cutoff(now, retention_days);
+        let deadline = std::time::Instant::now() + budget;
+        let prunes: [fn(&Self, i64) -> Result<usize>; 3] = [
+            Self::prune_decisions,
+            Self::prune_facts,
+            Self::prune_check_runs,
+        ];
+        let mut deleted = [0; 3];
+        let mut complete = true;
+        'histories: for (index, prune) in prunes.iter().enumerate() {
+            loop {
+                let batch = prune(self, cutoff)?;
+                deleted[index] += batch;
+                if batch < PRUNE_BATCH {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    complete = false;
+                    break 'histories;
+                }
+            }
+        }
+        Ok(PruneReport {
+            decisions: deleted[0],
+            facts: deleted[1],
+            check_runs: deleted[2],
+            complete,
+        })
+    }
+
+    fn prune_decisions(&self, cutoff: i64) -> Result<usize> {
+        Ok(self.connection.execute(
+            "DELETE FROM decisions WHERE id IN (SELECT id FROM decisions WHERE ts < ?1 ORDER BY ts LIMIT ?2)",
+            params![cutoff, PRUNE_BATCH],
+        )?)
+    }
+
+    /// Memories digested from a pruned fact stay; only their link to it goes.
+    fn prune_facts(&self, cutoff: i64) -> Result<usize> {
+        // Both statements select the same batch: the order is total and the transaction is exclusive.
+        const BATCH: &str = "SELECT id FROM facts WHERE ts < ?1 ORDER BY id LIMIT ?2";
+        self.transaction(|tx| {
+            // A stale mapping would make re-importing the same fact fail on a local id conflict.
+            tx.execute(
+                &format!(
+                    "DELETE FROM imported_identities WHERE kind='fact' AND local_id IN ({BATCH})"
+                ),
+                params![cutoff, PRUNE_BATCH],
+            )?;
+            Ok(tx.execute(
+                &format!("DELETE FROM facts WHERE id IN ({BATCH})"),
+                params![cutoff, PRUNE_BATCH],
+            )?)
+        })
+    }
+
+    /// Evidence rows follow their check run; unfinished plans keep their whole history.
+    fn prune_check_runs(&self, cutoff: i64) -> Result<usize> {
+        Ok(self.connection.execute(
+            "DELETE FROM check_runs WHERE id IN (SELECT id FROM check_runs WHERE ts < ?1 AND plan_id IN (SELECT id FROM plans WHERE state IN ('done','cancelled')) LIMIT ?2)",
+            params![cutoff, PRUNE_BATCH],
+        )?)
+    }
+
+    /// The schema version this database is at and the newest one this binary knows.
+    pub fn schema_version(&self) -> Result<(usize, usize)> {
+        let version: usize = self
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        Ok((version, MIGRATIONS.len()))
+    }
+
+    /// Time, event, mode and outcome of the newest decision an agent's hooks recorded.
+    pub fn last_decision(&self, agent: &str) -> Result<Option<(i64, String, String, String)>> {
         Ok(self
             .connection
-            .execute("DELETE FROM decisions WHERE ts < ?1", [cutoff])?)
+            .query_row(
+                "SELECT ts,event,mode,outcome FROM decisions WHERE agent=?1 ORDER BY ts DESC,id DESC LIMIT 1",
+                [agent],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?)
     }
 
     pub fn end_session(&self, id: &str, ended_at: i64) -> Result<()> {
@@ -313,6 +427,32 @@ impl Store {
         transaction.commit()?;
         Ok(true)
     }
+}
+
+/// Rows one retention statement may delete, which bounds each write transaction.
+const PRUNE_BATCH: usize = 5000;
+
+/// Rows one retention pass deleted; `complete` is false when the time budget ran out first.
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PruneReport {
+    pub decisions: usize,
+    pub facts: usize,
+    pub check_runs: usize,
+    pub complete: bool,
+}
+
+fn retention_cutoff(now: i64, retention_days: u32) -> i64 {
+    now.saturating_sub(i64::from(retention_days) * 86_400)
+}
+
+fn foreign_key_violations(connection: &Connection) -> Result<usize> {
+    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while rows.next()?.is_some() {
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn trust_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrustRow> {

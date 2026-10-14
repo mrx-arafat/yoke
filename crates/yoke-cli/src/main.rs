@@ -1,10 +1,16 @@
 mod commands;
 mod console;
+mod diff;
+mod extensions;
+mod health;
 mod hook;
 mod install;
+mod jobs;
 mod memory;
+mod notifications;
 mod presets;
 mod statusline;
+mod trial;
 mod update;
 mod workflow;
 
@@ -36,7 +42,7 @@ impl From<AgentArg> for Agent {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Serve the local console; Ctrl-C stops the server.
+    /// Human-only: serve the local console behind a one-time launch link; Ctrl-C stops it.
     Console {
         #[arg(long)]
         no_open: bool,
@@ -65,7 +71,7 @@ enum Cmd {
         #[arg(long)]
         pinned: bool,
     },
-    /// Search current-project memory, with pinned results first.
+    /// Search current-project memory: best matches first, or pinned then newest without a query.
     Recall {
         #[arg(default_value = "")]
         query: String,
@@ -73,6 +79,9 @@ enum Cmd {
         limit: u16,
         #[arg(long)]
         json: bool,
+        /// Show what session start would inject for this query and why, within memory.inject_tokens.
+        #[arg(long)]
+        explain: bool,
     },
     /// Delete one locally stored memory.
     Forget { id: i64 },
@@ -82,6 +91,16 @@ enum Cmd {
     Memory {
         #[command(subcommand)]
         command: memory::MemoryCommand,
+    },
+    /// List queued, running, failed and dead background jobs, or retry a dead one.
+    Jobs {
+        #[command(subcommand)]
+        command: Option<jobs::JobsCommand>,
+        /// Include succeeded jobs.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// List or append readable bundled gate configurations.
     Preset {
@@ -149,10 +168,34 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Show installation health, hook status and actionable guidance.
+    Health {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inventory Claude Code and Codex extensions read-only; exits 1 when drift is found.
+    Extensions {
+        #[arg(long)]
+        json: bool,
+    },
+    /// List actionable notifications for this project, unread first.
+    Notifications {
+        #[command(subcommand)]
+        command: Option<notifications::NotificationsCommand>,
+        #[arg(long)]
+        unread: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Check the latest release, or verify and replace this executable.
     Update {
         #[arg(long)]
         check: bool,
+    },
+    /// Report release-trial evidence from local state, read-only.
+    Trial {
+        #[command(subcommand)]
+        command: trial::TrialCommand,
     },
 }
 
@@ -172,8 +215,11 @@ fn main() {
     if let Some(Cmd::RunHook { event, agent }) = &cli.cmd {
         std::process::exit(hook::run(event, (*agent).into()));
     }
+    if std::env::var_os(hook::BACKGROUND).is_some() {
+        std::panic::set_hook(Box::new(|info| hook::diagnostic(&format!("yoke: {info}"))));
+    }
     if let Err(error) = commands::run(cli.cmd) {
-        eprintln!("yoke: {}", yoke_core::redact::redact(&format!("{error:#}")));
+        hook::diagnostic(&format!("yoke: {error:#}"));
         println!(
             "error: {}",
             commands::quote(&yoke_core::redact::redact(&format!("{error:#}")))

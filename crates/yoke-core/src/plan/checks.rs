@@ -2,9 +2,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
-use super::{files, get, now, storage, CheckRun, CheckSummary, PlanCheck, PlanRecord};
+use super::{acceptance, files, get, now, storage, CheckRun, CheckSummary, PlanCheck, PlanRecord};
 use crate::engine::execute_bounded;
 use crate::review::{ReviewReport, Reviewer};
 use crate::store::Store;
@@ -14,7 +14,7 @@ pub fn check(
     store: &Store,
     project: &Path,
     slug: &str,
-    reviewer: Option<Reviewer>,
+    reviewer: Option<(Reviewer, Option<&str>)>,
 ) -> Result<CheckSummary> {
     let plan = get(store, project, slug)?;
     ensure!(
@@ -22,8 +22,21 @@ pub fn check(
         "only a building plan can run checks"
     );
     let header = files::approved(&plan)?;
+    // Held until this function returns so `plan resume` can tell a live check from a dead one.
+    let _owner =
+        files::claim_check(&plan)?.context("another process is already checking this plan")?;
     let root = Path::new(&plan.project);
     let before = files::fingerprint(root)?;
+    // Completion pins this tree's content to a commit, so committing the same bytes keeps it.
+    let base = match &plan.base_ref {
+        Some(base) => base.clone(),
+        None => files::head(root)?,
+    };
+    // Without a content anchor, completion keeps the HEAD-bound `before` fingerprint.
+    let anchor = files::content_fingerprint(root, &base)
+        .ok()
+        .flatten()
+        .map(|content| format!("{base}:{content}"));
     let checking = storage::transition(store, &plan, "checking", "agent", None, None, None)?;
     let mut runs = Vec::new();
     for declared in &header.checks {
@@ -31,15 +44,17 @@ pub fn check(
     }
     if header.review {
         let run = match reviewer {
-            Some(reviewer) => match crate::review::run(root, reviewer) {
-                Ok(report) => review_run(&checking, &before, &report),
-                Err(error) => error_run(
-                    &checking,
-                    "review",
-                    &before,
-                    format!("independent review failed: {error:#}"),
-                ),
-            },
+            Some((reviewer, model)) => {
+                match crate::review::run(root, reviewer, model, plan.base_ref.as_deref()) {
+                    Ok(report) => review_run(&checking, &before, &report),
+                    Err(error) => error_run(
+                        &checking,
+                        "review",
+                        &before,
+                        format!("independent review failed: {error:#}"),
+                    ),
+                }
+            }
             None => error_run(
                 &checking,
                 "review",
@@ -63,6 +78,22 @@ pub fn check(
     if let Err(error) = files::approved(&checking) {
         reason = Some(format!("approved header changed during checks: {error:#}"));
     }
+    match acceptance::attempt(store, &checking, &header, &runs, reason.is_none()) {
+        Ok(None) => {}
+        Ok(Some((accepted, findings, summary))) => {
+            let mut run = error_run(&checking, acceptance::RUN, &before, summary);
+            run.command = "requirements and tasks".into();
+            run.result = if accepted { "pass" } else { "fail" }.into();
+            run.findings = findings;
+            runs.push(run);
+        }
+        Err(error) => runs.push(error_run(
+            &checking,
+            acceptance::RUN,
+            &before,
+            format!("acceptance evaluation failed: {error:#}"),
+        )),
+    }
     if let Some(reason) = &reason {
         runs.push(error_run(&checking, "evidence", &before, reason.clone()));
     }
@@ -74,6 +105,9 @@ pub fn check(
         &mut runs,
         reason.as_deref(),
     )?;
+    if let Some(anchor) = anchor.filter(|_| passed && applied) {
+        storage::anchor_done(store, &plan, &anchor)?;
+    }
     Ok(CheckSummary {
         plan,
         passed: passed && applied,
@@ -124,7 +158,10 @@ fn execute(plan: &PlanRecord, declared: &PlanCheck, fingerprint: &str) -> CheckR
                 ));
             }
             match files::artifacts(Path::new(&plan.project), &declared.artifacts) {
-                Ok(artifacts) => run.artifacts = artifacts,
+                Ok(captured) => {
+                    run.artifacts = captured.iter().map(|(path, _)| path.clone()).collect();
+                    run.artifact_hashes = captured.into_iter().collect();
+                }
                 Err(error) => {
                     run.result = "error".into();
                     run.output_tail = tail(&format!(
@@ -157,7 +194,19 @@ fn empty_run(plan: &PlanRecord, name: &str, fingerprint: &str) -> CheckRun {
         result: "error".into(),
         findings: serde_json::json!([]),
         artifacts: Vec::new(),
+        artifact_hashes: Default::default(),
     }
+}
+
+/// Evidence that a check's owning process ended before recording any result.
+pub(super) fn interrupted_run(plan: &PlanRecord) -> Result<CheckRun> {
+    let mut run = empty_run(plan, "check", "");
+    run.ts = now()?;
+    run.command = format!("yoke plan check {}", plan.slug);
+    run.result = "interrupted".into();
+    run.output_tail =
+        "the check process ended before recording results; none of its output is evidence".into();
+    Ok(run)
 }
 
 fn error_run(plan: &PlanRecord, name: &str, fingerprint: &str, error: String) -> CheckRun {
@@ -168,7 +217,13 @@ fn error_run(plan: &PlanRecord, name: &str, fingerprint: &str, error: String) ->
 
 fn review_run(plan: &PlanRecord, fingerprint: &str, report: &ReviewReport) -> CheckRun {
     let mut run = empty_run(plan, "review", fingerprint);
-    run.command = "independent review".into();
+    run.command = match &report.agent {
+        Some(agent) => format!(
+            "independent review by {agent} (requested model: {}; reported model: unknown)",
+            report.model.as_deref().unwrap_or("CLI default")
+        ),
+        None => "independent review".into(),
+    };
     run.exit_code = report.exit_code;
     run.ms = report.ms;
     run.result = if report.passed && report.error.is_none() {

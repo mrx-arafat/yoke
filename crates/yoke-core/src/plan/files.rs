@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
@@ -10,8 +10,10 @@ use std::time::Duration;
 use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
 
-use super::{PlanHeader, PlanRecord};
+use super::{EvidenceStatus, PlanHeader, PlanRecord};
 use crate::engine::execute_bounded;
+
+const MAX_ARTIFACT_BYTES: u64 = 10 * 1024 * 1024;
 
 pub(super) fn project(path: &Path) -> Result<PathBuf> {
     let root = path.canonicalize().context("resolving project root")?;
@@ -64,12 +66,31 @@ pub(super) fn new_path(root: &Path, directory: &str, slug: &str) -> Result<PathB
     Ok(directory.join(format!("{slug}.md")))
 }
 
-pub(super) fn read(plan: &PlanRecord) -> Result<String> {
+fn resolved(plan: &PlanRecord) -> Result<PathBuf> {
     let root = project(Path::new(&plan.project))?;
     let path = Path::new(&plan.file)
         .canonicalize()
         .context("resolving plan file")?;
     ensure!(path.starts_with(&root), "plan file escapes project");
+    Ok(path)
+}
+
+/// Take exclusive advisory ownership of a plan's check through its plan file.
+/// The OS releases it when the owning process exits, so a killed check cannot hold it;
+/// `None` means a live process still owns the check.
+pub(super) fn claim_check(plan: &PlanRecord) -> Result<Option<fs::File>> {
+    let file = fs::File::open(resolved(plan)?).context("opening plan file to own its check")?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(error)) => {
+            Err(error).context("locking plan file to own its check")
+        }
+    }
+}
+
+pub(super) fn read(plan: &PlanRecord) -> Result<String> {
+    let path = resolved(plan)?;
     let metadata = fs::metadata(&path)?;
     ensure!(
         metadata.is_file() && metadata.len() <= 1024 * 1024,
@@ -127,6 +148,7 @@ pub(super) fn parse(content: &str) -> Result<(String, PlanHeader)> {
             );
         }
     }
+    super::acceptance::validate(&header)?;
     Ok((raw, header))
 }
 
@@ -167,69 +189,200 @@ fn field(hash: &mut Sha256, bytes: &[u8]) {
     hash.update(bytes);
 }
 
-/// Fingerprint tracked changes and every untracked, nonignored file in the repository.
-pub fn fingerprint(project_path: &Path) -> Result<String> {
+/// Commit id of HEAD, pinned as the review base when a plan starts.
+pub(super) fn head(project: &Path) -> Result<String> {
+    let output = git(project, &["rev-parse", "--verify", "HEAD"])
+        .context("plan start needs a git repository with at least one commit")?;
+    let id = String::from_utf8(output)?.trim().to_owned();
+    ensure!(
+        !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "git returned an invalid HEAD commit id"
+    );
+    Ok(id)
+}
+
+fn toplevel(project_path: &Path) -> Result<PathBuf> {
     let cwd = project(project_path)?;
     let top = git(&cwd, &["rev-parse", "--show-toplevel"])?;
-    let root = PathBuf::from(OsString::from_vec(
+    Ok(PathBuf::from(OsString::from_vec(
         top.strip_suffix(b"\n").unwrap_or(&top).to_vec(),
-    ));
+    )))
+}
+
+/// Above this size a working-tree file is identified by its size and modification time, so
+/// hashing stays bounded per entry.
+const STREAMED_HASH_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// Fingerprint HEAD and every nonignored path whose content differs from it.
+pub fn fingerprint(project_path: &Path) -> Result<String> {
+    let root = toplevel(project_path)?;
     let mut hash = Sha256::new();
     field(&mut hash, &git(&root, &["rev-parse", "--verify", "HEAD"])?);
-    field(
-        &mut hash,
-        &git(
-            &root,
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--binary",
-                "HEAD",
-                "--",
-            ],
-        )?,
+    hash_changes(&mut hash, &root, "HEAD")?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+/// The nonignored working-tree content relative to commit `base`, independent of HEAD and the
+/// index, so committing exactly these bytes keeps it. `None` when `base` no longer exists.
+/// It reads files and git metadata only and never writes git objects.
+pub fn content_fingerprint(project_path: &Path, base: &str) -> Result<Option<String>> {
+    ensure!(
+        !base.is_empty() && base.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "content base must be a commit id"
     );
-    let untracked = git(&root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    let mut paths: Vec<_> = untracked
+    let root = toplevel(project_path)?;
+    let commit = format!("{base}^{{commit}}");
+    let found = execute_bounded(
+        Command::new("git")
+            .current_dir(&root)
+            .args(["rev-parse", "--verify", "--quiet", &commit]),
+        &[],
+        Duration::from_secs(30),
+        4096,
+    )?;
+    if found.exit_code == Some(1) {
+        return Ok(None);
+    }
+    ensure!(
+        found.success && !found.timed_out,
+        "git could not resolve commit {base}"
+    );
+    let mut hash = Sha256::new();
+    field(&mut hash, base.as_bytes());
+    hash_changes(&mut hash, &root, base)?;
+    Ok(Some(format!("{:x}", hash.finalize())))
+}
+
+/// Hash every nonignored path that differs from `base`, in path order, by type, mode and the
+/// bytes on disk. Git supplies only paths, modes and commit ids (`--raw`), never diff text, so
+/// each entry costs a bounded amount, the result ignores HEAD and the index, and nothing is
+/// written to the repository.
+fn hash_changes(hash: &mut Sha256, root: &Path, base: &str) -> Result<()> {
+    let raw = git(
+        root,
+        &[
+            "diff",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--no-abbrev",
+            base,
+            "--",
+        ],
+    )?;
+    let mut changes = BTreeMap::new();
+    let mut fields = raw.split(|byte| *byte == 0);
+    while let Some(meta) = fields.next().filter(|meta| !meta.is_empty()) {
+        let path = fields.next().context("git raw diff entry lacks a path")?;
+        let meta = std::str::from_utf8(meta).context("git raw diff entry is not text")?;
+        let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+        ensure!(parts.len() == 5, "unexpected git raw diff entry");
+        let tracked = (
+            parts[1].to_owned(),
+            parts[3].to_owned(),
+            parts[4].to_owned(),
+        );
+        changes.insert(path.to_vec(), Some(tracked));
+    }
+    let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    for path in untracked
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
-        .collect();
-    paths.sort_unstable();
-    for raw in paths {
-        let path = PathBuf::from(OsString::from_vec(raw.to_vec()));
-        ensure!(relative(&path), "invalid untracked path returned by git");
-        let full = root.join(&path);
-        let metadata = fs::symlink_metadata(&full)?;
-        field(&mut hash, raw);
-        if metadata.file_type().is_symlink() {
-            field(&mut hash, b"symlink");
-            field(&mut hash, fs::read_link(&full)?.as_os_str().as_bytes());
-        } else {
-            ensure!(
-                metadata.is_file(),
-                "untracked entry is not a regular file: {}",
-                path.display()
-            );
-            field(&mut hash, b"file");
-            use std::os::unix::fs::PermissionsExt;
-            field(
-                &mut hash,
-                &(metadata.permissions().mode() & 0o111).to_le_bytes(),
-            );
-            hash.update(metadata.len().to_le_bytes());
-            let mut file = fs::File::open(&full)?;
-            let mut buffer = [0u8; 16384];
-            loop {
-                let count = file.read(&mut buffer)?;
-                if count == 0 {
-                    break;
-                }
-                hash.update(&buffer[..count]);
+    {
+        // Nested repositories are listed as directories with a trailing slash.
+        changes.insert(path.strip_suffix(b"/").unwrap_or(path).to_vec(), None);
+    }
+    for (raw_path, tracked) in changes {
+        let path = PathBuf::from(OsString::from_vec(raw_path.clone()));
+        ensure!(relative(&path), "invalid path returned by git");
+        field(hash, &raw_path);
+        match tracked {
+            Some((mode, _, status)) if mode == "000000" && status != "U" => field(hash, b"deleted"),
+            Some((mode, id, _)) if mode == "160000" && id.bytes().any(|byte| byte != b'0') => {
+                field(hash, b"160000");
+                field(hash, id.as_bytes());
             }
+            _ => hash_entry(hash, &root.join(&path))?,
         }
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(())
+}
+
+/// One working-tree entry by type: a file by mode and streamed content (size and modification
+/// time above the limit), a link by target, and a nested repository by its checked-out commit,
+/// as git records a submodule.
+fn hash_entry(hash: &mut Sha256, full: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let metadata = match fs::symlink_metadata(full) {
+        Ok(metadata) => metadata,
+        // Removed after git listed it: changed, like any other concurrent edit.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            field(hash, b"vanished");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let kind = metadata.file_type();
+    if kind.is_symlink() {
+        field(hash, b"120000");
+        field(hash, fs::read_link(full)?.as_os_str().as_bytes());
+    } else if kind.is_file() {
+        let executable = metadata.permissions().mode() & 0o111 != 0;
+        field(hash, if executable { b"100755" } else { b"100644" });
+        if metadata.len() > STREAMED_HASH_LIMIT {
+            field(hash, b"large");
+            field(hash, &metadata.len().to_le_bytes());
+            field(hash, &metadata.mtime().to_le_bytes());
+            field(hash, &metadata.mtime_nsec().to_le_bytes());
+        } else {
+            hash_content(hash, fs::File::open(full)?, metadata.len())?;
+        }
+    } else if kind.is_dir() {
+        field(hash, b"160000");
+        field(hash, &nested_head(full)?);
+    } else {
+        field(hash, b"special");
+        field(hash, &(metadata.mode() & 0o170000).to_le_bytes());
+    }
+    Ok(())
+}
+
+/// Stream up to the limit of `content`, which was `length` bytes long when it was listed.
+fn hash_content(hash: &mut Sha256, content: impl Read, length: u64) -> Result<()> {
+    let mut digest = Sha256::new();
+    let copied = std::io::copy(&mut content.take(STREAMED_HASH_LIMIT + 1), &mut digest)?;
+    field(hash, &digest.finalize());
+    if copied != length {
+        // A file still being written (a log, build output) counts as changed, never as an error.
+        field(hash, b"changed while hashed");
+    }
+    Ok(())
+}
+
+fn nested_head(directory: &Path) -> Result<Vec<u8>> {
+    if !directory.join(".git").exists() {
+        return Ok(b"directory".to_vec());
+    }
+    let output = execute_bounded(
+        Command::new("git").current_dir(directory).args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "HEAD^{commit}",
+        ]),
+        &[],
+        Duration::from_secs(30),
+        4096,
+    )?;
+    if output.exit_code == Some(1) {
+        return Ok(b"no commit".to_vec());
+    }
+    ensure!(
+        output.success && !output.timed_out,
+        "git could not read the nested repository {}",
+        directory.display()
+    );
+    Ok(output.stdout.trim_ascii_end().to_vec())
 }
 
 fn image_extension(path: &Path) -> bool {
@@ -243,7 +396,8 @@ fn image_extension(path: &Path) -> bool {
         })
 }
 
-pub(super) fn artifacts(root: &Path, declared: &[String]) -> Result<Vec<String>> {
+/// Validate declared artifacts and return each canonical path with its SHA-256 at capture time.
+pub(super) fn artifacts(root: &Path, declared: &[String]) -> Result<Vec<(String, String)>> {
     declared
         .iter()
         .map(|artifact| {
@@ -257,13 +411,80 @@ pub(super) fn artifacts(root: &Path, declared: &[String]) -> Result<Vec<String>>
             );
             let metadata = fs::metadata(&path)?;
             ensure!(
-                metadata.is_file() && metadata.len() <= 10 * 1024 * 1024,
+                metadata.is_file() && metadata.len() <= MAX_ARTIFACT_BYTES,
                 "artifact must be a regular image of at most 10 MiB"
             );
-            Ok(path
+            let hash = file_hash(&path)?;
+            let path = path
                 .to_str()
                 .context("artifact path must be UTF-8")?
-                .to_owned())
+                .to_owned();
+            Ok((path, hash))
         })
         .collect()
+}
+
+/// Hash one regular, non-symlink file of at most 10 MiB through a single open handle.
+fn file_hash(path: &Path) -> Result<String> {
+    ensure!(
+        fs::symlink_metadata(path)?.is_file(),
+        "artifact is no longer a regular file"
+    );
+    let mut file = fs::File::open(path)?;
+    ensure!(
+        file.metadata()?.len() <= MAX_ARTIFACT_BYTES,
+        "artifact exceeds its size limit"
+    );
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 16384];
+    let mut total = 0u64;
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        ensure!(
+            total <= MAX_ARTIFACT_BYTES,
+            "artifact grew beyond its size limit"
+        );
+        hash.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+/// Compare a recorded artifact against the file now on disk.
+pub(super) fn evidence_status(path: &str, recorded: Option<&String>) -> EvidenceStatus {
+    let Some(recorded) = recorded else {
+        return EvidenceStatus::Unrecorded;
+    };
+    match file_hash(Path::new(path)) {
+        Ok(current) if &current == recorded => EvidenceStatus::Verified,
+        Ok(_) => EvidenceStatus::Tampered,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            EvidenceStatus::Missing
+        }
+        Err(_) => EvidenceStatus::Tampered,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_written_while_hashed_counts_as_changed_not_as_an_error() {
+        let hash_of = |bytes: &[u8], length| {
+            let mut hash = Sha256::new();
+            hash_content(&mut hash, bytes, length).unwrap();
+            format!("{:x}", hash.finalize())
+        };
+        let stable = hash_of(b"grown", 5);
+        assert_ne!(hash_of(b"grown", 3), stable, "grew after it was listed");
+        assert_ne!(hash_of(b"gro", 5), stable, "shrank after it was listed");
+    }
 }

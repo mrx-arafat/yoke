@@ -1,4 +1,5 @@
 use super::{
+    projects,
     render::{self, encode, escape},
     Console,
 };
@@ -19,8 +20,9 @@ pub(super) fn decisions(
         .map(|s| s.parse::<i64>())
         .transpose()
         .context("invalid decision cursor")?;
+    let scope = projects::scope(store, console, params)?;
     let filter = DecisionFilter {
-        project: Some(console.project.display().to_string()),
+        project: Some(scope.path.clone()),
         outcome: outcome.clone(),
         tool: tool.clone(),
         session: session.clone(),
@@ -49,14 +51,14 @@ pub(super) fn decisions(
             }
         ));
     }
-    body.push_str(&format!(r#"<form class="filters" data-filter action="/decisions" method="get"><input type="hidden" name="token" value="{}"><label>Outcome<select name="outcome">{options}</select></label><label class="grow">Tool name<input name="tool" value="{}" placeholder="Filter by exact tool name"></label><button type="submit">Apply filters</button><a data-nav class="button quiet" href="{}">Reset</a></form><div class="list-caption"><span>Decision ledger</span><span>{} records &middot; newest first</span></div>"#,console.token,escape(tool.as_deref().unwrap_or("")),render::link(console,"decisions"),rows.len().min(50)));
+    body.push_str(&format!(r#"<form class="filters" data-filter action="decisions" method="get">{}<label>Outcome<select name="outcome">{options}</select></label><label class="grow">Tool name<input name="tool" value="{}" placeholder="Filter by exact tool name"></label><button type="submit">Apply filters</button><a data-nav class="button quiet" href="{}">Reset</a></form>{}<div class="list-caption"><span>Decision ledger</span><span>{} records &middot; newest first</span></div>"#,projects::picker(&scope),escape(tool.as_deref().unwrap_or("")),render::href("decisions",&scope.query()),projects::banner(console,&scope,"decisions"),rows.len().min(50)));
     if let Some(session) = &session {
         let hidden = format!(
             r#"<input type="hidden" name="session" value="{}">"#,
             escape(session)
         );
         body = body.replacen("<label>Outcome", &format!("{hidden}<label>Outcome"), 1);
-        body.push_str(&format!(r#"<p class="scope">Session: <code>{}</code> <a data-nav href="{}">Clear session filter</a></p>"#,escape(session),render::link(console,"decisions")));
+        body.push_str(&format!(r#"<p class="scope">Session: <code>{}</code> <a data-nav href="{}">Clear session filter</a></p>"#,escape(session),render::href("decisions",&scope.query())));
     }
     if rows.is_empty() {
         body.push_str(&render::empty(
@@ -74,20 +76,24 @@ pub(super) fn decisions(
     }
     body.push_str("<nav class=\"pagination\" aria-label=\"Decision pages\">");
     let preserved = format!(
-        "&amp;outcome={}&amp;tool={}&amp;session={}",
+        "&amp;outcome={}&amp;tool={}&amp;session={}{}",
         encode(outcome.as_deref().unwrap_or("")),
         encode(tool.as_deref().unwrap_or("")),
-        encode(session.as_deref().unwrap_or(""))
+        encode(session.as_deref().unwrap_or("")),
+        scope.query()
     );
     if before.is_some() {
         body.push_str(&format!(
-            r#"<a class="button quiet" data-nav href="{}{preserved}">Latest decisions</a>"#,
-            render::link(console, "decisions")
+            r#"<a class="button quiet" data-nav href="{}">Latest decisions</a>"#,
+            render::href("decisions", &preserved)
         ));
     }
     if rows.len() > 50 {
         let cursor = rows[49].id;
-        body.push_str(&format!(r#"<a class="button" data-nav href="{}&amp;before={cursor}{preserved}">Older decisions -&gt;</a>"#,render::link(console,"decisions")));
+        body.push_str(&format!(
+            r#"<a class="button" data-nav href="{}">Older decisions -&gt;</a>"#,
+            render::href("decisions", &format!("before={cursor}{preserved}"))
+        ));
     }
     body.push_str("</nav></main>");
     Ok(body)

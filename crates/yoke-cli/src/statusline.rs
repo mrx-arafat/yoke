@@ -79,7 +79,11 @@ fn refresh(home: &Path, input: &[u8], wrap: Option<&str>) -> Result<String> {
     };
     let db = home.join(".yoke/state.db");
     let store = match std::fs::metadata(&db) {
-        Ok(_) => Some(Store::open_read_only(&db).context("read statusline database")?),
+        Ok(_) => {
+            let store = Store::open_read_only(&db).context("read statusline database")?;
+            // A file with no committed schema (e.g. zero bytes) has no state yet, like a missing one.
+            (store.schema_version()?.0 > 0).then_some(store)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
@@ -147,7 +151,7 @@ pub fn run(wrap: Option<&str>) -> Result<()> {
             .take((INPUT_CAP + 1) as u64)
             .read_to_end(&mut input)?;
     }
-    let home = std::env::home_dir().context("cannot determine home directory")?;
+    let home = crate::commands::home()?;
     println!("{}", refresh(&home, &input, wrap)?);
     Ok(())
 }

@@ -18,7 +18,7 @@ async (page) => {
             observer.observe(document.getElementById("view"),{attributes:true,childList:true});
           },{once:true,capture:true});
         });
-        await page.locator(`nav[aria-label=Workspace] a[href^="/${name}"]`).click();
+        await page.locator(`nav[aria-label=Workspace] a[href^="${name}"]`).click();
         await page.waitForFunction(name=>document.querySelector("main")?.dataset.page===name && document.getElementById("view").getAttribute("aria-busy")!=="true",name);
         const dismiss=page.getByRole("button",{name:"Dismiss notification"});
         if(await dismiss.isVisible())await dismiss.click();

@@ -18,10 +18,22 @@ mod content;
 mod events;
 #[path = "console/http.rs"]
 mod http;
+#[path = "console/launch.rs"]
+mod launch;
+#[path = "console/notifications.rs"]
+mod notifications;
 #[path = "console/pages.rs"]
 mod pages;
+#[path = "console/plan_detail.rs"]
+mod plan_detail;
+#[path = "console/projects.rs"]
+mod projects;
 #[path = "console/render.rs"]
 mod render;
+#[path = "console/settings.rs"]
+mod settings;
+#[path = "console/usage.rs"]
+mod usage;
 #[path = "console/views.rs"]
 mod views;
 
@@ -32,6 +44,26 @@ pub(super) struct Console {
     token: String,
     csrf: String,
     host: String,
+}
+
+/// A view error caused by the request itself; it renders with HTTP 400 instead of 500.
+#[derive(Debug)]
+pub(super) struct BadRequest(pub(super) String);
+
+impl std::fmt::Display for BadRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BadRequest {}
+
+fn view_status(error: &anyhow::Error) -> u16 {
+    if error.downcast_ref::<BadRequest>().is_some() {
+        400
+    } else {
+        500
+    }
 }
 
 pub(super) fn random_token() -> Result<String> {
@@ -61,8 +93,10 @@ pub fn run(home: &Path, project: &Path, open_browser: bool) -> Result<()> {
         csrf: random_token()?,
         host,
     };
-    let url = format!("http://{}/decisions?token={}", console.host, console.token);
+    let mut launch = launch::Launch::new()?;
+    let url = launch.url(&console);
     println!("Yoke console: {url}");
+    eprintln!("This link works once, within five minutes, and signs that browser in.");
     if open_browser {
         let command = if cfg!(target_os = "macos") {
             "open"
@@ -84,7 +118,12 @@ pub fn run(home: &Path, project: &Path, open_browser: bool) -> Result<()> {
     let connections = Arc::new(AtomicUsize::new(0));
     loop {
         let request = server.recv()?;
-        if let Err(error) = serve(&console, &store, &mut actions, &connections, request) {
+        let result = if launch::requested(&console, &request) {
+            launch::respond(&console, &mut launch, request)
+        } else {
+            serve(&console, &store, &mut actions, &connections, request)
+        };
+        if let Err(error) = result {
             eprintln!(
                 "yoke console: {}",
                 yoke_core::redact::redact(&error.to_string())
@@ -106,16 +145,11 @@ fn constant_eq(left: &str, right: &str) -> bool {
             == 0
 }
 
-fn authorize(
-    console: &Console,
-    method: &str,
-    headers: &BTreeMap<String, String>,
-    query: &BTreeMap<String, String>,
-) -> bool {
+/// Only the HttpOnly session cookie authenticates; URLs and headers never carry the secret.
+fn authorize(console: &Console, method: &str, headers: &BTreeMap<String, String>) -> bool {
     let supplied = headers
-        .get("authorization")
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .or_else(|| query.get("token").map(String::as_str))
+        .get("cookie")
+        .and_then(|value| launch::session(console, value))
         .unwrap_or("");
     if !constant_eq(supplied, &console.token) || headers.get("host") != Some(&console.host) {
         return false;
@@ -183,7 +217,7 @@ fn serve(
     request: Request,
 ) -> Result<()> {
     let headers: BTreeMap<String, String> = [
-        "authorization",
+        "cookie",
         "host",
         "origin",
         "x-yoke-csrf",
@@ -205,7 +239,15 @@ fn serve(
             )
         }
     };
-    if !authorize(console, request.method(), &headers, &params) {
+    // Everything lives under the per-run prefix that scopes the session cookie.
+    let base = launch::base(console);
+    let Some(path) = path
+        .strip_prefix(&base[..base.len() - 1])
+        .filter(|rest| rest.starts_with('/'))
+    else {
+        return respond(request, 404, "text/plain; charset=utf-8", "Page not found");
+    };
+    if !authorize(console, request.method(), &headers) {
         return respond(request, 403, "text/plain; charset=utf-8", "Forbidden");
     }
     if request.method() == "POST" {
@@ -257,27 +299,32 @@ fn serve(
                 &yoke_core::redact::redact(&error.to_string()),
             ),
         },
-        "/" | "/decisions" | "/sessions" | "/plans" | "/memory" | "/trust" | "/usage" => {
+        "/" | "/decisions" | "/projects" | "/sessions" | "/plans" | "/memory" | "/trust"
+        | "/usage" | "/notifications" | "/settings" => {
             let page = if path == "/" { "decisions" } else { &path[1..] };
             let result = match page {
-                "sessions" => views::sessions(store, console),
+                "notifications" => notifications::page(store, console, &params),
+                "settings" => settings::page(store, console),
+                "projects" => projects::overview(store, console),
+                "sessions" => views::sessions(store, console, &params),
                 "plans" => views::plans(store, console, &params),
                 "memory" => views::memories(store, console, &params),
                 "trust" => views::trust(store, console),
-                "usage" => views::usage(store, console, &params),
+                "usage" => usage::page(store, console, &params),
                 _ => pages::decisions(store, console, &params),
             };
             let (body, status) = match result {
                 Ok(body) => (body, 200),
                 Err(error) => (
                     render::error(&yoke_core::redact::redact(&error.to_string())),
-                    500,
+                    view_status(&error),
                 ),
             };
+            let unread = notifications::unread(store, console);
             let html = if header(&request, "x-yoke-fragment").as_deref() == Some("1") {
-                body
+                format!("{body}<span hidden data-unread-update=\"{unread}\"></span>")
             } else {
-                render::shell(console, page, &body)
+                render::shell(console, page, &body, unread)
             };
             respond(request, status, "text/html; charset=utf-8", &html)
         }

@@ -1,259 +1,313 @@
-# Yoke
+<p align="center">
+  <img src="crates/yoke-cli/src/console/yoke.svg" width="72" height="72" alt="Yoke logo">
+</p>
 
-Steer your coding agent with gates you define.
+<h1 align="center">Yoke</h1>
 
-Yoke is a small, fast Rust binary that sits in the hook path of coding agents such as Claude Code and Codex.
-On every agent event it runs the checks you configured, records what it decided, and on blocking events it can veto the action with a reason the agent sees.
-It is free and open source under MIT OR Apache-2.0.
+<p align="center"><strong>Local, trusted quality gates for Claude Code and Codex.</strong></p>
+
+<p align="center">
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"></a>
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/Rust-edition%202021-orange" alt="Rust edition 2021"></a>
+</p>
+
+A coding agent can say a task is done when no test proved it, and a rule written in a prompt is a request, not a guarantee.
+Yoke sits in the hook path of Claude Code and Codex.
+On every hook event it runs the checks a human approved, records what it decided, and in enforce mode blocks the action with a reason the agent sees.
+A plan is marked done only after Yoke itself has run the plan's checks on the final working tree.
+It is one binary and one SQLite file on your machine, with no daemon and no telemetry.
+
+> [!IMPORTANT]
+> Yoke 0.1.0 is pre-release.
+> No binary release is published yet and the real-work release trials are still open, so build from source and read [Status](#status) before relying on it.
+
+![The Yoke console Decisions page for a demo project named acme-api, listing allow and deny decisions from Claude Code in enforce mode](docs/assets/console-decisions-light.png)
+
+<sub>The local console showing hook decisions from a synthetic demo project.</sub>
 
 ## Why Yoke
 
-Coding agents follow instructions most of the time.
-Yoke is for the rest of the time.
+- **Code enforces, prompts inform.** Gates are shell checks, denials or command rewrites on agent events; in enforce mode a failing gate blocks `PreToolUse`, `UserPromptSubmit` and `Stop`.
+- **Only approved policy runs.** Yoke applies the exact configuration bytes a human approved with `yoke trust`, edits change nothing until they are trusted again, and `yoke trust` refuses to run from an agent's tool process.
+- **Watch before you block.** New policy starts in observe mode, which runs the gates and records what would have been denied without blocking anything.
+- **Proof, not promises.** Plans freeze their checks, requirements and tasks at human approval, and Yoke runs the checks itself, keeps their output and SHA-256 hashes of declared artifacts, and requires an unchanged Git working tree before it marks a plan done.
+- **No early exits.** While a plan is building or checking, enforce mode blocks the agent's Stop, and after `stop.max_blocks` attempts without progress (default 5) the plan stalls for a human instead of looping.
+- **A second opinion.** Independent review asks the other agent's CLI to review the change since the plan started, and blocking findings fail the plan.
+- **Everything visible, locally.** A loopback-only web console, terminal notifications, a Claude Code statusline, usage estimates, portable memory and a read-only trial report all read the same local state.
 
-- **Code enforces, prompts inform.** Rules that must hold are checked by a binary, not left to the model's goodwill.
-- **Proof, not promises.** A plan is only done when Yoke itself has run its checks on the final code.
-- **Nothing silent.** Every allow, deny and error is logged; when Yoke breaks, it says so and fails closed.
-- **Safe to try.** New installs start in observe mode: Yoke logs what it would block and blocks nothing.
-- **Local and light.** One binary, one SQLite file, no daemon, no telemetry.
+## Quickstart
+
+Yoke targets macOS and Linux, and its release workflow builds both for x86_64 and aarch64.
+You need Git, a stable Rust toolchain, and Claude Code or Codex.
+
+**1. Build and install from source**, because no binary release exists yet:
+
+```sh
+git clone https://github.com/mrx-arafat/yoke.git
+cd yoke
+cargo install --path crates/yoke-cli --locked
+yoke --version
+```
+
+Cargo installs `yoke` into its binary directory, normally `~/.cargo/bin`, which must be on your `PATH`.
+
+**2. Create and approve a policy** in the project you want to govern:
+
+```sh
+cd /path/to/your-project
+yoke init     # writes yoke.toml in observe mode with a sample no-force-push gate
+yoke trust    # shows the exact bytes and asks you to type a confirmation phrase
+yoke gates    # lists the trusted gates for this directory
+```
+
+Run `yoke trust` in your own interactive terminal; it rejects piped input and agent tool processes.
+
+**3. Connect your agents** and confirm the hooks can run:
+
+```sh
+yoke install --agent claude,codex --dry-run   # prints every file change first
+yoke install --agent claude,codex
+yoke health                                   # exits 1 when installed hooks cannot run
+```
+
+Pass `--agent claude` or `--agent codex` to install for one agent.
+Codex runs new hooks only after you approve them with `/hooks` inside Codex.
+If you start an agent with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, keep the same variable set when you run `yoke install`.
+
+**4. Watch before you block:**
+
+```sh
+printf '%s\n' '{"tool_name":"Bash","tool_input":{"command":"git push --force"}}' |
+  yoke run-hook --agent claude pre_tool_use
+yoke log --outcome would_deny --limit 5
+```
+
+This simulates a hook event; it does not run Git.
+In observe mode Yoke prints nothing and records a `would_deny` decision.
+After a period of normal work, review `yoke log --outcome would_deny`, set top-level `mode = "enforce"` in `yoke.toml`, and run `yoke trust` again.
+The same simulated event then returns a denial, as shown in [Gates](#gates-observe-then-enforce).
+
+[Getting started](docs/getting-started.md) walks through every step, including uninstalling.
+
+## How it works
+
+```mermaid
+flowchart LR
+  agent["Claude Code or Codex"] -- "hook event JSON on stdin" --> hook["yoke run-hook<br>runs the trusted gates"]
+  hook -- "enforce: deny or rewrite" --> agent
+  files["yoke.toml and<br>~/.yoke/config.toml"] -- "yoke trust (human)" --> db[("~/.yoke/state.db")]
+  db -- "trusted snapshot" --> hook
+  hook -- "decision, redacted" --> db
+  db --> views["yoke log, notifications,<br>statusline, console"]
+```
+
+1. `yoke install` registers `yoke run-hook --agent <agent> <event>` in each agent's hook settings, and the agent sends each event's JSON on stdin.
+2. Yoke evaluates only the trusted snapshots of the global and project configuration; files on disk are compared for staleness and never executed directly.
+3. In observe mode Yoke prints nothing and records `would_deny`; in enforce mode a failing gate on a blocking event answers in the agent's documented hook format, and policy errors fail closed.
+4. Every decision is stored with secrets redacted, and the CLI, statusline and console read the same database.
+
+Plans move through these states, and the database, not the Markdown file, owns the state:
+
+```mermaid
+flowchart LR
+  draft -- "yoke plan approve<br>(human)" --> approved -- "yoke plan start" --> building -- "yoke plan check" --> checking -- "checks, review and<br>acceptance pass" --> done
+  checking -- "a blocking check fails" --> building
+  building -- "yoke plan ask" --> waiting -- "yoke plan resume (human)" --> building
+  building -- "stop.max_blocks Stops<br>without progress" --> stalled -- "yoke plan resume (human)" --> building
+  done -- "tree changed, next Stop<br>in enforce mode" --> building
+```
+
+`yoke plan new` creates the draft, a human can cancel any unfinished plan with `yoke plan cancel`, and `yoke plan resume` also recovers a plan whose check process was killed.
+
+## Feature tour
+
+### Gates: observe, then enforce
+
+```toml
+mode = "enforce"
+
+[[gate]]
+name = "no-force-push"
+on = "pre_tool_use"
+match_tool = "Bash"
+match_contains = "push --force"
+action = "deny"
+message = "Force push is blocked by Yoke. Push without --force."
+
+[[gate]]
+name = "format-before-stop"
+on = "stop"
+run = "cargo fmt --all -- --check"
+timeout = 30
+message = "Run cargo fmt --all, then retry."
+```
+
+A `check` gate runs a shell command and fails on a nonzero exit, `deny` blocks whatever matches, and `rewrite` edits a `PreToolUse` input such as a shell command.
+Check commands receive the event, gate, tool, input, session, working directory and project as `YOKE_*` environment variables.
+With that policy trusted, a force push is denied in the agent's own response format:
+
+```console
+$ echo '{"tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}' \
+    | yoke run-hook --agent claude pre_tool_use
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Force push is blocked by Yoke. Push without --force."}}
+
+$ yoke log --outcome deny --limit 1
+decisions[1]{ts,event,outcome,reason}:
+  1791968156,"pre_tool_use","deny","Force push is blocked by Yoke. Push without --force."
+```
+
+Only `pre_tool_use`, `user_prompt_submit` and `stop` can block; failures on other events are recorded and the agent continues.
+The sample matcher is an example, not complete protection against every way to spell a force push.
+`yoke preset add git-safety` appends readable deny gates for force pushes, hard resets, forced cleans and `git checkout --` discards, and they apply only after you run `yoke trust`.
+The [configuration reference](docs/configuration.md) lists every field, event and default.
+
+### Plans that prove they are done
+
+A plan is a Markdown file in Git whose TOML header declares checks, requirements and tasks:
+
+```toml
++++
+title = "Rate-limit the login endpoint"
+review = false
+
+[[check]]
+name = "rate-limit"
+run = "sh tests/rate_limit.sh"
+
+[[check]]
+name = "lockout-screenshot"
+run = "test -s shots/lockout.png"
+artifacts = ["shots/lockout.png"]
+
+[[requirement]]
+id = "limit"
+text = "Reject the sixth login attempt within one minute"
+checks = ["rate-limit"]
+
+[[requirement]]
+id = "lockout-copy"
+text = "The lockout page says when the user can try again"
+checks = ["lockout-screenshot"]
+
+[[task]]
+id = "middleware"
+title = "Add the rate-limit middleware"
+requirements = ["limit"]
+
+[[task]]
+id = "lockout-page"
+title = "Show the lockout page"
+requirements = ["lockout-copy"]
+depends_on = ["middleware"]
++++
+```
+
+```sh
+yoke plan new login-rate-limit --title "Rate-limit the login endpoint"
+yoke plan validate login-rate-limit --agent claude   # optional: the other agent reviews the plan first
+yoke plan approve login-rate-limit                    # human, in your own terminal
+yoke plan start login-rate-limit --session <session-id>
+yoke plan task done login-rate-limit middleware --evidence "Counts failures per account"
+yoke plan task done login-rate-limit lockout-page --evidence "Shows the retry time"
+yoke plan check login-rate-limit --agent claude      # --agent names the agent that built it
+yoke plan status login-rate-limit
+```
+
+Approval freezes the header, so changing a check, requirement or task needs a fresh approval.
+`yoke plan check` runs the frozen commands, records their output and artifact hashes, and marks the plan done only when every blocking check, required review, requirement and task passes on a working tree that did not change during the run.
+Set `review = true` to have the other agent's CLI review the change, and see the [workflow guide](docs/workflows.md#plans-backed-by-evidence) for human-only requirements, feedback threads and recovery.
+Take session ids from `yoke log --json` or the console Sessions page.
+
+An excerpt of `yoke plan status` after that run, with the temporary project path shortened to `...`:
+
+```console
+$ yoke plan status login-rate-limit
+plan:
+  slug: "login-rate-limit"
+  state: done
+  tasks: 2/2 done
+  requirements: 2/2 satisfied
+checks[3]{id,name,result,blocking}: newest 3 of 3
+  3,"acceptance",pass,true
+  2,"lockout-screenshot",pass,true
+  1,"rate-limit",pass,true
+evidence[1]{check,path,status}:
+  2,".../acme-api/shots/lockout.png",verified
+```
+
+![The Yoke console plan page in dark theme for login-rate-limit, showing the plan done with two requirements satisfied by passing checks, two tasks done, and an open comment with an agent reply](docs/assets/console-plan-dark.png)
+
+### Console and notifications
+
+```sh
+yoke console            # opens a one-time sign-in link in your browser
+yoke console --no-open  # prints the link instead
+```
+
+The console listens on loopback only and must be started by a human in their own terminal, because it can approve and resume plans.
+Its link works once, within five minutes, and signs that browser in with an `HttpOnly` session cookie; Ctrl-C stops the server.
+It covers Projects, Sessions, Plans, Decisions, Memory, Trust & config, Usage, Notifications and Workflow settings, in light and dark themes with keyboard navigation.
+Notifications collects hook errors, observe-mode would-deny summaries, waiting or stalled plans, failed checks and stale or untrusted configuration, each with recovery steps, and `yoke notifications` prints the same list.
+
+![The Yoke console Notifications page listing a failed plan check with its output and a plan waiting for a human answer, each with recovery help and an Acknowledge button](docs/assets/console-notifications-light.png)
+
+### Memory
+
+```sh
+yoke remember --pinned "Run sh tests/rate_limit.sh before asking for review"
+yoke recall rate
+yoke recall --explain
+```
+
+Notes belong to the current project, and recognizable secrets are redacted before they are stored.
+In enforce mode, session start injects pinned notes, trusted shared knowledge and recent notes within `memory.inject_tokens` (default 1500), and `--explain` shows exactly what would be injected and why.
+`yoke memory export` and `yoke memory import` move memory between machines with explicit project-path mapping, and optional session digests are off by default.
+
+### Usage, trials and extensions
+
+- `yoke install --agent claude --statusline` adds Yoke's mode, plan and alert line to Claude Code, wrapping an existing statusline command if you have one.
+- The statusline and the console Usage page estimate API token prices from agent transcripts; an unpriced model shows as unknown rather than a guessed amount, and the figures are not invoices.
+- `yoke trial report --since <date>` summarizes recorded decisions into release-trial evidence, read-only.
+- `yoke extensions` inventories Claude Code and Codex skills, agents, plugins, MCP servers, hooks and memory files read-only, and exits 1 when it finds shadowed, stale or dangling definitions.
+
+## Security model and limits
+
+- Yoke is not a sandbox.
+  Its self-protection stops an agent from casually approving its own plan, starting the console or editing Yoke state through ordinary tools, but an agent with a shell running as your OS user can deliberately work around it.
+  Read [Security model and limits](docs/workflows.md#security-model-and-limits) and use OS-level isolation if you need more.
+- Trusting a configuration authorizes its shell commands to run with your permissions, and observe mode still runs them.
+- Human-only commands refuse agent markers and noninteractive terminals; an action recorded with the actor `human` passed that check, which does not prove a person acted.
+- In enforce mode a Yoke failure on a blocking event denies the action; `YOKE_OFF=1` set when you start the agent from your own terminal is the explicit bypass, as [troubleshooting](docs/troubleshooting.md#storage-failures-block-work) explains.
+- Yoke's own network use is `yoke update` and a background release check at most once a day at session start.
+  Independent review and memory digests run the Claude Code or Codex CLI, which sends the selected material to that agent's service.
+- Builds of the original 0.1.0 skeleton commit (`db81d08`) predate trusted snapshots and execute configuration straight from disk; use them only in trusted repositories.
 
 ## Status
 
-This development version implements the Core, Workflow, Memory, Surfaces, and Presets roadmap features; the package version remains 0.1.0.
-Focused CLI checks and browser journeys cover the implemented behavior; final release acceptance is tracked in [the execution record](docs/specs/2026-10-13-core-execution.md).
-Local focused checks do not replace the roadmap's full-working-day observe-mode trial, which has not been completed.
-The week-long enforce-mode trial, three non-native release builds, and hosted release publication also remain outstanding.
+The workspace version is 0.1.0 and no binary release has been published, so `yoke update` has nothing to install yet.
+Release acceptance is not complete: each agent still needs a full working day in observe mode and a working week in enforce mode on real work, and the three non-native release builds have not run.
+So far only a partial Codex observe-mode day has been recorded.
+The [release acceptance checklist](docs/release-acceptance.md) and [trials](docs/trials.md) record what has and has not been verified, and the [execution record](docs/specs/2026-10-13-core-execution.md) covers the development milestones.
+Read the [upgrade notes](docs/upgrade-notes.md) before replacing an existing Yoke binary, because the first new binary to open the state database migrates it.
 
-Current code executes only trusted config snapshots.
-An older 0.1 skeleton build executes config directly from disk and should only be used in trusted repositories.
+## Documentation
 
-## Features
+| Guide | Use it to |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Build, install, trust a policy, and inspect your first decision |
+| [Configuration](docs/configuration.md) | Understand defaults, layered trust, gates, and event behavior |
+| [CLI reference](docs/cli.md) | Find every command, argument, and machine-readable output |
+| [Workflows](docs/workflows.md) | Use plans, independent review, memory, presets, and the console |
+| [Troubleshooting](docs/troubleshooting.md) | Diagnose inactive gates, failed checks, and storage problems |
+| [Upgrade notes](docs/upgrade-notes.md) | See every behavior change before replacing a binary |
+| [Decision records](docs/decisions/README.md) | Read why each design choice was made and where it stops |
+| [Design](docs/specs/2026-10-13-yoke-design.md) | Read the full design and the road to 1.0 |
 
-| Feature | What it does | Status |
-|---------|--------------|--------|
-| Gates | Shell checks on agent events; a failing gate blocks the action on blocking events | Available |
-| Layered config | Global `~/.yoke/config.toml` merged with the nearest project `yoke.toml` | Available |
-| Decision log | Every hook decision stored with secrets masked, searchable with `yoke log` | Implemented locally, unreleased |
-| Observe and enforce modes | Shadow-run beside another harness before letting Yoke block anything | Implemented locally, unreleased |
-| Trusted config | Config runs only from snapshots a human approved with `yoke trust` | Implemented locally, unreleased |
-| One-command install | `yoke install --agent claude,codex`, reversible with `yoke uninstall` | Implemented locally, unreleased |
-| Self-update | `yoke update` with checksum verification and an atomic swap | Implemented locally; release distribution unverified |
-| Plans | Plan files in git with human approval and database-owned state | Implemented and focused-tested locally, unreleased |
-| Evidence checks | `done` only after Yoke runs the plan's checks on the final working tree | Implemented and focused-tested locally, unreleased |
-| Stop guard | Keeps the agent working while a plan is open, with a cap so it cannot loop forever | Implemented and focused-tested locally, unreleased |
-| Independent review | A second model reviews the diff and blocking findings fail the plan | Implemented locally; authenticated Codex fixture passed |
-| Memory | Facts, remembered notes, an optional session digest and full-text recall | Implemented locally; authenticated digest fixture passed |
-| Memory migration | Export and import memories between devices and servers, with project-path mapping and duplicate protection | Implemented and focused-tested locally, unreleased |
-| Shared knowledge | Promote a memory into `.yoke/knowledge.md`, then explicitly trust it for context injection | Implemented and focused-tested locally, unreleased |
-| Console | A local web console for plans, decisions, memory and usage | Browser journeys passed; release design acceptance tracked separately |
-| Statusline | Recorded mode, plan state and alerts in the agent's status bar | Locally tested below 15 ms; reversible Claude installation tested |
-| Presets | Ready-made gate packs such as `git-safety`, plus command rewrites | Implemented and focused-tested locally, unreleased |
+## Contributing
 
-## Build
-
-Requires a recent stable Rust toolchain.
-
-```bash
-cargo build --release
-# binary: target/release/yoke
-```
-
-## Quick start
-
-```bash
-yoke init     # writes a starter yoke.toml in observe mode
-yoke trust    # review and approve it from your own interactive terminal
-yoke gates    # lists the trusted gates that apply in this directory
-```
-
-Try a gate by hand:
-
-```bash
-echo '{"tool_name":"Bash","tool_input":{"command":"git push --force"}}' | yoke run-hook pre_tool_use
-```
-
-In the default observe mode this prints nothing and records a `would_deny` decision.
-Inspect it with `yoke log`.
-To enable blocking, set top-level `mode = "enforce"` in `yoke.toml` and review the changed snapshot with `yoke trust` again.
-The CLI requires interactive confirmation and rejects detected agent tool processes.
-These process checks are safeguards, not an operating-system sandbox.
-
-## Wire it into an agent
-
-Yoke reads the agent's hook payload as JSON on stdin and answers in the agent's documented hook-output format.
-Inspect installation changes before applying them:
-
-```bash
-yoke install --agent claude,codex --dry-run
-yoke install --agent claude,codex
-# Later: yoke uninstall
-```
-
-Installation preserves unrelated hooks, writes backups and ownership receipts, and is idempotent.
-Codex requires you to review new hooks with `/hooks`; installation does not approve them for you.
-For Claude Code, `yoke install --agent claude --statusline` also installs the statusline and wraps an existing command while preserving its input and settings.
-Uninstall restores the prior statusline when Yoke still owns it and preserves subsequent user changes.
-If you register hooks manually, include the agent name in each invocation.
-For example, Claude Code settings can include:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "yoke run-hook --agent claude PreToolUse" }] }
-    ],
-    "Stop": [
-      { "hooks": [{ "type": "command", "command": "yoke run-hook --agent claude Stop" }] }
-    ]
-  }
-}
-```
-
-## Configuration
-
-Yoke merges trusted snapshots of `~/.yoke/config.toml` (global) and the nearest project `yoke.toml`.
-A project gate replaces a global gate with the same name.
-Only explicitly supplied project settings override global settings.
-Use `yoke trust --global` to approve global config and `yoke config` to inspect effective values, origins, and stale snapshots.
-Editing a file does not change the running policy until it is trusted again.
-Trusted config and knowledge inputs must be regular, non-symlink files of at most 1 MiB each.
-Invalid or inaccessible disk files leave the last approved snapshot in use and appear as stale with a diagnostic.
-
-| Key | Required | Meaning |
-|-----|----------|---------|
-| `name` | yes | Unique gate name |
-| `on` | yes | Event: `pre_tool_use`, `post_tool_use`, `user_prompt_submit`, `stop`, `session_start`, `session_end`, `pre_compact`, `notification` (Claude only) |
-| `action` | no | `check` (default), `deny`, or `rewrite` |
-| `run` | for `check` | Shell command; a non-zero exit fails the gate |
-| `timeout` | no | Command timeout in seconds, default 30 |
-| `match_tool` | no | Regex fully matched against the tool name |
-| `match_contains` | no | Only run when the payload contains this text |
-| `match_pattern` | no | Regex searched in the payload text |
-| `message` | no | Reason shown to the agent on failure (defaults to the command's stderr) |
-| `shell` | no | Shell used as `<shell> -c <run>` (default `sh`) |
-| `rewrite_field` | no | Tool-input field to rewrite, default `command` |
-| `rewrite_pattern`, `rewrite_to` | for `rewrite` | Regex and replacement; rewrites apply only on PreToolUse |
-| `require_command` | no | Apply a rewrite only while this executable is available on PATH |
-
-Gate commands receive `YOKE_EVENT`, `YOKE_GATE`, `YOKE_TOOL_NAME`, `YOKE_TOOL_INPUT`, `YOKE_SESSION`, `YOKE_CWD`, and `YOKE_PROJECT` in their environment.
-
-## How decisions work
-
-In enforce mode, a failing gate blocks `pre_tool_use`, `user_prompt_submit`, and `stop`.
-On every other event, failures are reported but the agent continues.
-When nothing fails, Yoke prints nothing and the agent proceeds normally.
-Observe mode runs checks and logs decisions without blocking or rewriting tool input.
-Only the first matching rewrite applies, after all checks and denials pass.
-Codex rewrites require an allow decision that bypasses its ordinary permission prompt for that call, so keep rewrite matchers narrow.
-Claude rewrites preserve normal permission evaluation.
-Internal errors deny blocking events when enforcement is enabled or the mode cannot be determined.
-Set `YOKE_OFF=1` in the hook environment for an explicit bypass.
-
-## Move memory to another environment
-
-Export the current project's memory, or include every project with `--all`:
-
-```bash
-yoke memory export ./yoke-memory.json --all
-```
-
-Copy the archive to the destination device or server.
-The archive is plaintext and can contain sensitive notes; protect it as you would your original memory database.
-Existing archive files are preserved unless you explicitly pass `--overwrite`.
-
-Replace the angle-bracket placeholders below with absolute project paths.
-Repeat `--map` for every source project in the archive, including projects whose path stays the same:
-
-```bash
-yoke memory import ./yoke-memory.json \
-  --map '<absolute-source-project>=<absolute-destination-project>' --dry-run
-yoke memory import ./yoke-memory.json \
-  --map '<absolute-source-project>=<absolute-destination-project>'
-```
-
-The dry run reports additions and duplicates without creating a destination database or importing records.
-Imports preserve memory identities and fact relationships, skip identical previously imported records, and reject conflicts atomically.
-Archives are versioned and bounded to 16 MiB and 20,000 records.
-Config trust, plan approvals, agent credentials, and installer state are not transferred.
-Imported shared notes remain local until you deliberately share them and approve the resulting knowledge snapshot on the destination.
-
-## Plans and evidence
-
-Create a draft with `yoke plan new <slug>`, then edit its generated Markdown file.
-The `+++` TOML header accepts `title`, `review`, and `[[check]]` entries containing `name`, `run`, optional `timeout` seconds, and optional `blocking = false`.
-At least one blocking check or required review is necessary.
-A human reviews and freezes that header with `yoke plan approve <slug>` from an interactive terminal.
-
-Bind the approved plan to an existing hook session with `yoke plan start <slug> --session <session-id>`.
-Run `yoke plan check <slug> --agent claude` or `--agent codex`, naming the building agent so automatic review can select the other agent.
-Yoke runs the frozen commands, records their output, and requires an unchanged Git working-tree fingerprint before marking the plan done.
-The repository must already have a HEAD commit.
-Required reviews need an installed, authenticated reviewer CLI; missing authentication or malformed findings fail the review.
-
-Inspect evidence with `yoke plan status <slug>`.
-Use `yoke plan ask '<question>' --slug <slug>` to wait for a human; a human resumes waiting or stalled work with `yoke plan resume <slug>`.
-Editing approved checks requires fresh approval, and ordinary hook payloads cannot approve or resume a plan.
-
-## Presets and statusline
-
-`yoke preset list` shows the bundled packs.
-`yoke preset add git-safety` appends readable TOML without activating it; inspect the change and run `yoke trust` yourself.
-Other packs include `web-redirect`, `token-saver`, and `ui`; their required options are listed by `yoke preset add --help`.
-Token-saver requires an explicit executable wrapper, command prefix, and acknowledgment of Codex's rewrite permission behavior.
-The UI pack provides commented plan-check templates for your actual browser commands and screenshot paths.
-
-`yoke statusline` reads callback JSON from stdin and reports existing local state without creating or migrating a database.
-`yoke statusline --wrap '<existing-command>'` passes the same input to a bounded existing status command and appends its output.
-The 15 ms target applies to Yoke's own rendering, excluding the optional wrapper and waiting for stdin to close.
-Usage estimates are based on supported transcript fields and a compiled pricing table; unsupported models or missing billing dimensions display unknown cost rather than a guessed amount.
-These are API token-price estimates, not subscription invoices.
-
-## Local console
-
-Run `yoke console` from your project to open the loopback-only console, or use `yoke console --no-open` to print its URL without opening a browser.
-The URL includes a fresh access token; every page, action, screenshot, and event stream requires it.
-Stop the server with Ctrl-C.
-
-Sessions, Plans, Decisions, Memory, Trust & config, and Usage share light/dark themes and keyboard navigation.
-Use Cmd+K or Ctrl+K for the command palette and `?` for shortcuts.
-Plan approval displays the exact frozen contract before confirmation; memory deletion offers a 30-second Undo.
-Trust changes remain an explicit terminal operation.
-
-The console uses the supplied lavender/mint and indigo visual direction, with a redesigned Yoke mark and styled native select controls.
-![Yoke decisions console with the redesigned icon and outcome filter](crates/yoke-cli/src/console/artifacts/refined-icon-select-desktop.png)
-
-Browser checks cover all six pages in light and dark themes at desktop and 390 px mobile widths, including filters, plan approval/resume, and memory actions.
-The 24 checked views had no detected accessibility violations or document overflow; this is not a claim of complete accessibility conformance.
-
-## Roadmap
-
-The full design, with the reasoning behind each decision, is in [docs/specs/2026-10-13-yoke-design.md](docs/specs/2026-10-13-yoke-design.md).
-
-1. **0.2 Core:** decision log, observe and enforce modes, trusted config snapshots, Claude Code and Codex install, self-update.
-2. **0.3 Workflow:** plans with human approval, checks Yoke runs itself, stop guard, independent review.
-3. **0.4 Memory:** facts, remembered notes, optional session digest, full-text recall, knowledge shared through git, portable import/export between environments.
-4. **0.5 Surfaces:** a world-class local web console and a fast statusline.
-5. **0.6 Presets:** ready-made gate packs, command rewrites, UI checks.
-
-Version 1.0 is the point where Yoke runs in enforce mode for both agents as the only harness, for a week of real work.
-
-## Changelog maintenance
-
-[CHANGELOG.md](CHANGELOG.md) is generated from reviewed version records in `docs/changes/`.
-Update those records when behavior changes, then regenerate and check the output:
-
-```bash
-uv run --no-project python scripts/changelog.py
-uv run --no-project python scripts/changelog.py --check
-```
-
-Do not edit the generated changelog directly.
-The current entry is unreleased; a Git push does not publish a binary release.
-
-## Clean-room policy
-
-Yoke is an independent implementation built only from public documentation and public, idea-level concepts.
-See [COMPLIANCE.md](COMPLIANCE.md) for the rules every contribution follows.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for the repository map and focused validation, and [COMPLIANCE.md](COMPLIANCE.md) for the clean-room rules every contribution follows.
+Yoke is an independent implementation built only from public documentation and idea-level concepts.
+[CHANGELOG.md](CHANGELOG.md) is generated from the records in `docs/changes/`, so edit those records instead.
 
 ## License
 

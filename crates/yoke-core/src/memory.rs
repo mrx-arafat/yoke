@@ -19,7 +19,7 @@ use crate::{
 
 mod digest;
 mod portable;
-pub use digest::{digest_due, digest_with_command};
+pub use digest::{digest_due, digest_with_command, DigestReport};
 pub use portable::{export_archive, import_archive, ExportReport, ImportReport};
 
 pub(crate) const TEXT_LIMIT: usize = 65_536;
@@ -90,23 +90,32 @@ pub fn recall(store: &Store, project: &str, query: &str, limit: usize) -> Result
             .query_map(params![project, limit], memory_row)?
             .collect::<rusqlite::Result<_>>()?);
     }
-    if query.len() > 4096 {
-        bail!("recall query exceeds 4096 bytes");
-    }
-    // Quote each literal term; user text cannot inject FTS operators or invalid syntax.
-    let query = query
-        .split_whitespace()
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" AND ");
+    let query = fts_query(query)?;
     let mut statement = store.connection().prepare(
         "SELECT m.id,m.identity,m.ts,m.project,m.source,m.text,m.pinned,m.shared
          FROM memories m JOIN memories_fts ON m.id=memories_fts.rowid
          WHERE m.project=?1 AND memories_fts MATCH ?2
-         ORDER BY m.pinned DESC,bm25(memories_fts),m.ts DESC,m.id DESC LIMIT ?3",
+         ORDER BY bm25(memories_fts),m.pinned DESC,m.ts DESC,m.id DESC LIMIT ?3",
     )?;
     let rows = statement.query_map(params![project, query, limit], memory_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Any quoted term may match and BM25 ranks the rest; see docs/decisions/0001-memory-retrieval.md.
+/// Quoting keeps user text from injecting FTS operators or invalid syntax.
+fn fts_query(query: &str) -> Result<String> {
+    if query.len() > 4096 {
+        bail!("recall query exceeds 4096 bytes");
+    }
+    Ok(query
+        .split_whitespace()
+        .map(quote_term)
+        .collect::<Vec<_>>()
+        .join(" OR "))
+}
+
+fn quote_term(term: &str) -> String {
+    format!("\"{}\"", term.replace('"', "\"\""))
 }
 
 pub fn pin(store: &Store, id: i64, pinned: bool) -> Result<()> {
@@ -209,28 +218,35 @@ pub(crate) fn record_hook_facts_in(
             row.reason.clone().unwrap_or_else(|| "Action denied".into()),
         ));
     }
-    if row.event == "post_tool_use" {
-        if matches!(
+    if row.event == "post_tool_use"
+        && matches!(
             row.tool.as_deref(),
             Some("Edit" | "Write" | "MultiEdit" | "apply_patch")
-        ) {
-            facts.push((
-                "file_write",
-                format!(
-                    "{}: {}",
-                    row.tool.as_deref().unwrap_or("edit"),
-                    raw.get("tool_input").unwrap_or(&Value::Null)
-                ),
-            ));
-        }
-        if raw
-            .pointer("/tool_response/exit_code")
-            .and_then(Value::as_i64)
-            .is_some_and(|code| code != 0)
-        {
+        )
+    {
+        facts.push((
+            "file_write",
+            format!(
+                "{}: {}",
+                row.tool.as_deref().unwrap_or("edit"),
+                raw.get("tool_input").unwrap_or(&Value::Null)
+            ),
+        ));
+    }
+    // Only Claude documents a failure signal (PostToolUseFailure with an `error` string);
+    // Codex tool_response is model-facing output, so Codex command failures are not facts.
+    if row.event == "post_tool_use_failure"
+        && matches!(row.tool.as_deref(), Some("Bash" | "PowerShell"))
+        && raw.get("is_interrupt").and_then(Value::as_bool) != Some(true)
+    {
+        if let Some(error) = raw.get("error").and_then(Value::as_str) {
             facts.push((
                 "command_failure",
-                raw.get("tool_response").unwrap_or(&Value::Null).to_string(),
+                format!(
+                    "{}: {}\n{error}",
+                    row.tool.as_deref().unwrap_or("Bash"),
+                    raw.get("tool_input").unwrap_or(&Value::Null)
+                ),
             ));
         }
     }
@@ -245,6 +261,23 @@ pub(crate) fn record_hook_facts_in(
     Ok(facts.len())
 }
 
+/// One block of injected context and why it was chosen; `text` is exactly what is injected.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct ContextItem {
+    /// `pinned`, `knowledge`, `match` (BM25 hit for the query) or `recent` (no query).
+    pub reason: &'static str,
+    pub memory_id: Option<i64>,
+    pub source: Option<String>,
+    /// 1-based BM25 position among query matches; lower `score` is a better match.
+    pub rank: Option<usize>,
+    pub score: Option<f64>,
+    pub matched: Vec<String>,
+    pub facts: Vec<i64>,
+    pub truncated: bool,
+    pub text: String,
+}
+
+/// Context injected at session start, bounded to `token_budget * 4` characters.
 pub fn context(
     store: &Store,
     project: &str,
@@ -252,61 +285,136 @@ pub fn context(
     trusted_knowledge: &str,
     token_budget: usize,
 ) -> Result<String> {
-    let budget = token_budget.saturating_mul(4).min(1_000_000);
-    if budget == 0 {
-        return Ok(String::new());
-    }
-    let mut output = String::new();
-    let mut statement = store.connection().prepare("SELECT substr(text,1,?2) FROM memories WHERE project=?1 AND pinned=1 ORDER BY ts DESC,id DESC LIMIT ?3")?;
-    let mut rows = statement.query(params![project, budget as i64, budget.min(1000) as i64])?;
-    while output.chars().count() < budget {
-        let Some(row) = rows.next()? else { break };
-        append_context(&mut output, &row.get::<_, String>(0)?, budget);
-    }
-    append_context(&mut output, &redact(trusted_knowledge), budget);
-    let remaining = budget.saturating_sub(output.chars().count());
-    if remaining > 0 {
-        if query.len() > 4096 {
-            bail!("recall query exceeds 4096 bytes");
-        }
-        let fts = query
-            .split_whitespace()
-            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+    Ok(
+        context_items(store, project, query, trusted_knowledge, token_budget)?
+            .iter()
+            .map(|item| item.text.as_str())
             .collect::<Vec<_>>()
-            .join(" AND ");
-        let sql = if fts.is_empty() {
-            "SELECT substr(text,1,?2) FROM memories WHERE project=?1 AND pinned=0 AND ?4='' ORDER BY ts DESC,id DESC LIMIT ?3"
-        } else {
-            "SELECT substr(m.text,1,?2) FROM memories m JOIN memories_fts ON m.id=memories_fts.rowid WHERE m.project=?1 AND m.pinned=0 AND memories_fts MATCH ?4 ORDER BY bm25(memories_fts),m.ts DESC LIMIT ?3"
-        };
-        let mut statement = store.connection().prepare(sql)?;
-        let mut rows = statement.query(params![
-            project,
-            remaining as i64,
-            remaining.min(1000) as i64,
-            fts
-        ])?;
-        while output.chars().count() < budget {
-            let Some(row) = rows.next()? else { break };
-            append_context(&mut output, &row.get::<_, String>(0)?, budget);
-        }
-    }
-    Ok(output)
+            .join("\n"),
+    )
 }
 
-fn append_context(output: &mut String, text: &str, budget: usize) {
-    if text.is_empty() {
-        return;
+/// The exact selection behind `context`, with the reason for each item. Explanations are
+/// for humans and never part of the injected text.
+pub fn context_items(
+    store: &Store,
+    project: &str,
+    query: &str,
+    trusted_knowledge: &str,
+    token_budget: usize,
+) -> Result<Vec<ContextItem>> {
+    let fts = fts_query(query)?;
+    let mut selection = Selection {
+        budget: token_budget.saturating_mul(4).min(1_000_000),
+        used: 0,
+        items: Vec::new(),
+    };
+    let budget = selection.budget as i64;
+    let mut statement = store.connection().prepare("SELECT id,source,substr(text,1,?2),length(text),NULL FROM memories WHERE project=?1 AND pinned=1 ORDER BY ts DESC,id DESC LIMIT ?3")?;
+    let mut rows = statement.query(params![project, budget, budget.min(1000)])?;
+    while selection.open() {
+        let Some(row) = rows.next()? else { break };
+        selection.push_memory("pinned", row)?;
     }
-    let used = output.chars().count();
-    if used >= budget {
-        return;
+    selection.push("knowledge", &redact(trusted_knowledge), None);
+    if selection.open() {
+        let sql = if fts.is_empty() {
+            "SELECT id,source,substr(text,1,?2),length(text),NULL FROM memories WHERE project=?1 AND pinned=0 AND ?4='' ORDER BY ts DESC,id DESC LIMIT ?3"
+        } else {
+            "SELECT m.id,m.source,substr(m.text,1,?2),length(m.text),bm25(memories_fts) FROM memories m JOIN memories_fts ON m.id=memories_fts.rowid WHERE m.project=?1 AND m.pinned=0 AND memories_fts MATCH ?4 ORDER BY bm25(memories_fts),m.ts DESC,m.id DESC LIMIT ?3"
+        };
+        let remaining = selection.budget.saturating_sub(selection.used) as i64;
+        let mut statement = store.connection().prepare(sql)?;
+        let mut rows = statement.query(params![project, remaining, remaining.min(1000), fts])?;
+        let reason = if fts.is_empty() { "recent" } else { "match" };
+        while selection.open() {
+            let Some(row) = rows.next()? else { break };
+            selection.push_memory(reason, row)?;
+        }
     }
-    if !output.is_empty() {
-        output.push('\n');
+    let mut items = selection.items;
+    for (position, item) in items
+        .iter_mut()
+        .filter(|item| item.reason == "match")
+        .enumerate()
+    {
+        item.rank = Some(position + 1);
     }
-    let remaining = budget.saturating_sub(output.chars().count());
-    output.extend(text.chars().take(remaining));
+    for item in &mut items {
+        let Some(id) = item.memory_id else { continue };
+        for term in query.split_whitespace() {
+            let found: bool = store.connection().query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories_fts WHERE memories_fts MATCH ?1 AND rowid=?2)",
+                params![quote_term(term), id],
+                |row| row.get(0),
+            )?;
+            if found && !item.matched.iter().any(|seen| seen == term) {
+                item.matched.push(term.to_owned());
+            }
+        }
+        if item.source.as_deref() == Some("digest") {
+            item.facts = store
+                .connection()
+                .prepare("SELECT fact_id FROM memory_facts WHERE memory_id=?1 ORDER BY fact_id")?
+                .query_map([id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+        }
+    }
+    Ok(items)
+}
+
+struct Selection {
+    budget: usize,
+    used: usize,
+    items: Vec<ContextItem>,
+}
+
+impl Selection {
+    /// Whether at least one more character fits after a newline separator.
+    fn open(&self) -> bool {
+        self.used + usize::from(self.used > 0) < self.budget
+    }
+
+    fn push_memory(&mut self, reason: &'static str, row: &rusqlite::Row<'_>) -> Result<()> {
+        let length: i64 = row.get(3)?;
+        if let Some(item) = self.push(reason, &row.get::<_, String>(2)?, Some(length)) {
+            item.memory_id = Some(row.get(0)?);
+            item.source = Some(row.get(1)?);
+            item.score = row.get(4)?;
+        }
+        Ok(())
+    }
+
+    fn push(
+        &mut self,
+        reason: &'static str,
+        text: &str,
+        length: Option<i64>,
+    ) -> Option<&mut ContextItem> {
+        if text.is_empty() || !self.open() {
+            return None;
+        }
+        let total = length.map_or_else(|| text.chars().count(), |length| length as usize);
+        self.used += usize::from(self.used > 0);
+        let text = text
+            .chars()
+            .take(self.budget - self.used)
+            .collect::<String>();
+        let chars = text.chars().count();
+        self.used += chars;
+        self.items.push(ContextItem {
+            reason,
+            memory_id: None,
+            source: None,
+            rank: None,
+            score: None,
+            matched: Vec::new(),
+            facts: Vec::new(),
+            truncated: total > chars,
+            text,
+        });
+        self.items.last_mut()
+    }
 }
 
 /// Append a dated entry to this memory's project knowledge; it still needs human trust.

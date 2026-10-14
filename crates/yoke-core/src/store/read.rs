@@ -15,6 +15,26 @@ pub struct SessionSummary {
     pub ended_at: Option<i64>,
     pub active_plan: Option<i64>,
     pub decision_count: i64,
+    /// Time of the newest recorded decision; None when the session has none.
+    pub last_event_at: Option<i64>,
+    /// Mode Yoke applied at the newest recorded decision.
+    pub last_mode: Option<String>,
+    pub plan_slug: Option<String>,
+    pub plan_state: Option<String>,
+}
+
+/// One project recorded by sessions, decisions or plans.
+#[derive(Clone, Debug, Serialize)]
+pub struct ProjectSummary {
+    pub project: String,
+    pub sessions: i64,
+    /// Sessions without a recorded end event. This is not proof that the agent is running.
+    pub open_sessions: i64,
+    pub last_activity: Option<i64>,
+    /// Denied or would-deny decisions at or after the caller's `since` time.
+    pub recent_denials: i64,
+    /// Plans that are neither done nor cancelled.
+    pub open_plans: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -80,8 +100,12 @@ impl Store {
 
     pub fn sessions(&self, project: Option<&str>, limit: usize) -> Result<Vec<SessionSummary>> {
         let mut statement = self.connection.prepare(
-            "SELECT s.id,s.agent,s.project,s.started_at,s.ended_at,s.active_plan,s.decision_count
-             FROM sessions s WHERE (?1 IS NULL OR s.project=?1) ORDER BY started_at DESC,id LIMIT ?2")?;
+            "SELECT s.id,s.agent,s.project,s.started_at,s.ended_at,s.active_plan,s.decision_count,
+             (SELECT max(d.ts) FROM decisions d WHERE d.session_id=s.id),
+             (SELECT d.mode FROM decisions d WHERE d.session_id=s.id ORDER BY d.ts DESC,d.id DESC LIMIT 1),
+             p.slug,p.state
+             FROM sessions s LEFT JOIN plans p ON p.id=s.active_plan
+             WHERE (?1 IS NULL OR s.project=?1) ORDER BY s.started_at DESC,s.id LIMIT ?2")?;
         let rows = statement.query_map(
             params![project.map(redact), limit.min(1000) as i64],
             |row| {
@@ -93,9 +117,40 @@ impl Store {
                     ended_at: row.get(4)?,
                     active_plan: row.get(5)?,
                     decision_count: row.get(6)?,
+                    last_event_at: row.get(7)?,
+                    last_mode: row.get(8)?,
+                    plan_slug: row.get(9)?,
+                    plan_state: row.get(10)?,
                 })
             },
         )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every recorded project, most recently active first.
+    pub fn projects(&self, since: i64, limit: usize) -> Result<Vec<ProjectSummary>> {
+        let mut statement = self.connection.prepare(
+            "WITH known(project) AS (SELECT project FROM sessions UNION SELECT project FROM decisions UNION SELECT project FROM plans)
+             SELECT k.project,
+             (SELECT count(*) FROM sessions s WHERE s.project=k.project),
+             (SELECT count(*) FROM sessions s WHERE s.project=k.project AND s.ended_at IS NULL),
+             nullif(max(coalesce((SELECT max(ts) FROM decisions d WHERE d.project=k.project),0),
+                        coalesce((SELECT max(started_at) FROM sessions s WHERE s.project=k.project),0),
+                        coalesce((SELECT max(updated_at) FROM plans p WHERE p.project=k.project),0)),0) AS active,
+             (SELECT count(*) FROM decisions d WHERE d.project=k.project AND d.ts>=?1 AND d.outcome IN ('deny','would_deny')),
+             (SELECT count(*) FROM plans p WHERE p.project=k.project AND p.state NOT IN ('done','cancelled'))
+             FROM known k ORDER BY active IS NULL,active DESC,k.project LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![since, limit.min(1000) as i64], |row| {
+            Ok(ProjectSummary {
+                project: row.get(0)?,
+                sessions: row.get(1)?,
+                open_sessions: row.get(2)?,
+                last_activity: row.get(3)?,
+                recent_denials: row.get(4)?,
+                open_plans: row.get(5)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

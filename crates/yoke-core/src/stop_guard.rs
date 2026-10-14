@@ -1,4 +1,5 @@
-//! Persistent progress-aware stop limits; this module never resumes a plan.
+//! Persistent progress-aware stop limits. A completed plan whose tree changed reopens
+//! as building in enforce mode; stalled and waiting plans are never resumed here.
 
 use std::path::Path;
 
@@ -27,14 +28,111 @@ struct ActivePlan {
     state: String,
     revision: i64,
     agent: String,
+    done_fingerprint: Option<String>,
 }
 
+/// The session's plan, scoped by the plan's own project rather than the session's latest one.
 fn active(connection: &Connection, project: &str, session: &str) -> Result<Option<ActivePlan>> {
     Ok(connection.query_row(
-        "SELECT p.id,p.slug,p.state,p.revision,s.agent FROM sessions s JOIN plans p ON p.id=s.active_plan WHERE s.id=?1 AND s.project=?2 AND p.project=?2",
+        "SELECT p.id,p.slug,p.state,p.revision,s.agent,p.done_fingerprint FROM sessions s JOIN plans p ON p.id=s.active_plan WHERE s.id=?1 AND p.project=?2",
         params![session, project],
-        |row| Ok(ActivePlan { id: row.get(0)?, slug: row.get(1)?, state: row.get(2)?, revision: row.get(3)?, agent: row.get(4)? }),
+        |row| Ok(ActivePlan { id: row.get(0)?, slug: row.get(1)?, state: row.get(2)?, revision: row.get(3)?, agent: row.get(4)?, done_fingerprint: row.get(5)? }),
     ).optional()?)
+}
+
+fn canonical(project: &Path) -> Result<(std::path::PathBuf, String)> {
+    let project = project
+        .canonicalize()
+        .context("resolve stop-guard project")?;
+    let key = project
+        .to_str()
+        .context("stop-guard project is not UTF-8")?
+        .to_owned();
+    Ok((project, key))
+}
+
+/// A completed plan stays fresh only while the tree matches the one its checks passed on.
+fn stale(done: &ActivePlan, fingerprint: &str) -> bool {
+    done.done_fingerprint.as_deref() != Some(fingerprint)
+}
+
+/// The current tree in the form of a completed plan's anchor: `<commit>:<content>` for content
+/// anchors, which survive committing the same bytes, or the HEAD-bound fingerprint for anchors
+/// recorded before them. A tree that cannot be compared (a vanished commit, an unreadable
+/// entry, a failing git) counts as changed, so the plan reopens and the stall cap applies
+/// instead of every Stop failing.
+fn done_view(project: &Path, anchor: Option<&str>) -> String {
+    let view = match anchor.and_then(|anchor| anchor.split_once(':')) {
+        Some((base, _)) => plan::content_fingerprint(project, base)
+            .map(|content| content.map_or_else(String::new, |content| format!("{base}:{content}"))),
+        None => plan::fingerprint(project),
+    };
+    view.unwrap_or_default()
+}
+
+fn reopen_reason(done: &ActivePlan) -> String {
+    format!(
+        "plan '{}' was done but the workspace changed; it is building again; finish the work and run `yoke plan check {} --agent {}`",
+        done.slug, done.slug, done.agent
+    )
+}
+
+/// Reopen a stale completed plan with an audited transition; its completion tree is cleared.
+fn reopen_in(
+    tx: &Transaction<'_>,
+    done: &ActivePlan,
+    session: &str,
+    project: &str,
+    now: i64,
+) -> Result<()> {
+    let note = "workspace changed after completion";
+    let changed = tx.execute(
+        "UPDATE plans SET state='building',done_fingerprint=NULL,revision=revision+1,updated_at=?1 WHERE id=?2 AND revision=?3 AND state='done'",
+        params![now, done.id, done.revision],
+    )?;
+    ensure!(changed == 1, "plan changed before reopening; retry");
+    // Reopened work starts a fresh progress count; retention may have pruned the runs it cited.
+    tx.execute("DELETE FROM stop_guard WHERE plan_id=?1", [done.id])?;
+    tx.execute(
+        "INSERT INTO transitions(plan_id,ts,from_state,to_state,actor,note) VALUES (?1,?2,'done','building','yoke',?3)",
+        params![done.id, now, note],
+    )?;
+    let detail = serde_json::json!({"plan": done.slug, "from": "done", "to": "building", "actor": "yoke", "note": note}).to_string();
+    tx.execute(
+        "INSERT INTO facts(ts,session_id,project,kind,detail) VALUES (?1,?2,?3,'plan_transition',?4)",
+        params![now, session, project, crate::redact::redact_payload(&detail, 4096)],
+    )?;
+    Ok(())
+}
+
+/// Whether a Stop whose atomic record failed may still be allowed: only when the stop guard
+/// would not need to write plan state. Active work always needs its progress counter, and a
+/// stale completed plan needs reopening, so both fail closed. The first lookup uses only
+/// columns every workflow schema has, so a not-yet-migrated read-only database still answers.
+pub fn allows_without_write(store: &Store, project: &Path, session: &str) -> Result<bool> {
+    let (project, key) = canonical(project)?;
+    let connection = store.connection();
+    let current: Option<(i64, String)> = connection
+        .query_row(
+            "SELECT p.id,p.state FROM sessions s JOIN plans p ON p.id=s.active_plan WHERE s.id=?1 AND p.project=?2",
+            params![session, key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(match current {
+        None => true,
+        Some((_, state)) if matches!(state.as_str(), "building" | "checking") => false,
+        Some((id, state)) if state == "done" => {
+            let anchor: Option<String> = connection.query_row(
+                "SELECT done_fingerprint FROM plans WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )?;
+            let current = done_view(&project, anchor.as_deref());
+            anchor.as_deref() == Some(current.as_str())
+        }
+        Some(_) => true,
+    })
 }
 
 /// Evaluate a real workspace fingerprint; errors must follow the hook's fail-closed path.
@@ -47,22 +145,37 @@ pub fn evaluate(
     now: i64,
     enforce: bool,
 ) -> Result<StopDecision> {
-    let project = project
-        .canonicalize()
-        .context("resolve stop-guard project")?;
-    let project_key = project
-        .to_str()
-        .context("stop-guard project is not UTF-8")?;
-    let Some(current) = active(store.connection(), project_key, session)? else {
+    let (project, project_key) = canonical(project)?;
+    let Some(current) = active(store.connection(), &project_key, session)? else {
         return Ok(StopDecision::default());
     };
+    if current.state == "done" {
+        let fingerprint = done_view(&project, current.done_fingerprint.as_deref());
+        if !stale(&current, &fingerprint) {
+            return Ok(StopDecision::default());
+        }
+        if enforce {
+            store.transaction(|tx| {
+                ensure!(
+                    active(tx, &project_key, session)?.as_ref() == Some(&current),
+                    "plan changed while checking done freshness; retry"
+                );
+                reopen_in(tx, &current, session, &project_key, now)
+            })?;
+        }
+        return Ok(StopDecision {
+            block: true,
+            stalled: false,
+            reason: Some(reopen_reason(&current)),
+        });
+    }
     if !matches!(current.state.as_str(), "building" | "checking") {
         return Ok(StopDecision::default());
     }
     let fingerprint = plan::fingerprint(&project).context("compute stop-guard progress")?;
     tick(
         store,
-        project_key,
+        &project_key,
         session,
         &current,
         &fingerprint,
@@ -193,25 +306,20 @@ pub fn record_stop(
         "invalid base Stop outcome"
     );
     ensure!(row.gates.is_array(), "Stop gates must be an array");
-    let project = project
-        .canonicalize()
-        .context("resolve stop-guard project")?;
-    let project_key = project
-        .to_str()
-        .context("stop-guard project is not UTF-8")?;
+    let (project, project_key) = canonical(project)?;
+    let project_key = project_key.as_str();
     ensure!(row.project == project_key, "Stop decision project mismatch");
     let expected = if row.outcome == "allow" {
         active(store.connection(), project_key, &row.session_id)?
     } else {
         None
     };
-    let fingerprint = if expected
-        .as_ref()
-        .is_some_and(|p| matches!(p.state.as_str(), "building" | "checking"))
-    {
-        plan::fingerprint(&project).context("compute stop-guard progress")?
-    } else {
-        String::new()
+    let fingerprint = match expected.as_ref() {
+        Some(done) if done.state == "done" => done_view(&project, done.done_fingerprint.as_deref()),
+        Some(active) if matches!(active.state.as_str(), "building" | "checking") => {
+            plan::fingerprint(&project).context("compute stop-guard progress")?
+        }
+        _ => String::new(),
     };
     persist_stop(
         store,
@@ -242,7 +350,12 @@ fn persist_stop(
         if prepared.outcome == "allow" {
             let current = active(tx, project, &prepared.session_id)?;
             ensure!(current.as_ref() == expected, "active plan changed while computing stop progress; retry");
-            if let Some(expected) = expected.filter(|p| matches!(p.state.as_str(), "building" | "checking")) {
+            if let Some(expected) = expected.filter(|p| p.state == "done" && stale(p, fingerprint)) {
+                if prepared.mode == "enforce" {
+                    reopen_in(tx, expected, &prepared.session_id, project, prepared.ts)?;
+                }
+                decision = StopDecision { block: true, stalled: false, reason: Some(reopen_reason(expected)) };
+            } else if let Some(expected) = expected.filter(|p| matches!(p.state.as_str(), "building" | "checking")) {
                 decision = tick_in(tx, project, &prepared.session_id, expected, fingerprint, max_blocks, prepared.ts, prepared.mode == "enforce")?;
             }
         }
@@ -259,6 +372,62 @@ fn persist_stop(
             prepared.gates.as_array_mut().context("Stop gates must be an array")?.push(serde_json::json!({"name":"stop-guard", "result":if decision.block {"deny"} else {"stalled"}, "ms":0,"exit_code":null}));
         }
         memory::record_hook_facts_in(tx, &prepared, raw)?;
+        Store::record_decision_in(tx, &prepared, payload_cap)?;
+        Ok(decision)
+    })?;
+    *row = prepared;
+    Ok(decision)
+}
+
+/// Persist an enforce-mode Stop the hook watchdog answered and count it toward the stall cap,
+/// so a Stop that always overruns still stalls its plan and lets the agent stop. No tree
+/// fingerprint is computed (it may be what was slow): the stored one is kept, and only plan
+/// transitions and new check runs reset the count. Without active work there is no cap and
+/// the Stop is denied, as any other hook failure in enforce mode.
+pub fn record_overrun(
+    store: &Store,
+    project: &Path,
+    max_blocks: u32,
+    row: &mut DecisionRecord,
+    payload_cap: usize,
+) -> Result<StopDecision> {
+    let (_, key) = canonical(project)?;
+    let mut prepared = row.clone();
+    let decision = store.transaction(|tx| {
+        let mut decision = StopDecision {
+            block: true,
+            stalled: false,
+            reason: None,
+        };
+        let working = active(tx, &key, &prepared.session_id)?
+            .filter(|plan| matches!(plan.state.as_str(), "building" | "checking"));
+        if let Some(expected) = working {
+            let last: String = tx
+                .query_row(
+                    "SELECT last_fingerprint FROM stop_guard WHERE session_id=?1 AND plan_id=?2",
+                    params![prepared.session_id, expected.id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or_default();
+            decision = tick_in(
+                tx,
+                &key,
+                &prepared.session_id,
+                &expected,
+                &last,
+                max_blocks,
+                prepared.ts,
+                true,
+            )?;
+        }
+        prepared.outcome = if decision.block { "deny" } else { "allow" }.into();
+        if let Some(reason) = &decision.reason {
+            prepared.reason = Some(match prepared.reason.take() {
+                Some(previous) if !previous.is_empty() => format!("{previous}; {reason}"),
+                _ => reason.clone(),
+            });
+        }
         Store::record_decision_in(tx, &prepared, payload_cap)?;
         Ok(decision)
     })?;
@@ -584,5 +753,166 @@ mod tests {
             .unwrap()
             .reason
             .is_none());
+    }
+
+    fn done(store: &Store, anchor: Option<&str>) -> ActivePlan {
+        store
+            .connection()
+            .execute(
+                "UPDATE plans SET state='done',done_fingerprint=?1 WHERE id=1",
+                [anchor],
+            )
+            .unwrap();
+        active(store.connection(), "/fixture", "session")
+            .unwrap()
+            .unwrap()
+    }
+
+    fn record(
+        store: &Store,
+        expected: &ActivePlan,
+        fingerprint: &str,
+        mode: &str,
+    ) -> (StopDecision, DecisionRecord) {
+        let mut row = row();
+        row.mode = mode.into();
+        let decision = persist_stop(
+            store,
+            "/fixture",
+            Some(expected),
+            fingerprint,
+            2,
+            &mut row,
+            4096,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        (decision, row)
+    }
+
+    #[test]
+    fn done_plan_is_accepted_until_its_tree_changes_then_reopens_with_audit() {
+        let (_dir, store) = fixture();
+        let expected = done(&store, Some("fp_done"));
+        let (decision, row) = record(&store, &expected, "fp_done", "enforce");
+        assert!(!decision.block && !decision.stalled);
+        assert_eq!(row.outcome, "allow");
+        // Standalone review evidence on a changed tree must not refresh the completion anchor.
+        store.connection().execute_batch("INSERT INTO check_runs(plan_id,ts,name,command,output_tail,fingerprint,blocking,ms,result) VALUES(1,10,'review','independent review','','fp_changed',1,1,'pass');").unwrap();
+        let (decision, row) = record(&store, &expected, "fp_changed", "enforce");
+        assert!(decision.block && !decision.stalled);
+        assert_eq!(row.outcome, "deny");
+        let reopened = active(store.connection(), "/fixture", "session")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                reopened.state.as_str(),
+                reopened.revision,
+                reopened.done_fingerprint
+            ),
+            ("building", 1, None)
+        );
+        let audit: (String, String, String) = store
+            .connection()
+            .query_row("SELECT t.from_state,t.actor,f.kind FROM transitions t, facts f WHERE t.plan_id=1 AND f.kind='plan_transition'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!(
+            audit,
+            ("done".into(), "yoke".into(), "plan_transition".into())
+        );
+    }
+
+    #[test]
+    fn stale_or_unanchored_done_plan_in_observe_mode_reports_without_mutation() {
+        for anchor in [Some("fp_done"), None] {
+            let (_dir, store) = fixture();
+            let expected = done(&store, anchor);
+            let (decision, row) = record(&store, &expected, "fp_changed", "observe");
+            assert!(decision.block);
+            assert_eq!(row.outcome, "would_deny");
+            assert_eq!(
+                active(store.connection(), "/fixture", "session")
+                    .unwrap()
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn failed_stop_record_falls_back_only_when_no_plan_write_is_needed() {
+        let (dir, store) = fixture();
+        let project = dir.path().canonicalize().unwrap();
+        let key = project.to_str().unwrap();
+        store
+            .connection()
+            .execute("UPDATE plans SET project=?1 WHERE id=1", [key])
+            .unwrap();
+        assert!(allows_without_write(&store, &project, "missing").unwrap());
+        for (state, allowed) in [
+            ("waiting", true),
+            ("stalled", true),
+            ("building", false),
+            ("checking", false),
+        ] {
+            store
+                .connection()
+                .execute("UPDATE plans SET state=?1 WHERE id=1", [state])
+                .unwrap();
+            assert_eq!(
+                allows_without_write(&store, &project, "session").unwrap(),
+                allowed,
+                "{state}"
+            );
+        }
+        // A completed plan whose tree cannot be compared (no repository here) counts as changed:
+        // the fallback fails closed, and the guard reopens the plan instead of erroring.
+        store
+            .connection()
+            .execute(
+                "UPDATE plans SET state='done',done_fingerprint='abc:def' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert!(!allows_without_write(&store, &project, "session").unwrap());
+        assert!(
+            evaluate(&store, &project, "session", 2, 10, true)
+                .unwrap()
+                .block
+        );
+        assert_eq!(
+            active(store.connection(), key, "session")
+                .unwrap()
+                .unwrap()
+                .state,
+            "building"
+        );
+    }
+
+    #[test]
+    fn plan_project_not_the_sessions_latest_project_scopes_the_guard() {
+        let (_dir, store) = fixture();
+        let mut elsewhere = row();
+        elsewhere.project = "/elsewhere".into();
+        store.record_decision(&elsewhere, 4096).unwrap();
+        assert!(active(store.connection(), "/fixture", "session")
+            .unwrap()
+            .is_some());
+        assert!(active(store.connection(), "/elsewhere", "session")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn reopening_after_pruned_check_runs_restarts_stop_progress() {
+        let (_dir, store) = fixture();
+        let expected = done(&store, Some("fp_done"));
+        // Progress recorded while building cites a check run that retention later deleted.
+        store.connection().execute_batch("INSERT INTO stop_guard(session_id,plan_id,blocks,last_fingerprint,last_block_at,last_transition_id,last_check_run_id) VALUES('session',1,1,'old',5,0,99);").unwrap();
+        let (decision, _) = record(&store, &expected, "fp_changed", "enforce");
+        assert!(decision.block);
+        let next = stop(&store, "fp_changed", true).unwrap();
+        assert!(next.block && !next.stalled, "{:?}", next.reason);
     }
 }

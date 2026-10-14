@@ -6,7 +6,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::event::EventKind;
-use crate::store::Store;
 pub use crate::trust::{load_trusted, SnapshotStatus};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -94,6 +93,7 @@ pub struct MemoryConfig {
     pub digest: bool,
     pub digest_agent: String,
     pub inject_tokens: usize,
+    pub digest_models: AgentModels,
 }
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -101,6 +101,7 @@ impl Default for MemoryConfig {
             digest: false,
             digest_agent: "claude".into(),
             inject_tokens: 1500,
+            digest_models: AgentModels::default(),
         }
     }
 }
@@ -109,11 +110,34 @@ impl Default for MemoryConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ReviewConfig {
     pub reviewer: String,
+    pub models: AgentModels,
 }
 impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
             reviewer: "auto".into(),
+            models: AgentModels::default(),
+        }
+    }
+}
+
+/// Model passed to an agent CLI that Yoke launches; unset keeps that CLI's own default.
+/// Per agent, so an automatically selected reviewer still gets its own model.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentModels {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex: Option<String>,
+}
+
+impl AgentModels {
+    pub fn get(&self, agent: &str) -> Option<&str> {
+        match agent {
+            "claude" => self.claude.as_deref(),
+            "codex" => self.codex.as_deref(),
+            _ => None,
         }
     }
 }
@@ -175,7 +199,50 @@ pub struct LoadedConfig {
     pub knowledge: Option<String>,
 }
 
+/// How long one blocking hook may run and what its gates may use of that, in seconds, or
+/// `None` for events that cannot block. The ceilings stay under the agents' default hook
+/// timeouts, after which an agent lets the action through: Claude Code cancels command hooks
+/// after 600 s, and UserPromptSubmit hooks after 30 s
+/// (https://code.claude.com/docs/en/hooks.md), and Codex after 600 s
+/// (https://developers.openai.com/codex/hooks). The margin covers Yoke's own work.
+pub fn hook_budget(event: EventKind) -> Option<(u64, u64)> {
+    match event {
+        EventKind::UserPromptSubmit => Some((25, 5)),
+        EventKind::PreToolUse | EventKind::Stop => Some((540, 10)),
+        _ => None,
+    }
+}
+
 impl Config {
+    /// Longest the check gates on `event` can run one after another, in seconds.
+    pub fn gate_seconds(&self, event: EventKind) -> u64 {
+        self.gates
+            .iter()
+            .filter(|gate| gate.on == event && gate.action == GateAction::Check)
+            .fold(0, |total, gate| total.saturating_add(gate.timeout))
+    }
+
+    /// Refuse, before trust, check gates whose timeouts could keep a blocking hook running past
+    /// what its agent allows. Persisted snapshots are not re-checked, so trusted policy still loads.
+    pub fn check_hook_budgets(&self) -> Result<()> {
+        for event in [
+            EventKind::PreToolUse,
+            EventKind::UserPromptSubmit,
+            EventKind::Stop,
+        ] {
+            if let Some((ceiling, margin)) = hook_budget(event) {
+                let total = self.gate_seconds(event);
+                ensure!(
+                    total.saturating_add(margin) <= ceiling,
+                    "check gates on {} may run for {total} s in total, but that hook must answer within {ceiling} s of starting; lower their timeout values to {} s or less in total",
+                    event.as_str(),
+                    ceiling - margin
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Parse one layer, retaining which settings were explicitly supplied.
     pub fn parse(s: &str) -> Result<Self> {
         let value: toml::Value = toml::from_str(s).context("parsing Yoke config (TOML)")?;
@@ -198,6 +265,24 @@ impl Config {
             matches!(self.review.reviewer.as_str(), "auto" | "claude" | "codex"),
             "review.reviewer must be auto, claude or codex"
         );
+        for (key, models) in [
+            ("review.models", &self.review.models),
+            ("memory.digest_models", &self.memory.digest_models),
+        ] {
+            for (agent, model) in [("claude", &models.claude), ("codex", &models.codex)] {
+                // Availability cannot be checked offline; the value becomes one CLI argument.
+                ensure!(
+                    model.as_ref().is_none_or(|model| {
+                        (1..=128).contains(&model.len())
+                            && !model.starts_with('-')
+                            && model
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || b"._:/@[]-".contains(&byte))
+                    }),
+                    "{key}.{agent} must be 1 to 128 letters, digits or . _ : / @ [ ] -, not starting with -"
+                );
+            }
+        }
         let plans = Path::new(&self.plans.dir);
         ensure!(
             !self.plans.dir.trim().is_empty()
@@ -319,6 +404,10 @@ impl Config {
         merge!("memory.digest_agent", memory.digest_agent);
         merge!("memory.inject_tokens", memory.inject_tokens);
         merge!("review.reviewer", review.reviewer);
+        merge!("review.models.claude", review.models.claude);
+        merge!("review.models.codex", review.models.codex);
+        merge!("memory.digest_models.claude", memory.digest_models.claude);
+        merge!("memory.digest_models.codex", memory.digest_models.codex);
         self.specified.extend(other.specified);
         for gate in other.gates {
             match self
@@ -387,9 +476,19 @@ fn collect_settings(prefix: &str, value: &toml::Value, keys: &mut BTreeSet<Strin
     }
 }
 
-/// Global config path; executable settings always come from a trusted snapshot.
-pub fn global_config_path() -> Option<PathBuf> {
-    std::env::home_dir().map(|home| home.join(".yoke/config.toml"))
+/// The home Yoke keeps its state under, from `HOME` only. An unset, empty or relative value
+/// fails instead of falling back to the account's home, which an isolated run must never use.
+pub fn home() -> Result<PathBuf> {
+    home_from(std::env::var_os("HOME"))
+}
+
+pub fn home_from(value: Option<std::ffi::OsString>) -> Result<PathBuf> {
+    let home = PathBuf::from(value.context("HOME is not set; Yoke needs it to find its state")?);
+    ensure!(
+        home.is_absolute(),
+        "HOME must be an absolute path; Yoke never falls back to another home directory"
+    );
+    Ok(home)
 }
 
 /// Discover the nearest disk config; this does not parse or execute it.
@@ -400,49 +499,18 @@ pub fn find_project_config(start: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// Compatibility entry point using trusted state in the current user's home.
-pub fn load(cwd: &Path) -> Result<Config> {
-    let home = std::env::home_dir().context("cannot determine home directory")?;
-    let state_dir = home.join(".yoke");
-    std::fs::create_dir_all(&state_dir)
-        .with_context(|| format!("creating state directory {}", state_dir.display()))?;
-    let store = Store::open(state_dir.join("state.db"))?;
-    Ok(load_trusted(&store, cwd, &home)?.config)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn compatibility_load_initializes_fresh_home_without_trusting_disk_config() {
-        // Re-execute this test to isolate HOME from every other test thread.
-        if let Some(home) = std::env::var_os("YOKE_TEST_FRESH_HOME") {
-            let home = PathBuf::from(home);
-            assert!(!home.join(".yoke").exists());
-            let config = load(&home).unwrap();
-            assert_eq!(config.mode, Mode::Observe);
-            assert!(config.gates.is_empty());
-            assert!(home.join(".yoke/state.db").is_file());
-            return;
+    fn home_requires_an_absolute_home_and_never_falls_back() {
+        for missing in [None, Some(""), Some("relative/home")] {
+            assert!(home_from(missing.map(Into::into)).is_err(), "{missing:?}");
         }
-        let home = tempfile::tempdir().unwrap();
-        std::fs::write(home.path().join("yoke.toml"), "mode='enforce'").unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "config::tests::compatibility_load_initializes_fresh_home_without_trusting_disk_config",
-                "--nocapture",
-            ])
-            .env("HOME", home.path())
-            .env("YOKE_TEST_FRESH_HOME", home.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        assert_eq!(
+            home_from(Some("/isolated/home".into())).unwrap(),
+            PathBuf::from("/isolated/home")
         );
     }
 
@@ -494,6 +562,28 @@ mod tests {
         config.merge(Config::parse("mode='observe'\n[log]").unwrap());
         assert_eq!(config.mode, Mode::Observe);
         assert_eq!(config.log.retention_days, 12);
+    }
+
+    #[test]
+    fn agent_models_validate_before_trust_and_merge_per_key() {
+        for bad in [
+            "[review.models]\nclaude='--dangerously-skip-permissions'",
+            "[review.models]\ncodex=''",
+            "[review.models]\nclaude='opus; rm -rf /'",
+            "[review.models]\ngemini='pro'",
+            "[memory.digest_models]\nclaude='has space'",
+        ] {
+            assert!(Config::parse(bad).is_err(), "accepted {bad}");
+        }
+        let mut config = Config::parse("[review.models]\nclaude='opus'\ncodex='gpt-5.1-codex'\n[memory.digest_models]\nclaude='claude-haiku-4-5@20251001'").unwrap();
+        config.merge(Config::parse("[review.models]\ncodex='o3'").unwrap());
+        assert_eq!(config.review.models.get("claude"), Some("opus"));
+        assert_eq!(config.review.models.get("codex"), Some("o3"));
+        assert_eq!(
+            config.memory.digest_models.get("claude"),
+            Some("claude-haiku-4-5@20251001")
+        );
+        assert_eq!(config.memory.digest_models.get("codex"), None);
     }
 
     #[test]

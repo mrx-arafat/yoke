@@ -70,20 +70,33 @@ fn notes_facts_context_and_share_follow_project_boundaries() -> Result<()> {
         )?,
         1
     );
+    // Documented shapes: Claude Bash output object, Codex model-facing output, and
+    // Claude PostToolUseFailure, the only documented failure signal.
     let mut command = row.clone();
     command.tool = Some("Bash".into());
-    assert_eq!(
-        record_hook_facts(
-            &store,
-            &command,
-            &json!({"tool_response":{"text":"failed"}})
-        )?,
-        0
-    );
-    assert_eq!(
-        record_hook_facts(&store, &command, &json!({"tool_response":{"exit_code":1}}))?,
-        1
-    );
+    for output in [
+        json!({"stdout":"","stderr":"boom","interrupted":false,"isImage":false}),
+        json!("error: build failed"),
+    ] {
+        assert_eq!(
+            record_hook_facts(&store, &command, &json!({"tool_response": output}))?,
+            0
+        );
+    }
+    command.event = "post_tool_use_failure".into();
+    let failure = json!({"hook_event_name":"PostToolUseFailure","tool_name":"Bash",
+        "tool_input":{"command":"npm test","description":"Run test suite"},
+        "error":"Exit code 1\nError: Cannot find module 'express'","is_interrupt":false,"duration_ms":4187});
+    assert_eq!(record_hook_facts(&store, &command, &failure)?, 1);
+    let detail: String = store.connection().query_row(
+        "SELECT detail FROM facts WHERE kind='command_failure'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(detail.contains("npm test") && detail.contains("Exit code 1"));
+    let mut interrupted = failure.clone();
+    interrupted["is_interrupt"] = json!(true);
+    assert_eq!(record_hook_facts(&store, &command, &interrupted)?, 0);
     assert!(forget(&store, first.id)?);
     assert!(recall(&store, project, "SQLite", 10)?.is_empty());
     Ok(())
@@ -106,7 +119,8 @@ fn digest_fixtures_are_bounded_atomic_and_undo_preserves_provenance() -> Result<
         "",
         11,
         &mut malformed,
-        Duration::from_secs(1)
+        Duration::from_secs(1),
+        &mut || Ok(()),
     )
     .is_err());
     assert!(digest_due(&store, "s", project, 11, 1800)?);
@@ -118,7 +132,8 @@ fn digest_fixtures_are_bounded_atomic_and_undo_preserves_provenance() -> Result<
         "",
         11,
         &mut fixture_output(&result),
-        Duration::from_secs(1)
+        Duration::from_secs(1),
+        &mut || Ok(()),
     )
     .is_err());
     assert!(digest_due(&store, "s", project, 11, 1800)?);
@@ -142,8 +157,10 @@ fn digest_fixtures_are_bounded_atomic_and_undo_preserves_provenance() -> Result<
             "token=hidden-transcript",
             12,
             &mut command,
-            Duration::from_secs(1)
-        )?,
+            Duration::from_secs(1),
+            &mut || Ok(()),
+        )?
+        .memories,
         1
     );
     assert!(!fs::read_to_string(captured)?.contains("hidden-transcript"));
@@ -174,10 +191,67 @@ fn digest_fixtures_are_bounded_atomic_and_undo_preserves_provenance() -> Result<
         "",
         14,
         &mut timeout,
-        Duration::from_millis(20)
+        Duration::from_millis(20),
+        &mut || Ok(()),
     )
     .is_err());
     assert!(digest_due(&store, "s", project, 1812, 1800)?);
+    Ok(())
+}
+
+#[test]
+fn digest_drains_in_capped_batches_and_never_repeats_a_fact() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let project = directory.path().to_str().unwrap();
+    let store = Store::open(directory.path().join("state.db"))?;
+    store.transaction(|tx| {
+        for index in 0..1_050 {
+            tx.execute(
+                "INSERT INTO facts(ts,session_id,project,kind,detail) VALUES (?1,'s',?2,'edit','change')",
+                params![index, project],
+            )?;
+        }
+        Ok(())
+    })?;
+    let script = "input=$(cat); id=$(printf '%s' \"$input\" | grep -o '\"id\":[0-9]*' | head -1 | cut -d: -f2); printf '{\"memories\":[{\"text\":\"batch\",\"fact_ids\":[%s]}]}' \"$id\"";
+    let run = |now| {
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        digest_with_command(
+            &store,
+            "s",
+            project,
+            "",
+            now,
+            &mut command,
+            Duration::from_secs(5),
+            &mut || Ok(()),
+        )
+    };
+    assert_eq!(
+        run(1)?,
+        DigestReport {
+            batches: 10,
+            facts: 1_000,
+            memories: 10,
+            pending: true
+        }
+    );
+    assert_eq!(
+        run(2)?,
+        DigestReport {
+            batches: 1,
+            facts: 50,
+            memories: 1,
+            pending: false
+        }
+    );
+    assert_eq!(run(3)?, DigestReport::default());
+    let links: i64 =
+        store
+            .connection()
+            .query_row("SELECT count(*) FROM memory_facts", [], |row| row.get(0))?;
+    assert_eq!(links, 11);
     Ok(())
 }
 
@@ -212,6 +286,7 @@ fn portable_archive_maps_projects_is_idempotent_and_dry_run_does_not_write() -> 
         124,
         &mut fixture_output(&output),
         Duration::from_secs(1),
+        &mut || Ok(()),
     )?;
     export_archive(&source, &archive, Some("/source/project"), false)?;
     let bytes = fs::read(&archive)?;
@@ -340,4 +415,72 @@ fn snapshot_directory(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
             ))
         })
         .collect()
+}
+
+#[test]
+fn context_stays_within_budget_and_explains_each_selection() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let project = directory.path().to_str().unwrap();
+    let store = Store::open(directory.path().join("state.db"))?;
+    let older = remember(
+        &store,
+        project,
+        "Run focused tests for changed migrations",
+        false,
+        0,
+    )?;
+    let pinned = remember(
+        &store,
+        project,
+        "Pinned: never write to target/release",
+        true,
+        1,
+    )?;
+    for index in 0..50 {
+        remember(
+            &store,
+            project,
+            &format!("Recent note {index} about migrations and hooks"),
+            false,
+            2 + index,
+        )?;
+    }
+    for tokens in [1, 7, 40, 1500] {
+        let text = context(&store, project, "", "Knowledge line", tokens)?;
+        assert!(text.chars().count() <= tokens * 4, "{tokens}");
+        let items = context_items(&store, project, "", "Knowledge line", tokens)?;
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            text
+        );
+    }
+    let items = context_items(&store, project, "", "Knowledge line", 40)?;
+    assert_eq!(
+        (items[0].reason, items[0].memory_id),
+        ("pinned", Some(pinned.id))
+    );
+    assert_eq!(items[1].reason, "knowledge");
+    assert!(items[2..]
+        .iter()
+        .all(|item| item.reason == "recent" && item.rank.is_none()));
+    assert!(items.last().unwrap().truncated);
+    let explained = context_items(&store, project, "focused - migration", "", 1500)?;
+    let hit = explained
+        .iter()
+        .find(|item| item.memory_id == Some(older.id))
+        .unwrap();
+    assert_eq!((hit.reason, hit.rank), ("match", Some(1)));
+    assert_eq!(hit.matched, vec!["focused", "migration"]);
+    assert!(hit.score.unwrap() < 0.0);
+    assert!(explained
+        .iter()
+        .find(|item| item.reason == "pinned")
+        .unwrap()
+        .matched
+        .is_empty());
+    Ok(())
 }

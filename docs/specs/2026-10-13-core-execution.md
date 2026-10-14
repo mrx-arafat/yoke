@@ -80,6 +80,8 @@ Focused CLI suites passed 7/7 Core and 5/5 roadmap journeys; console tests passe
 After migration 006, four storage tests and the seven Core CLI journeys passed, and CLI clippy completed with warnings denied.
 The Sessions browser fixture improved from 324.2 ms to 18.3 ms click-to-frame across 100,006 decision rows.
 All 24 page/theme/width combinations have zero detected accessibility violations and zero document overflow.
+On 2026-10-14 a later browser pass covered all 12 console views, including Projects, project selection, usage history and three plan pages, at 1280 px and 390 px in light and dark themes.
+All 48 combinations had no horizontal page scroll, no console errors and a live event stream; that pass did not rerun the accessibility checks.
 w3's final bounded review found no unresolved high-severity blockers in migration 006 or console transport/authentication.
 The orchestrator freshly reran workspace formatting, whitespace checks, and the license/source gate successfully.
 License warnings concern unused allowlist entries only.

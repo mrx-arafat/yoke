@@ -1,31 +1,74 @@
 use super::{
-    content,
+    content, projects,
     render::{self, encode, escape},
     Console,
 };
 use anyhow::{ensure, Result};
 use std::collections::BTreeMap;
 use std::io::Read;
-use yoke_core::{config, memory, plan, store::Store, usage};
+use yoke_core::{config, memory, plan, store::Store};
 
-pub(super) fn sessions(store: &Store, c: &Console) -> Result<String> {
-    let rows = store.sessions(Some(&c.project.to_string_lossy()), 200)?;
+pub(super) fn sessions(
+    store: &Store,
+    c: &Console,
+    params: &BTreeMap<String, String>,
+) -> Result<String> {
+    let scope = projects::scope(store, c, params)?;
+    let rows = store.sessions(Some(&scope.path), 200)?;
     let mut out = render::heading(
         "sessions",
         "Trace each agent session from its first event to its latest decision.",
     );
+    out.push_str(&format!(r#"<form class="filters" data-filter action="sessions" method="get">{}<button type="submit">Show sessions</button></form>"#,projects::picker(&scope)));
+    out.push_str(&projects::banner(c, &scope, "sessions"));
     if rows.is_empty() {
         out.push_str(&render::empty(
             "No sessions yet",
             "Start Claude or Codex with Yoke hooks to record a session.",
             "yoke install --dry-run",
         ));
+    } else {
+        out.push_str(&format!(
+            "<p class=\"scope\">Protection now: {}</p>",
+            projects::protection(c, store, &scope.path)
+        ));
     }
     for row in rows {
-        out.push_str(&format!(r#"<article class="panel"><div class="list-caption"><h2><a data-row data-nav href="{}&amp;session={}">{}</a></h2><span class="badge">{}</span></div><dl class="facts"><dt>Project</dt><dd>{}</dd><dt>Decisions</dt><dd>{}</dd><dt>Active plan</dt><dd>{}</dd><dt>Started</dt><dd><time data-time="{}">{}</time></dd><dt>Ended</dt><dd>{}</dd></dl></article>"#,
-            render::link(c,"decisions"),encode(&row.id),escape(&row.id),escape(&row.agent),escape(&row.project),row.decision_count,row.active_plan.map(|v|v.to_string()).unwrap_or_else(||"No active plan".into()),row.started_at,row.started_at,row.ended_at.map(|v|format!("<time data-time=\"{v}\">{v}</time>")).unwrap_or_else(||"Active".into())));
+        let plan = match (&row.plan_slug, &row.plan_state) {
+            (Some(slug), Some(state)) if scope.launch => format!(
+                r#"<a data-nav href="{}">{}</a> ({})"#,
+                render::href("plans", &format!("slug={}", encode(slug))),
+                escape(slug),
+                escape(state)
+            ),
+            (Some(slug), Some(state)) => format!("{} ({})", escape(slug), escape(state)),
+            _ => "No plan bound".into(),
+        };
+        let resume = projects::resume_command(&row.agent, &row.project, &row.id)
+            .map(|command| format!("<code class=\"resume\">{}</code>", escape(&command)))
+            .unwrap_or_else(|| "Unavailable for this agent or session id".into());
+        // Hook payloads that failed before parsing record their decisions under an empty id.
+        let heading = if row.id.is_empty() {
+            "<h2>No session id recorded</h2>".to_owned()
+        } else {
+            format!(
+                r#"<h2><a data-row data-nav href="{}">{}</a></h2>"#,
+                render::href(
+                    "decisions",
+                    &format!("session={}{}", encode(&row.id), scope.query())
+                ),
+                escape(&row.id)
+            )
+        };
+        out.push_str(&format!(r#"<article class="panel"><div class="list-caption">{heading}<span class="badge">{}</span></div><dl class="facts oversight"><dt>Lifecycle</dt><dd>Started <time data-time="{}">{}</time> &middot; {}</dd><dt>Last event</dt><dd>{}</dd><dt>Decisions</dt><dd>{}</dd><dt>Plan binding</dt><dd>{}</dd><dt>Mode at last event</dt><dd>{}</dd><dt>Resume</dt><dd>{}</dd></dl></article>"#,
+            escape(&row.agent),row.started_at,row.started_at,
+            row.ended_at.map(|v|format!("ended <time data-time=\"{v}\">{v}</time>")).unwrap_or_else(||"no end event recorded".into()),
+            row.last_event_at.map(|v|format!("<time data-time=\"{v}\">{v}</time>")).unwrap_or_else(||"No decisions recorded".into()),
+            row.decision_count,plan,
+            row.last_mode.as_deref().map(escape).unwrap_or_else(||"Unknown (no decisions)".into()),
+            resume));
     }
-    out.push_str("<p class=\"muted\">Up to 200 recent sessions in this project.</p></main>");
+    out.push_str("<p class=\"muted\">Up to 200 recent sessions in this project. Yoke shows resume commands for you to copy and never runs them; a session without an end event may still be running elsewhere.</p></main>");
     Ok(out)
 }
 
@@ -39,47 +82,7 @@ pub(super) fn plans(
         "Review the contract, follow the checks, and decide when work can continue.",
     );
     if let Some(slug) = params.get("slug") {
-        let detail = plan::detail(store, &c.project, slug)?;
-        out.push_str(&format!(r#"<p><a data-nav href="{}">All plans</a></p><section class="panel"><div class="list-caption"><h2>{}</h2><span class="badge">{}</span></div>"#,render::link(c,"plans"),escape(slug),escape(&detail.plan.state)));
-        match detail.plan.state.as_str() {
-            "draft" => out.push_str(&format!(r#"<div class="action-zone"><button data-action="prepare-approval" data-slug="{}">Review approval</button></div>"#,escape(slug))),
-            "waiting" | "stalled" => out.push_str(&format!(r#"<div class="action-zone"><button data-action="resume" data-slug="{}">Resume work</button></div>"#,escape(slug))),
-            _ => {}
-        }
-        out.push_str(&format!(
-            "<div class=\"prose\">{}</div></section>",
-            content::markdown(&detail.content)
-        ));
-        if let Some(header) = &detail.plan.approved_header {
-            out.push_str(&format!("<details class=\"panel\"><summary>Frozen approved header</summary><pre><code>{}</code></pre></details>",content::highlight(header)));
-        }
-        out.push_str("<section class=\"panel\"><h2>Transitions</h2>");
-        if detail.transitions.is_empty() {
-            out.push_str("<p class=\"muted\">No transitions recorded yet.</p>");
-        }
-        for t in detail.transitions {
-            out.push_str(&format!("<p><time data-time=\"{}\">{}</time> &middot; <strong>{}</strong>: {} &rarr; {}<br>{}</p>",t.ts,t.ts,escape(&t.actor),escape(&t.from_state),escape(&t.to_state),escape(t.note.as_deref().unwrap_or(""))));
-        }
-        out.push_str("</section><section class=\"panel\"><h2>Checks and review evidence</h2>");
-        if detail.checks.is_empty() {
-            out.push_str(
-                "<p class=\"muted\">No check runs yet. Run the plan checks after work begins.</p>",
-            );
-        }
-        for check in detail.checks {
-            out.push_str(&format!("<details class=\"check\"><summary data-row>{} - {} ({} ms)</summary><p>{} &middot; exit {}</p><pre><code>{}</code></pre><pre><code>{}</code></pre><h3>Review findings</h3><pre><code>{}</code></pre>",escape(&check.name),escape(&check.result),check.ms,if check.blocking{"Blocking"}else{"Advisory"},check.exit_code.map(|v|v.to_string()).unwrap_or_else(||"unavailable".into()),content::highlight(&check.command),escape(&check.output_tail),escape(&serde_json::to_string_pretty(&check.findings)?)));
-            for (index, _) in check.artifacts.iter().enumerate() {
-                let url = format!(
-                    "{}&amp;slug={}&amp;check={}&amp;index={index}",
-                    render::link(c, "artifact"),
-                    encode(slug),
-                    check.id
-                );
-                out.push_str(&format!(r#"<button class="quiet screenshot" data-image="{url}" data-caption="{} screenshot {}">Open screenshot {}</button>"#,escape(&check.name),index+1,index+1));
-            }
-            out.push_str("</details>");
-        }
-        out.push_str("</section>");
+        out.push_str(&super::plan_detail::page(store, c, slug)?);
     } else {
         let plans = plan::list(store, &c.project)?;
         if plans.is_empty() {
@@ -90,7 +93,7 @@ pub(super) fn plans(
             ));
         }
         for p in plans {
-            out.push_str(&format!(r#"<article class="panel"><div class="list-caption"><h2><a data-nav data-row href="{}&amp;slug={}">{}</a></h2><span class="badge">{}</span></div><p class="muted">Updated <time data-time="{}">{}</time> &middot; revision {}</p></article>"#,render::link(c,"plans"),encode(&p.slug),escape(&p.slug),escape(&p.state),p.updated_at,p.updated_at,p.revision));
+            out.push_str(&format!(r#"<article class="panel"><div class="list-caption"><h2><a data-nav data-row href="{}">{}</a></h2><span class="badge {}">{}</span></div><p class="muted">Updated <time data-time="{}">{}</time> &middot; revision {}</p></article>"#,render::href("plans",&format!("slug={}",encode(&p.slug))),escape(&p.slug),escape(&p.state),escape(&p.state),p.updated_at,p.updated_at,p.revision));
         }
     }
     out.push_str("</main>");
@@ -108,7 +111,7 @@ pub(super) fn memories(
         "memory",
         "Keep useful context close. Search what the project has learned, and choose what stays.",
     );
-    out.push_str(&format!(r#"<form data-filter action="/memory" class="filters"><input type="hidden" name="token" value="{}"><label class="grow">Search memories<input name="q" value="{}" placeholder="Search project knowledge"></label><button>Search</button></form>"#,c.token,escape(query)));
+    out.push_str(&format!(r#"<form data-filter action="memory" class="filters"><label class="grow">Search memories<input name="q" value="{}" placeholder="Search project knowledge"></label><button>Search</button></form>"#,escape(query)));
     if rows.is_empty() {
         out.push_str(&render::empty(
             "No matching memories",
@@ -128,7 +131,7 @@ pub(super) fn trust(store: &Store, c: &Console) -> Result<String> {
     let mut out=render::heading("trust","See the configuration that actually runs. Trust changes remain an explicit terminal action.");
     out.push_str("<section class=\"panel\"><h2>Effective configuration</h2>");
     out.push_str(&format!(
-        "<pre><code>{}</code></pre><h3>Origins</h3><dl class=\"facts\">",
+        "<pre><code>{}</code></pre><h3>Origins</h3><dl class=\"facts settings-facts\">",
         content::highlight(&serde_json::to_string_pretty(&loaded.config)?)
     ));
     for (key, value) in loaded.origins {
@@ -175,6 +178,13 @@ pub(super) fn trust(store: &Store, c: &Console) -> Result<String> {
                 ));
             }
             Ok(_) => out.push_str("<p>Disk file exceeds the 1 MiB preview limit.</p>"),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                out.push_str("<p class=\"muted\">Not on disk.</p>")
+            }
             Err(error) => out.push_str(&format!("<p>{}</p>", escape(&error.to_string()))),
         }
         out.push_str("</section>");
@@ -201,40 +211,4 @@ fn read_preview(path: &std::path::Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
     Ok(bytes)
-}
-
-pub(super) fn usage(
-    store: &Store,
-    c: &Console,
-    params: &BTreeMap<String, String>,
-) -> Result<String> {
-    let session = params
-        .get("session")
-        .filter(|v| !v.is_empty())
-        .map(String::as_str);
-    let rows = usage::summaries(store, Some(&c.project.to_string_lossy()), session)?;
-    let mut out=render::heading("usage","Token usage by session and model. Estimates use published API prices, not subscription bills.");
-    if rows.is_empty() {
-        out.push_str(&render::empty("No usage samples yet","Usage appears when supported local transcript samples are available. Unknown prices stay unknown.","yoke statusline"));
-    }
-    let max = rows
-        .iter()
-        .map(|r| r.input_tokens.saturating_add(r.output_tokens))
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    out.push_str(
-        "<section class=\"panel\"><h2>Input and output tokens</h2><div class=\"usage-chart\">",
-    );
-    for row in &rows {
-        let input = (row.input_tokens as f64 / max as f64) * 100.0;
-        let output = (row.output_tokens as f64 / max as f64) * 100.0;
-        out.push_str(&format!(r#"<div class="chart-row"><span>{} / {}</span><svg viewBox="0 0 100 12" role="img" aria-label="{} input {}, output {}"><title>{}: {} input, {} output</title><rect class="chart-input" width="{input}" height="12"/><rect class="chart-output" x="{input}" width="{output}" height="12"/></svg></div>"#,escape(&row.session_id),escape(&row.model),escape(&row.model),row.input_tokens,row.output_tokens,escape(&row.model),row.input_tokens,row.output_tokens));
-    }
-    out.push_str("</div><p class=\"muted\">Lavender: input / Sage: output. Exact values, including cache tokens, follow.</p><div class=\"table-scroll\" tabindex=\"0\" role=\"region\" aria-label=\"Usage data table\"><table><caption>Usage by session and model</caption><thead><tr><th scope=\"col\">Session / agent / model</th><th scope=\"col\">Input</th><th scope=\"col\">Output</th><th scope=\"col\">Cache read</th><th scope=\"col\">Cache write</th><th scope=\"col\">Estimated USD</th></tr></thead><tbody>");
-    for row in rows {
-        out.push_str(&format!("<tr><th scope=\"row\">{}<br>{} / {}</th><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",escape(&row.session_id),escape(&row.agent),escape(&row.model),row.input_tokens,row.output_tokens,row.cache_read_tokens,row.cache_write_tokens,escape(&row.estimated_cost_usd.unwrap_or_else(||format!("Unknown ({} samples)",row.unknown_pricing_samples)))));
-    }
-    out.push_str("</tbody></table></div></section></main>");
-    Ok(out)
 }

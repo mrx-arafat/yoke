@@ -34,7 +34,7 @@ Success for 1.0:
 |---------|----------|------------|
 | `yoke run-hook` | One hook event, target under 50 ms excluding gate commands | The agent |
 | `yoke statusline` | One refresh, target under 15 ms | The agent |
-| `yoke memory digest`, `yoke update --check` | Until done, detached | A hook |
+| `yoke jobs work` (memory digests), `yoke update --check` | Until done, detached | A hook |
 | `yoke console` | While the user keeps it open | The user |
 | Everything else (`plan`, `trust`, `recall`, ...) | One command | The user or the agent |
 
@@ -85,11 +85,15 @@ Files outside the database:
 | `decisions` | `ts`, `session_id`, `agent`, `project`, `event`, `tool`, `mode`, `outcome`, `reason`, `gates`, `payload` | `outcome` is `allow`, `deny`, `would_deny`, `rewrite` or `error`; `gates` is JSON of name, result, milliseconds |
 | `facts` | `ts`, `session_id`, `project`, `kind`, `detail`, `digested` | Recorded by hooks, no model |
 | `memories` | `id`, `ts`, `project`, `source`, `text`, `pinned`, `shared` | `source` is `fact`, `remember` or `digest` |
-| `memories_fts` | FTS5 over `memories.text` | External-content table kept in sync by triggers |
-| `plans` | `id`, `project`, `slug`, `file`, `state`, `approved_header` | `approved_header` is the frozen header snapshot |
+| `memories_fts` | FTS5 over `memories.text` | External-content table kept in sync by triggers; `porter unicode61` tokenizer |
+| `jobs` | `kind`, `dedupe_key`, `project`, `payload`, `state`, `attempts`, `max_attempts`, `run_after`, `owner_pid`, `lease_expires`, `last_error` | Durable background work; `state` is `queued`, `running`, `succeeded`, `failed` (retry scheduled) or `dead`; one active job per `dedupe_key` |
+| `plans` | `id`, `project`, `slug`, `file`, `state`, `approved_header`, `base_ref`, `done_fingerprint` | `approved_header` is the frozen header snapshot; `base_ref` is the `HEAD` commit recorded when the plan started; `done_fingerprint` is the working tree the plan's checks passed on, set only when Yoke marks it done |
 | `transitions` | `plan_id`, `ts`, `from`, `to`, `actor`, `note` | `actor` is `human` or `agent` |
 | `check_runs` | `plan_id`, `ts`, `name`, `command`, `exit_code`, `output_tail`, `fingerprint`, `blocking`, `ms` | One row per check per run |
 | `stop_guard` | `session_id`, `plan_id`, `blocks`, `last_fingerprint`, `last_block_at` | Consecutive blocks without progress |
+| `plan_completions` | `plan_id`, `kind`, `item`, `definition`, `ts`, `actor`, `evidence` | `kind` is `task` or `requirement`; `definition` is the SHA-256 of the approved item, so evidence for an edited item no longer counts |
+| `plan_feedback` | `plan_id`, `parent_id`, `author`, `severity`, `anchor`, `digest`, `text`, `state`, `resolved_by`, `resolved_at`, `note` | Validation findings (`severity` `blocking` or `advice`), comments and replies; `digest` is the SHA-256 of the plan text the item was written against |
+| `notifications` | `key`, `kind`, `project`, `subject`, `plan_id`, `title`, `detail`, `count`, `first_seen`, `last_seen`, `state`, `acknowledged_at`, `actor`, `resolved_at` | Derived when listed from decisions, plans, check runs and trust snapshots; one row per dedupe `key`; `state` is `unread` or `acknowledged`, `actor` is `human` or `yoke` (resolved before a human saw it); empty `project` means the global config |
 | `kv` | `key`, `value` | Small values such as the last update check |
 
 ## 4. Sub-project 1: Core
@@ -105,10 +109,20 @@ Files outside the database:
 5. Write one `decisions` row.
 6. In `enforce` mode, print the result in the wire format (section 4.2). In `observe` mode, print nothing; a deny is logged as `would_deny`.
 
-If any step fails inside yoke (database unavailable, payload unparseable), the outcome is `error`.
-On a blocking event in `enforce` mode an `error` denies with the message `yoke error: <detail>; set YOKE_OFF=1 to bypass`.
-On other events and in `observe` mode it is logged and printed to stderr.
-An error that cannot reach the database is appended to `~/.yoke/error.log` instead, so no error is ever lost.
+If writable database initialization fails, Yoke attempts to read the existing trusted snapshots using a live read-only database connection.
+Audit, memory-fact, retention, and update-check failures are advisory and preserve the evaluated tool decision.
+A Stop whose atomic record fails keeps its evaluated decision with a warning only when the stop guard needs no plan-state write; with a building or checking plan, a stale completed plan, or unreadable plan state the failure is an `error`.
+Policy evaluation failures, unreadable trusted state, and failed atomic Stop updates produce an `error`; blocking events deny in `enforce` mode or when the mode cannot be determined.
+On other events and in `observe` mode, errors are reported without blocking.
+Errors are printed to stderr and, where possible, recorded in the database or appended to `~/.yoke/error.log`.
+A full disk can prevent persistent error recording as well.
+Recovery guidance directs the user to their own terminal to repair storage or restart the agent with `YOKE_OFF=1` for an explicit temporary bypass.
+A blocking event (PreToolUse, UserPromptSubmit, Stop) that has not answered within its deadline answers itself: it denies in `enforce` mode or when the mode is still unknown, prints nothing in `observe` mode, records the overrun in `~/.yoke/error.log`, and exits, so only one decision is ever printed.
+The deadline is 25 seconds for UserPromptSubmit, whose default Claude Code hook timeout is 30 seconds, and at least 120 seconds for PreToolUse and Stop, whose default hook timeout is 600 seconds in Claude Code and Codex; an agent that times out a hook lets the action through.
+The PreToolUse and Stop deadline grows to the sum of the event's trusted check gate timeouts plus 10 seconds, up to 540 seconds, so a gate within its own timeout is never cut; `yoke trust` refuses gates that cannot fit.
+`YOKE_HOOK_DEADLINE_MS` can only shorten it.
+The watchdog records its answer as a decision without the payload; an enforce-mode Stop it denies counts toward `stop.max_blocks`, so the plan still stalls and the agent can stop.
+Before exiting it kills the process groups of gates and checks still running.
 
 ### 4.2 Wire format
 
@@ -133,6 +147,7 @@ Event support:
 |-------|-------------|-------|------------------|
 | PreToolUse | yes | yes | Gates, self-protection, rewrites |
 | PostToolUse | yes | yes | Facts, observing gates |
+| PostToolUseFailure | yes | no | Command-failure facts, observing gates |
 | UserPromptSubmit | yes | yes | Gates, resuming paused plans, plan context |
 | Stop | yes | yes | Stop guard; on Codex also the debounced digest |
 | SessionStart | yes | yes | Memory and plan context, retention pruning, daily update check |
@@ -153,7 +168,7 @@ Top-level settings:
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `mode` | `"observe"` | `observe` or `enforce` |
-| `log.retention_days` | `90` | Decisions older than this are pruned at session start |
+| `log.retention_days` | `90` | Decisions, facts and the check runs of done or cancelled plans older than this are pruned at most hourly at session start, in bounded batches; memories, trusted snapshots and unfinished plans' runs are kept |
 | `log.payload_cap` | `4096` | Bytes of redacted payload kept per decision |
 | `stop.max_blocks` | `5` | Consecutive stop blocks without progress before a plan stalls |
 | `plans.dir` | `".yoke/plans"` | Where plan files live, relative to the project root |
@@ -196,12 +211,36 @@ It runs the last snapshot a human trusted.
 A built-in guard runs before user gates on PreToolUse and cannot be disabled by config.
 It denies, in `enforce` mode:
 
-- Tool calls that run `yoke trust`, `yoke plan approve` or `yoke plan resume`.
+- Tool calls that run `yoke trust`, `yoke console`, `yoke jobs retry`, `yoke notifications ack`, `yoke plan approve`, `yoke plan resume`, `yoke plan cancel`, `yoke plan reassign`, `yoke plan accept`, `yoke plan resolve` or `yoke plan acknowledge`.
 - Write or edit tool calls whose target path is inside `~/.yoke/`.
 - Shell commands that reference `state.db` or open it with `sqlite3`.
 
 Human-only commands also refuse to run when they detect they are inside an agent tool process.
 The detection signal for each agent is verified against that agent's behaviour during implementation, not assumed.
+
+#### Threat model and limits
+
+Both layers target accidental and casual self-unblocking, in line with principle 7; they are not a security boundary against a determined agent.
+Layer 1, the guard above, matches the literal tool input of PreToolUse events, and only in `enforce` mode.
+Layer 2, `require_human`, refuses when a known agent marker is set (`CLAUDECODE=1`, `CLAUDE_CODE_CHILD_SESSION=1`, a nonempty `CODEX_THREAD_ID` or `CODEX_SESSION_ID`) or when stdin or stdout is not a terminal, and most human-only commands then require a typed confirmation phrase.
+`yoke console` is itself human-only, because the console can approve, resume and acknowledge.
+Its session secret travels only in an `HttpOnly`, `SameSite=Strict` cookie whose `Path` is a random per-run prefix (`/c/<32 hex>/`) under which the console serves everything; cookies are not isolated by port (RFC 6265 section 8.5), so the path is what keeps the secret away from other servers on `127.0.0.1`.
+The printed link and the browser opener's arguments carry a one-time launch code that expires after five minutes.
+
+Together these stop an agent that runs a human-only command directly, starts the console, edits files in `~/.yoke` with its write tools, or opens `state.db` by name.
+They cannot stop an agent that has a shell running as the same operating-system user and sets out to bypass them.
+Such an agent can rewrite a command so the pattern does not match (quoting, variables, `xargs`, an interpreter's subprocess call), clear the agent markers and allocate a pseudo-terminal, open the database with its own SQLite library, replace the `yoke` binary or the hook configuration, or read whatever the user can read, such as terminal multiplexer scrollback holding an unused launch link or the browser's cookie store.
+It can also race the human for an unused launch code while the browser opener runs; the human then sees an expired link, and the console reports on stderr that the link was used.
+The working-tree fingerprints have a size limit in the same class.
+Tracked or untracked files larger than 64 MiB (`STREAMED_HASH_LIMIT` in `plan/files.rs`) are compared by size and modification time in nanoseconds, while smaller files are content-hashed.
+A deliberate same-size edit to such a file followed by an exact restore of its modification time is therefore not detected by the done-plan anchor or by the check's before/after evidence guard.
+An audit actor of `human` therefore means "passed the human-terminal check", not proof that a person acted.
+
+Containing a determined agent needs operating-system isolation, which Yoke recommends but does not provide:
+
+- Run coding agents as a separate OS user, or in a container or virtual machine, that cannot read or write the human's `~/.yoke`, browser profile, terminal multiplexer sockets, the `yoke` binary, or the agent hook settings.
+- Prefer the agent's own sandbox modes that restrict writes outside the workspace and limit network access.
+- Run human-only commands and the console from a terminal the agent cannot observe or attach to.
 
 ### 4.6 Decision log
 
@@ -215,6 +254,7 @@ Payloads are redacted before storage:
 
 After redaction the payload is cut to `log.payload_cap` bytes on a character boundary.
 `yoke log` shows recent rows with filters for project, session, outcome and tool.
+`yoke trial report` summarizes the same rows read-only as release-trial evidence per agent and mode; [trials](../trials.md) defines a working day.
 
 ### 4.7 Install and uninstall
 
@@ -227,11 +267,18 @@ After redaction the payload is cut to `log.payload_cap` bytes on a character bou
   Commands use a shell-quoted resolved executable path so an installation does not accidentally invoke a different binary on PATH.
 - Enables Codex's hooks feature flag if it is off; the exact key is read from Codex's documentation at implementation time.
 - With `--statusline`, sets Claude Code's status line to `yoke statusline`, wrapping any existing command with `--wrap "<existing>"`.
+- Writes Claude settings under `CLAUDE_CONFIG_DIR` and Codex `hooks.json` and `config.toml` under `CODEX_HOME` when those are set (they must be absolute), otherwise under `~/.claude` and `~/.codex`.
+- Refuses a first install while Claude user settings set `disableAllHooks` or file-based managed settings (`managed-settings.json` and `managed-settings.d/`) set `disableAllHooks` or `allowManagedHooksOnly`; a reinstall reports these as warnings and never edits them.
 - `--dry-run` prints the diff and writes nothing.
 - Installing twice is a no-op.
 
 `yoke uninstall` removes exactly the entries install added and restores a wrapped status line.
 After install then uninstall, each settings file is semantically identical to its backup.
+
+`yoke health [--json]` reads, and never writes, the state database, receipts and agent settings.
+It reports each agent's receipt, owned hook entries, hook executable, Claude hook-disabling settings in managed, local, project and user files, the Codex hooks feature flag, the last recorded decision per agent, trusted policy freshness, mode and unfinished plans.
+It exits 1 when installed hooks cannot run or no agent is installed; observe mode, untrusted policy and missing plans are guidance.
+Codex `/hooks` approval and Claude MDM or server-managed policy are not readable locally and are reported as unknown.
 
 ### 4.8 Update
 
@@ -243,6 +290,8 @@ After install then uninstall, each settings file is semantically identical to it
 
 `init`, `gates`, `run-hook`, `install`, `uninstall`, `trust`, `config`, `log`, `update`.
 Later sub-projects add `plan`, `review`, `remember`, `recall`, `share`, `forget`, `memory digest`, `memory export`, `memory import`, `console`, `statusline`, `preset`.
+`notifications` lists actionable notifications, and `notifications ack <id|all>` acknowledges them from a human terminal only.
+`extensions` inventories Claude Code and Codex extension definitions read-only and exits 1 on shadowed, stale or dangling definitions; locations and precedence are cited in `docs/decisions/0003-extension-inventory.md`.
 
 ## 5. Sub-project 2: Workflow
 
@@ -273,18 +322,29 @@ blocking = false
 
 `yoke plan new <slug>` writes a template; `yoke plan list` and `yoke plan status [<slug>]` read state from the database.
 
+The header may also declare `[[requirement]]` entries (`id`, `text`, and either `checks = [<blocking check names or "review">]` or `human = true`) and `[[task]]` entries (`id`, `title`, `requirements`, `depends_on`, `owner = "agent" | "human"`).
+Ids are unique and use lowercase letters, digits and hyphens; dangling references and dependency cycles fail parsing, and the check name `acceptance` is reserved when either section is present.
+Because they live in the header, approval freezes them with the checks.
+Task completion and human requirement evidence are runtime data in `plan_completions`, never in the file.
+A task is completed with `yoke plan task done` only after its dependencies; a human-owned task needs the human path.
+A human records requirement evidence with `yoke plan accept`.
+
 ### 5.2 States
 
 Main path: `draft -> approved -> building -> checking -> done`.
 A failed or void check run sends `checking` back to `building`.
 Side states `waiting` and `stalled` leave `building` and return to it.
+`cancelled` is terminal like `done`; a cancelled plan cannot be approved, resumed or reassigned.
 
 | Transition | Who | How |
 |------------|-----|-----|
-| draft to approved | Human | `yoke plan approve <slug>` in a terminal, or the console button. Freezes the header as `approved_header`. |
+| draft to approved | Human | `yoke plan approve <slug>` in a terminal, or the console button. Freezes the header as `approved_header`. Refused while a blocking validation finding is open. |
 | approved to building | Agent | `yoke plan start <slug> --session <session-id>`; binds an existing recorded session |
 | building to waiting | Agent | `yoke plan ask "<question>" --slug <slug>`; records the question |
 | waiting or stalled to building | Human | `yoke plan resume <slug>` in a human terminal, or the authenticated console action |
+| checking to building (interrupted check) | Human | `yoke plan resume <slug>`; refused while a live process owns the check. Records an `interrupted` check run. |
+| any unfinished state to cancelled | Human | `yoke plan cancel <slug> [--reason '<text>']`; records the reason and releases the session binding |
+| building, waiting or stalled to the same state | Human | `yoke plan reassign <slug> --session <session-id>`; records the move and leaves only the new session bound |
 | building to checking | Agent | `yoke plan check <slug> --agent <claude-or-codex>` |
 | checking to done | Yoke | Every blocking check passed and the fingerprint did not change during the run |
 | checking to building | Yoke | Any blocking check failed, or files changed during the run |
@@ -306,9 +366,13 @@ If they differ, the run is void and the plan returns to `building`.
 `blocking = false` checks run and are shown but never decide the outcome.
 `review = true` in the header adds a blocking `review` check (section 5.5).
 Every approvable header requires at least one blocking check or required review.
+When the header declares requirements or tasks, each run also records an `acceptance` result: `done` additionally requires every requirement satisfied by checks that passed in that run or by human evidence, and every task done.
 Checks can declare relative PNG, JPEG, or WebP paths in `artifacts`; each must be a regular file inside the project of at most 10 MiB.
 Generated screenshots belong in Git-ignored output directories so creating them does not invalidate the working-tree fingerprint.
 Artifact declarations never exclude source files from the fingerprint.
+Each artifact's SHA-256 is stored in `evidence.content_hash` when its check captures it.
+`yoke plan status` re-hashes the files and reports each as `verified`, `tampered`, `missing` or `unrecorded` for runs recorded before hashes existed.
+A running `yoke plan check` holds an exclusive advisory lock on the plan file until it finishes; the OS drops the lock if the process dies, which is how `plan resume` tells an orphaned `checking` plan from a live one.
 
 ### 5.4 Stop guard
 
@@ -318,21 +382,42 @@ On Stop, when the session's active plan is `building` or `checking`:
 2. If `blocks` is below `stop.max_blocks`, block with a reason naming the plan, its state and the next command, and increment `blocks`.
 3. Otherwise allow the stop and move the plan to `stalled`.
 
+When the active plan is `done`, Stop compares the current fingerprint with `done_fingerprint`.
+An unchanged tree allows the stop without running checks again.
+A changed tree blocks; in `enforce` mode the plan returns to `building` in the same transaction with an audited `yoke` transition and fact, and `yoke plan check` completes it again.
+Observe mode records the would-be denial without changing the plan.
+Standalone review evidence never changes `done_fingerprint`.
+
 Plans in any other state never block a stop.
 The count lives in `stop_guard`, so it does not depend on any flag in the agent's payload.
+A session's active plan is enforced only in the plan's own project, while `sessions.project` records the project of the session's latest event; binding a plan requires that latest event to be in the plan's project, and a session owns at most one unfinished plan.
 
 Plan context (state and next command) is injected at SessionStart and UserPromptSubmit through `additionalContext`.
 
 ### 5.5 Review
 
-`yoke review [<slug>]` runs a reviewer agent headless on tracked changes from `git diff HEAD` and untracked, nonignored source files.
+`yoke review [<slug>]` runs a reviewer agent headless on tracked changes from `git diff <base_ref>` and untracked, nonignored source files.
+`base_ref` is the commit recorded when the plan started, so work committed during the plan stays in the review.
+Plans started before `base_ref` was recorded fall back to `git diff HEAD`.
 Review input must cover newly created files as well as edits; unsupported or oversized input fails explicitly instead of silently receiving a passing review.
+`yoke plan diff <slug>` prints that exact input through the same collector, read-only and without running a reviewer.
+Yoke does not create, sync or remove worktrees and performs no Git writes; see `docs/decisions/0004-worktree-and-git-review.md`.
 
 - The reviewer is `codex exec` or `claude -p`, picked by `review.reviewer`.
 - Yoke supplies its own review prompt and requires JSON output: a list of findings with `severity` (`blocking` or `advisory`), `file`, `line` and `summary`.
 - The run uses the gate timeout rules with a default of 600 seconds.
 - Any blocking finding fails the check. A timeout, a non-zero exit or output that does not match the schema also fails it. A review is never skipped silently.
 - Findings are stored with the check run and shown in the console.
+
+### 5.6 Plan validation and feedback
+
+`yoke plan validate <slug> --agent <claude-or-codex>` runs the same reviewer selection on the plan text before approval, asking for requirement coverage and risky assumptions.
+The reviewer must return a JSON list of findings with `severity` (`blocking` or `advice`), `anchor` (one of the plan's anchors) and `summary`; anything else fails validation and stores nothing.
+Findings are stored in `plan_feedback` with the digest of the plan text they reviewed.
+Approval is refused while any blocking finding is open, whatever revision it reviewed, so an edit cannot hide it; a human resolves or acknowledges each one.
+`yoke plan comment` anchors feedback to `plan`, `requirement:<id>`, `task:<id>`, `check:<name>` or `heading:<slug>`; unknown anchors are rejected.
+Anyone may reply, but only a human closes an item, and the closing actor, time and note are recorded.
+Validation, comments and progress never write the approved header, so changing approved checks still needs fresh approval.
 
 ## 6. Sub-project 3: Memory
 
@@ -341,22 +426,27 @@ Review input must cover newly created files as well as edits; unsupported or ove
 Hooks record facts with no model call:
 
 - File writes and edits (PostToolUse on edit tools).
-- Commands that exited non-zero, when the agent reports the exit code.
+- Failed `Bash` or `PowerShell` commands on Claude Code, from the documented `error` text of PostToolUseFailure; interrupts are skipped. Codex documents no failure signal for tool calls, so Codex command failures are not recorded.
 - Plan transitions and check results.
 - Denials.
 
 ### 6.2 Remembered and digested memories
 
 - `yoke remember "<text>"` stores a memory from the agent or the user.
-- When `memory.digest` is on, a detached `yoke memory digest <session>` runs at SessionEnd on Claude Code. On Codex it runs at Stop when at least 30 minutes have passed since the session's last digest and new facts exist.
+- When `memory.digest` is on, a durable digest job is queued at SessionEnd on Claude Code and a detached `yoke jobs work` worker runs it. On Codex it is queued at Stop when at least 30 minutes have passed since the session's last digest and new facts exist.
+- Jobs are deduplicated per session and project while queued, running or awaiting retry. A worker leases a job for 12 minutes and renews the lease before each digest batch.
+- A failed attempt backs off 60 seconds, doubling up to one hour, and the job is `dead` after 3 attempts. SessionStart requeues jobs whose lease expired, prunes old finished jobs and starts a worker when work is due; there is still no daemon.
+- `yoke jobs` lists queued, running, failed and dead jobs with their redacted last error; `yoke jobs retry <id>` is human-only.
 - The digest sends undigested facts plus the transcript tail to one headless agent call and expects JSON memories back.
 - Facts are marked `digested` only in the same transaction that stores the resulting memories, so a failed call loses nothing.
 
 ### 6.3 Recall
 
 - At SessionStart, yoke injects pinned memories, the trusted `.yoke/knowledge.md`, and the highest-ranked memories for this project, until `memory.inject_tokens` is reached (estimated at 4 characters per token).
-- Rank is FTS5 relevance when there is a query, otherwise recency with exponential decay; pinned items always come first.
+- Rank is FTS5 BM25 relevance when there is a query, and any query word may match; without a query, pinned items come first, then recency.
 - `yoke recall "<query>"` searches with FTS5 BM25 ranking and prints ids, dates and text.
+- `yoke recall --explain` prints the exact injected selection with each item's reason, rank, score, matched words and digest facts. The explanation is never injected.
+- Decision record: `docs/decisions/0001-memory-retrieval.md` benchmarks lexical recall and defers semantic retrieval.
 - `yoke forget <id>` deletes a memory.
 
 ### 6.4 Sharing through git
@@ -392,21 +482,27 @@ The focused tests must also cover repeated import, conflicts, malformed or unsup
 
 ### 7.1 Console
 
-`yoke console` binds `127.0.0.1` on a random free port, prints the URL with a random token, and opens the browser.
-Every request must carry the token; requests without it get 403, which also blocks other sites from triggering actions.
-The token is never written to disk.
+`yoke console` is human-only; it binds `127.0.0.1` on a random free port, prints a one-time launch link, and opens the browser on it.
+Every console URL, including pages, assets, `events`, `actions` and `launch`, lives under a random prefix `/c/<32 hex>/` derived one-way from the session secret, so it changes every run; requests outside it get 404.
+The launch link works once, within five minutes, and exchanges its code for an `HttpOnly`, `SameSite=Strict` session cookie named after the port with `Path` set to that prefix; it then redirects to the console.
+Browsers therefore never send the cookie to another server on `127.0.0.1`, whose URLs do not fall under the prefix.
+Every other request must carry that cookie and the console's `Host`; requests without it get 403, and actions also need the same origin and a CSRF header, which blocks other sites from triggering them.
+The session secret is never written to disk and never appears in a URL, process argument, terminal output or page HTML.
 
 Pages are rendered by the Rust binary as HTML with a small amount of vanilla JS that live-updates through server-sent events.
 No JS build step and no external assets.
 
 | Page | Shows | Actions |
 |------|-------|---------|
-| Sessions | Agent, project, active plan, decision counts | |
+| Projects | Every recorded project: last activity, sessions, recent denials, open plans, current protection | |
+| Sessions | Identity, lifecycle, last event, plan binding, mode at last event, current protection, copyable resume command; per project | |
 | Plans | Header, body, transitions with actors, check runs, review findings, screenshots | Approve, Resume |
 | Decisions | Filterable decision log, observe vs enforce | |
 | Memory | Search, pinned, shared | Pin, Share, Forget |
 | Trust and config | Effective config with origins; diff between disk and trusted snapshot | None (trust stays a terminal command) |
-| Usage | Tokens and cost per session and project | |
+| Usage | Tokens and cost per day or month, session and model, with date range and UTC offset; per project | |
+| Notifications | Hook errors, observe-mode would-deny summaries, waiting or stalled plans, failed checks, stale or untrusted config; unread count in the navigation; searchable recovery help | Acknowledge, Acknowledge all shown |
+| Workflow settings | Activation, Yoke-owned settings with effective values and source files, snapshot trust state, choices left to the native agent | None (read-only) |
 
 The console uses an original bounded `std::net` transport with explicit request-size, connection-count, and I/O deadline limits.
 It closes ordinary connections and rejects unsupported transfer encodings rather than implementing keepalive or chunked request bodies.
@@ -471,6 +567,10 @@ If it is not, switch to a compiled single-page app embedded in the binary, with 
 Token counts come from the agents' transcript files on disk.
 The exact transcript formats are read from real files during implementation.
 Prices come from a table compiled into each release, so costs are as current as the installed version.
+Accounting is advisory on every hook event: a failed import (including the 32 MiB and 1 MiB-per-line bounds) warns and leaves the gate and stop-guard decision untouched.
+An import commits only while the transcript is still the file it was read from, so an older snapshot never overwrites newer or replaced usage.
+Each sample keeps its transcript line time when the line has an RFC 3339 timestamp; otherwise its time is unknown.
+History groups calendar days or months in one explicit UTC offset, and any aggregate with an unpriced sample shows the priced part plus the unknown samples ([decision 0009](../decisions/0009-usage-history-time-and-attribution.md)).
 
 ### 7.4 Statusline
 

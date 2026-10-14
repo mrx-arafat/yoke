@@ -50,7 +50,8 @@ pub(super) fn start(request: Request, database: PathBuf, connections: Arc<Atomic
             let data = if next != revision {
                 revision = next;
                 Some(b"event: change\ndata: updated\n\n".as_slice())
-            } else if heartbeat.elapsed() > Duration::from_secs(10) {
+            // A short heartbeat notices closed tabs quickly and frees their stream slot.
+            } else if heartbeat.elapsed() >= Duration::from_secs(2) {
                 Some(b": heartbeat\n\n".as_slice())
             } else {
                 None
