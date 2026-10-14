@@ -187,9 +187,10 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 
 ### `yoke plan check` needs advisory file locks
 
-- What changed: a running check holds an advisory lock on the plan file, and on a filesystem without advisory locks `yoke plan check` refuses to run.
-- Who is affected: projects on some network filesystems.
-- What to do: keep projects with plans on a local filesystem.
+- What changed: a running check holds a persistent, private per-plan ownership file in Git metadata, so atomically saving the plan cannot replace its lock.
+  `yoke plan check` refuses to run when advisory locks are unavailable or Git metadata cannot be written.
+- Who is affected: projects on some network filesystems or with read-only Git metadata.
+- What to do: keep Git metadata on a writable filesystem that supports advisory locking, and never delete ownership files while a check may be running.
 
 ## Memory and usage
 
