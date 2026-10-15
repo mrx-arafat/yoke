@@ -136,3 +136,63 @@ fn an_empty_state_database_is_reported_without_losing_agents() {
         report.guidance
     );
 }
+
+#[test]
+fn mode_policy_freshness_last_event_and_plan_guidance_are_reported_separately() {
+    use yoke_core::{store::DecisionRecord, trust};
+    let (dir, options) = fixture();
+    let root = dir.path();
+    install::install(&options).unwrap();
+    put(&root.join("yoke.toml"), "mode='observe'\n");
+    fs::create_dir_all(root.join(".yoke")).unwrap();
+    let store = Store::open(root.join(".yoke/state.db")).unwrap();
+    trust::prepare_project(&store, root)
+        .unwrap()
+        .commit(&store)
+        .unwrap();
+    // Editing the file after trust leaves the trusted bytes in force and marks them stale.
+    put(&root.join("yoke.toml"), "mode='enforce'\n");
+    store
+        .record_decision(
+            &DecisionRecord {
+                ts: 5,
+                session_id: "health".into(),
+                agent: "claude".into(),
+                project: root.canonicalize().unwrap().to_str().unwrap().into(),
+                event: "session_start".into(),
+                tool: None,
+                mode: "observe".into(),
+                outcome: "allow".into(),
+                reason: None,
+                gates: serde_json::json!([]),
+                payload: "{}".into(),
+            },
+            4096,
+        )
+        .unwrap();
+    drop(store);
+
+    let report = collect(inputs(root, options)).unwrap();
+
+    assert_eq!(report.mode, Some("observe"));
+    assert!(
+        report
+            .policy
+            .iter()
+            .any(|policy| policy.trusted && policy.stale),
+        "{}",
+        serde_json::to_string(&report.policy).unwrap()
+    );
+    let last = agent(&report, "claude").last_event.as_ref().unwrap();
+    assert_eq!(
+        (last.event.as_str(), last.outcome.as_str()),
+        ("session_start", "allow")
+    );
+    for expected in ["Observe mode records", "No unfinished plan"] {
+        assert!(
+            report.guidance.iter().any(|line| line.contains(expected)),
+            "{expected}: {:?}",
+            report.guidance
+        );
+    }
+}

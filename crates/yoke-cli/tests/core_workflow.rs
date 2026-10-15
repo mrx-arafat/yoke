@@ -636,7 +636,11 @@ fn stop_with_transcript_over_a_usage_bound_warns_and_keeps_the_policy_decision()
                 json!({"session_id":"large","transcript_path":transcript}),
             );
             success(&stop);
-            assert!(String::from_utf8_lossy(&stop.stderr).contains("usage ingestion failed"));
+            assert_eq!(
+                String::from_utf8_lossy(&stop.stderr).contains("usage ingestion failed"),
+                *name == "total-size",
+                "{name}"
+            );
             match expected {
                 None => assert!(stop.stdout.is_empty(), "{name} must not block an allowed Stop"),
                 Some(reason) => {
@@ -660,7 +664,11 @@ fn stop_with_transcript_over_a_usage_bound_warns_and_keeps_the_policy_decision()
             );
             success(&output);
             assert!(output.stdout.is_empty(), "{event} {name}");
-            assert!(String::from_utf8_lossy(&output.stderr).contains("usage ingestion failed"));
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr).contains("usage ingestion failed"),
+                *name == "total-size",
+                "{event} {name}"
+            );
         }
     }
     let decisions = f
@@ -678,6 +686,50 @@ fn stop_with_transcript_over_a_usage_bound_warns_and_keeps_the_policy_decision()
     assert!(yoke_core::usage::summaries(&f.store(), None, Some("large"))
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn session_start_prunes_expired_history_in_a_bounded_pass() {
+    let f = Fixture::new();
+    f.snapshot("[log]\nretention_days=1");
+    // History at ts=1 is older than any retention window. Retention must keep a pinned
+    // memory and the check run of an unfinished plan whatever their age.
+    let db = rusqlite::Connection::open(f.home.join(".yoke/state.db")).unwrap();
+    db.execute_batch(
+        "INSERT INTO sessions(id,agent,project,started_at) VALUES ('old','claude','/p',1);
+         INSERT INTO decisions(ts,session_id,agent,project,event,mode,outcome,gates,payload) VALUES (1,'old','claude','/p','stop','observe','allow','[]','{}');
+         INSERT INTO facts(id,ts,session_id,project,kind,detail) VALUES (1,1,'old','/p','edit','expired');
+         INSERT INTO memories(id,ts,project,source,text,pinned) VALUES (1,1,'/p','fact','pinned lesson',1);
+         INSERT INTO plans(id,project,slug,file,state,created_at,updated_at) VALUES
+            (1,'/p','done','a.md','done',1,1),(2,'/p','open','b.md','building',1,1);
+         INSERT INTO check_runs(id,plan_id,ts,name,command,output_tail,fingerprint,blocking,ms,result) VALUES
+            (1,1,1,'t','c','','f',1,1,'pass'),(2,2,1,'t','c','','f',1,1,'pass');",
+    )
+    .unwrap();
+    let start = f.hook(
+        "claude",
+        "SessionStart",
+        json!({"session_id":"fresh","hook_event_name":"SessionStart"}),
+    );
+    success(&start);
+    let ids = |sql: &str| -> Vec<i64> {
+        let mut statement = db.prepare(sql).unwrap();
+        let rows = statement.query_map([], |row| row.get(0)).unwrap();
+        rows.collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_eq!(ids("SELECT count(*) FROM decisions WHERE ts<2"), vec![0]);
+    assert_eq!(ids("SELECT count(*) FROM facts WHERE ts<2"), vec![0]);
+    assert_eq!(ids("SELECT pinned FROM memories WHERE id=1"), vec![1]);
+    assert_eq!(ids("SELECT id FROM check_runs ORDER BY id"), vec![2]);
+    let fresh = f
+        .store()
+        .decisions(&DecisionFilter {
+            session: Some("fresh".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(fresh.len(), 1, "{fresh:?}");
+    assert_eq!(fresh[0].outcome, "allow");
 }
 
 #[test]
@@ -1039,7 +1091,7 @@ fn background_children_write_only_timestamped_error_log_lines() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let text = loop {
         let text = fs::read_to_string(&log).unwrap_or_default();
-        if text.contains("update") && text.contains("unknown job kind") {
+        if text.contains("release check failed") && text.contains("unknown job kind") {
             break text;
         }
         assert!(Instant::now() < deadline, "children did not report: {text}");

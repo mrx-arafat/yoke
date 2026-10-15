@@ -763,3 +763,220 @@ fn console_refuses_agent_processes_before_serving_or_printing_a_url() {
     assert!(stdout.contains("console requires"), "{stdout}");
     assert!(!stdout.contains("http://"), "{stdout}");
 }
+
+fn git_in(project: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(project)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "user.name=Yoke Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A started `review=true` plan with one edit committed after `plan start`, and a fixture
+/// `codex` reviewer that records what it is sent in `$HOME/review-input`.
+/// Returns the temp dir, home, project and a `PATH` that finds the fixture reviewer.
+fn plan_with_work_committed_after_start() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    use yoke_core::{plan, store::Store, trust};
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    let bin = temp.path().join("bin");
+    for directory in [&home, &project, &bin] {
+        fs::create_dir(directory).unwrap();
+    }
+    let project = project.canonicalize().unwrap();
+    fs::write(project.join("tracked"), "fn base() {}\n").unwrap();
+    git_in(&project, &["init", "-q"]);
+    git_in(&project, &["add", "tracked"]);
+    git_in(&project, &["commit", "-qm", "base"]);
+    fs::write(
+        project.join("yoke.toml"),
+        "mode='enforce'\n[review]\nreviewer='codex'\n",
+    )
+    .unwrap();
+    fs::create_dir(home.join(".yoke")).unwrap();
+    let store = Store::open(home.join(".yoke/state.db")).unwrap();
+    trust::prepare_project(&store, &project)
+        .unwrap()
+        .commit(&store)
+        .unwrap();
+    let reviewer = bin.join("codex");
+    fs::write(
+        &reviewer,
+        "#!/bin/sh\n/bin/cat > \"$HOME/review-input\"\nprintf '[]'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&reviewer, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(run(&home, &project, &["plan", "new", "fixture"], b"")
+        .status
+        .success());
+    let row = plan::get(&store, &project, "fixture").unwrap();
+    fs::write(
+        &row.file,
+        "+++\ntitle='Fixture'\nreview=true\n[[check]]\nname='proof'\nrun='true'\n+++\nGoal.\n",
+    )
+    .unwrap();
+    plan::approve(
+        &store,
+        &plan::prepare_approval(&store, &project, "fixture").unwrap(),
+    )
+    .unwrap();
+    assert!(run(
+        &home,
+        &project,
+        &["run-hook", "PostToolUse", "--agent", "claude"],
+        br#"{"session_id":"review-seam","tool_name":"Bash","tool_input":{"command":"true"}}"#,
+    )
+    .status
+    .success());
+    assert!(run(
+        &home,
+        &project,
+        &["plan", "start", "fixture", "--session", "review-seam"],
+        b""
+    )
+    .status
+    .success());
+    fs::write(project.join("tracked"), "fn committed_during_plan() {}\n").unwrap();
+    git_in(&project, &["commit", "-qam", "work during the plan"]);
+    let path = std::path::PathBuf::from(format!("{}:/usr/bin:/bin", bin.display()));
+    (temp, home, project, path)
+}
+
+fn assert_reviewer_saw_committed_work(home: &Path, launched: &Output) {
+    let input = fs::read_to_string(home.join("review-input")).unwrap_or_else(|error| {
+        panic!(
+            "reviewer was never launched: {error}; stdout {} stderr {}",
+            String::from_utf8_lossy(&launched.stdout),
+            String::from_utf8_lossy(&launched.stderr)
+        )
+    });
+    assert!(input.contains("committed_during_plan"), "{input}");
+}
+
+#[test]
+fn plan_check_sends_work_committed_since_plan_start_to_the_reviewer() {
+    let (_temp, home, project, path) = plan_with_work_committed_after_start();
+    let checked = run_with_path(
+        &home,
+        &project,
+        &["plan", "check", "fixture", "--agent", "claude"],
+        b"",
+        Some(&path),
+    );
+    assert_reviewer_saw_committed_work(&home, &checked);
+}
+
+#[test]
+fn review_command_sends_work_committed_since_plan_start_to_the_reviewer() {
+    let (_temp, home, project, path) = plan_with_work_committed_after_start();
+    let reviewed = run_with_path(
+        &home,
+        &project,
+        &["review", "fixture", "--agent", "claude"],
+        b"",
+        Some(&path),
+    );
+    assert_reviewer_saw_committed_work(&home, &reviewed);
+}
+
+#[test]
+fn digest_with_more_than_one_batch_queues_a_follow_up_until_drained() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+    use yoke_core::{memory, store::Store, trust};
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(home.join(".yoke")).unwrap();
+    fs::create_dir(&project).unwrap();
+    fs::create_dir(&bin).unwrap();
+    let project = project.canonicalize().unwrap();
+    fs::write(
+        project.join("yoke.toml"),
+        "mode='enforce'\n[memory]\ndigest=true\ndigest_agent='codex'\n",
+    )
+    .unwrap();
+    let store = Store::open(home.join(".yoke/state.db")).unwrap();
+    trust::prepare_project(&store, &project)
+        .unwrap()
+        .commit(&store)
+        .unwrap();
+    // One digest call drains at most 10 batches of 100 facts, so 1,050 facts need a follow-up job.
+    for index in 0..1_050 {
+        memory::record_fact(
+            &store,
+            "digest-session",
+            project.to_str().unwrap(),
+            "command_failure",
+            &format!("exit {index}"),
+            1,
+        )
+        .unwrap();
+    }
+    let script = bin.join("codex");
+    fs::write(
+        &script,
+        "#!/bin/sh\ninput=$(/bin/cat)\nid=$(printf '%s' \"$input\" | /usr/bin/grep -o '\"id\":[0-9]*' | /usr/bin/head -1 | /usr/bin/cut -d: -f2)\nprintf '{\"memories\":[{\"text\":\"Batch digest\",\"fact_ids\":[%s]}]}' \"$id\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_yoke"))
+        .args(["run-hook", "Stop", "--agent", "codex"])
+        .env("HOME", &home)
+        .env("PATH", &bin)
+        .env_remove("YOKE_OFF")
+        .current_dir(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"digest-session"}"#)
+        .unwrap();
+    assert!(child.wait_with_output().unwrap().status.success());
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let notes = memory::recall(&store, project.to_str().unwrap(), "Batch", 20).unwrap();
+        if notes.len() == 11 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the follow-up batch never ran: {} digest memories, error log {:?}",
+            notes.len(),
+            fs::read_to_string(home.join(".yoke/error.log"))
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

@@ -964,3 +964,46 @@ fn interrupted_check_recovers_even_after_the_plan_header_was_edited() {
     let prepared = prepare_approval(&f.store, &f.root, "example").unwrap();
     assert_eq!(approve(&f.store, &prepared).unwrap().state, "approved");
 }
+
+#[test]
+fn plan_binds_a_session_whose_latest_event_is_in_another_project() {
+    let f = Fixture::new();
+    let other = f._temp.path().join("other");
+    fs::create_dir(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    git(&other, &["commit", "-q", "--allow-empty", "-m", "seed"]);
+    // The session first spoke in the fixture project, then in `other`.
+    f.store
+        .record_decision(
+            &DecisionRecord {
+                ts: 3,
+                session_id: "fixture-session".into(),
+                agent: "claude".into(),
+                project: other.canonicalize().unwrap().to_str().unwrap().into(),
+                event: "session_start".into(),
+                tool: None,
+                mode: "observe".into(),
+                outcome: "allow".into(),
+                reason: None,
+                gates: serde_json::json!([]),
+                payload: "{}".into(),
+            },
+            4096,
+        )
+        .unwrap();
+    let plan = create(&f.store, &other, ".yoke/plans", "elsewhere", "Elsewhere").unwrap();
+    fs::write(
+        &plan.file,
+        "+++\ntitle='Elsewhere'\n[[check]]\nname='proof'\nrun='true'\n+++\n\nGoal.\n",
+    )
+    .unwrap();
+    let prepared = prepare_approval(&f.store, &other, "elsewhere").unwrap();
+    approve(&f.store, &prepared).unwrap();
+
+    start(&f.store, &other, "elsewhere", "fixture-session").unwrap();
+
+    let bound = active(&f.store, &other, "fixture-session")
+        .unwrap()
+        .unwrap();
+    assert_eq!(bound.slug, "elsewhere");
+}

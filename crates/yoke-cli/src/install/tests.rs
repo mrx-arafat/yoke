@@ -501,3 +501,15 @@ fn install_reports_user_and_managed_hook_blockers_without_changing_them() {
         disabled
     );
 }
+
+#[test]
+fn first_install_refuses_when_user_settings_disable_all_hooks() {
+    let (_dir, options) = fixture();
+    put(&options.claude_settings, r#"{"disableAllHooks": true}"#);
+    let refused = install(&options).unwrap_err().to_string();
+    assert!(refused.contains("disableAllHooks"), "{refused}");
+    assert_eq!(
+        fs::read_to_string(&options.claude_settings).unwrap(),
+        r#"{"disableAllHooks": true}"#
+    );
+}
