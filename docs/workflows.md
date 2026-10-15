@@ -163,6 +163,10 @@ Each run digests at most 10 batches of up to 100 facts, so run it again when it 
 Automatic digests run as durable background jobs, so one session never has two digests queued or running at once.
 A failed digest retries after 60 seconds, then 120 seconds, at the next session start, and becomes `dead` after 3 attempts.
 If a worker process dies, its job returns to the queue after its lease expires, at the next session start.
+A session whose end-of-session hook never ran, for example a killed agent, leaves its facts pending instead of digested.
+The next session start in the same project recovers them: it queues a digest for every session of that project with pending facts and no recorded activity for 30 minutes, oldest first and at most 20 sessions per start.
+A session that is still working is left alone while it shows activity; after 30 minutes of silence only its facts so far are digested, without its transcript, and later facts follow at its own end.
+No fact is lost or digested twice: each batch marks its facts atomically, and a session whose digest job is already queued, running, failed or dead gets no second job until that job finishes or `yoke jobs retry` requeues it.
 Inspect jobs with `yoke jobs`, and requeue a dead job with `yoke jobs retry <id>` in your own terminal.
 This requires an authenticated CLI and sends selected session material to that agent.
 
@@ -240,7 +244,10 @@ The Usage page filters by inclusive date range and groups by day or month in the
 Yoke's self-protection keeps agents from accidentally or casually unblocking themselves; it is not a sandbox.
 Two layers enforce it:
 
-1. In `enforce` mode, a built-in guard denies agent tool calls that literally run a human-only command (`yoke trust`, `yoke console`, `yoke jobs retry`, `yoke notifications ack`, and `yoke plan approve`, `resume`, `cancel`, `reassign`, `accept`, `resolve`, `acknowledge`), write inside `~/.yoke`, or reference `state.db`.
+1. In `enforce` mode, a built-in guard denies agent tool calls that run a human-only command (`yoke trust`, `yoke console`, `yoke jobs retry`, `yoke notifications ack`, and `yoke plan approve`, `resume`, `cancel`, `reassign`, `accept`, `resolve`, `acknowledge`), write inside `~/.yoke`, or mention `state.db`.
+   It reads shell commands word by word, so quoting, `$HOME` or `~` spellings, wrappers such as `env`, `sudo`, `nohup`, `xargs` and `timeout`, nested `bash -c`, `eval`, `$(...)`, `find -exec`, redirections, globs over `~/.yoke`, and `cd ~/.yoke` followed by a relative path are all recognized.
+   The same words used as data, such as a `grep` pattern, a commit message or a `git log --grep`, are allowed.
+   Text handed to an interpreter (`python3 -c`, `osascript`, `tmux send-keys`) or piped into a shell is matched as a phrase instead, so it can be denied when it only mentions a human-only command.
 2. Every human-only command refuses to run when a Claude Code or Codex agent marker is set in its environment or when it is not attached to an interactive terminal, and most then ask for a typed confirmation phrase.
 
 The console is human-only for the same reason: it can approve, resume, and acknowledge.
@@ -251,7 +258,7 @@ A same-user agent can still read your browser profile's files, including that co
 
 These layers stop an agent from approving its own plan, starting the console, or editing Yoke state through its ordinary tools.
 They cannot stop an agent that has a shell running as your OS user and deliberately works around them.
-Such an agent can disguise a command so the guard pattern does not match, remove the agent markers and fake a terminal, use an unused console link it reads from a shared terminal or from process arguments before your browser does, open the database with its own tools, or replace the `yoke` binary or the hook settings.
+Such an agent can still hide a command behind a shell alias, a variable, a copied or renamed `yoke` binary, an encoded payload, or string concatenation inside an interpreter, remove the agent markers and fake a terminal, use an unused console link it reads from a shared terminal or from process arguments before your browser does, open the database with its own tools, or replace the `yoke` binary or the hook settings.
 Evidence comparisons have a size limit as well.
 Tracked or untracked files up to 64 MiB are content-hashed, but larger ones are compared only by size and modification time to the nanosecond.
 So a deliberate edit to such a file that keeps its size and restores its exact modification time is not detected by the done-plan check or by the guard that voids check evidence when files change during a run.

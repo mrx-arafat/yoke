@@ -12,6 +12,8 @@ Let active plan checks finish before replacing the binary: this build uses stabl
    The first writable open by the new binary migrates the state database, and an older binary then refuses it on every hook event.
 2. Do not trust a configuration that uses the new `[review.models]` or `[memory.digest_models]` keys until step 1 is done.
 3. After replacing, rerun `yoke install --agent claude,codex` with the same `CLAUDE_CONFIG_DIR` and `CODEX_HOME` you start the agents with, then run `yoke health`.
+4. Reinstall from the same executable path the installation receipt names, or run `yoke uninstall --agent <agent>` with the new binary first.
+   A reinstall from another path is refused with `executable changed; uninstall before reinstalling`.
 
 ## Storage and upgrade
 
@@ -31,10 +33,14 @@ Let active plan checks finish before replacing the binary: this build uses stabl
   The upgrade adds plan review bases, completion fingerprints, evidence hashes, plan requirements and feedback, background jobs, notifications and usage timestamps, and rebuilds the memory search index.
   A failed migration leaves the database unchanged.
 - Who is affected: everyone with an existing `~/.yoke/state.db`.
-  An older binary that meets the upgraded database fails with `state database schema 12 is newer than supported`; in enforce mode its hooks then deny blocking events.
+  An older binary that meets the upgraded database fails with `state database schema 12 is newer than supported`.
+  Because it can then read neither state nor mode, it fails closed: it denies PreToolUse and blocks Stop and UserPromptSubmit even when the recorded mode is observe, and appends one `error.log` line per event.
   `yoke health`, `yoke statusline`, `yoke trial report` and `yoke extensions` read the database without migrating it.
 - What to do: replace all hook binaries together, and keep a copy of `~/.yoke/state.db` with its `-wal` and `-shm` files if you may need to go back.
   There is no downgrade command.
+  To go back, stop every agent, restore the old binary, and restore `state.db`, `state.db-wal` and `state.db-shm` together.
+  A restored main file beside newer sidecars replays their frames and reads as schema 12 again.
+  A copy made with `.backup` has no sidecars, so read-only commands fail with SQLite error 14 on it until the first writable open creates them.
 
 ### Configuration keys older binaries cannot read
 
@@ -114,6 +120,15 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 - Who is affected: sessions beyond the whole-file limit or with unreadable input; their usage is still not imported, and each import logs `usage ingestion failed`.
 - What to do: nothing.
 
+### Codex counter restarts no longer freeze a session's usage
+
+- What changed: a Codex rollout whose cumulative token total restarts when Codex begins a new conversation segment, for example after a thread settings change, used to fail every later import of that session with `Codex cumulative counters decreased`, so its usage stayed frozen at the last import before the restart.
+  A restart now starts a new accounting segment: the samples recorded before it stay, the usage since the restart is added, and importing the same transcript again yields the same samples.
+  A restart is recognised when the total decreases, or when the total equals the last turn's usage while an earlier total existed.
+- Who is affected: long Codex sessions; their usage catches up on the next Stop, SessionEnd or PreCompact.
+- What to do: nothing.
+  A restart that neither decreases the total nor is reported as the last turn's usage cannot be told apart from ordinary growth, so only the difference from the previous total is counted.
+
 ### New human-only commands
 
 - What changed: `plan cancel`, `plan reassign`, `plan accept`, `plan resolve`, `plan acknowledge`, `jobs retry` and `notifications ack` require a human in an interactive terminal, and the built-in guard denies agent tool calls that run any of the `plan` ones.
@@ -157,6 +172,13 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 - What changed: `yoke plan status <slug>` prints a text summary; add `--json` for the full record, which earlier builds printed by default.
 - Who is affected: scripts that parse its output.
 - What to do: add `--json`.
+
+### Plans started before the upgrade review against HEAD
+
+- What changed: a plan now pins the commit it started from, and independent review sees work committed since then.
+  A plan started by an older binary has no recorded review base, so its review still diffs the working tree against `HEAD` and does not see work committed after the plan started.
+- Who is affected: plans that were started before the upgrade and are still unfinished.
+- What to do: finish or cancel such plans, or start a fresh plan, if committed work must be reviewed.
 
 ### Plans can declare requirements and tasks
 
@@ -206,6 +228,14 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 - What changed: memory digests are queued as durable jobs and run by a background `yoke jobs work` process that SessionStart may start; failed jobs retry with backoff and become `dead` after three attempts.
 - Who is affected: projects with `memory.digest` enabled.
 - What to do: inspect them with `yoke jobs`, and retry a dead job with `yoke jobs retry <id>` in your own terminal.
+
+### Killed sessions are digested at the next session start
+
+- What changed: facts of a session whose end-of-session hook never ran, or ran without queuing a digest, are no longer left pending.
+  The next session start in the same project queues a digest for every session with pending facts and no recorded activity for 30 minutes, oldest first and at most 20 sessions per start.
+  The first session start after this upgrade can therefore queue digests for earlier sessions whose facts were never digested, and each worker run handles at most 5 of them.
+- Who is affected: projects with `memory.digest` enabled.
+- What to do: nothing; `yoke jobs` lists the queued digests, and a dead one still waits for `yoke jobs retry <id>`.
 
 ### Usage samples carry a time
 

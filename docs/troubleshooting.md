@@ -120,6 +120,17 @@ A `failed` job retries at the next session start after its `run_after` time; a `
 Fix the cause shown in `last_error`, for example an unauthenticated digest CLI, then run `yoke jobs retry <id>` in your own terminal.
 A job stuck in `running` after its worker died returns to the queue at the next session start once its 12-minute lease expires.
 Worker errors are also appended to `~/.yoke/error.log`.
+A session that was killed before its end-of-session hook, or whose hook never queued a digest, is digested at the next session start in the same project once it has shown no activity for 30 minutes.
+Until then it is treated as still working.
+
+## Usage looks frozen or incomplete
+
+Usage is imported from the agent's transcript on Stop, SessionEnd and PreCompact, and an import never decides a hook event.
+A failed import prints `yoke: usage ingestion failed: <reason>` on the hook's stderr and appends it to `~/.yoke/error.log`; the session's usage stays at its last successful import until a later import succeeds.
+A transcript over 32 MiB or containing malformed JSON fails every import, so that session's usage stays incomplete.
+A Codex rollout whose cumulative token total restarts when Codex begins a new conversation segment, for example after a thread settings change, starts a new accounting segment instead of failing, and the next import catches up.
+A restart that neither decreases the total nor is reported as the last turn's usage counts only the difference from the previous total.
+A replaced or truncated transcript replaces the stored usage for that session on its next import.
 
 ## Storage failures block work
 

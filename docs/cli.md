@@ -20,7 +20,7 @@ Angle-bracket values below are placeholders to replace, not literal arguments.
 | `yoke uninstall [--agent claude,codex] [--dry-run]` | Remove owned integration entries |
 | `yoke health [--json]` | Read-only report of the executable, state schema, mode, policy trust and staleness, each agent's hook installation, enablement and last recorded event, unfinished plans, problems and guidance; exits 1 when a check fails |
 | `yoke update [--check]` | Check releases or verify and replace the current executable |
-| `yoke extensions [--json]` | Read-only inventory of Claude Code and Codex skills, commands, agents, plugins, MCP servers, hooks, memory and rule files, with a drift report |
+| `yoke extensions [--json]` | Read-only inventory of Claude Code and Codex skills, commands, agents, plugins, MCP servers, hooks, memory and rule files, and of Yoke preset blocks, with a drift report |
 
 Install and uninstall default to both agents.
 They use Claude settings under `CLAUDE_CONFIG_DIR` and Codex files under `CODEX_HOME` when those variables are set, which must then be absolute paths.
@@ -32,7 +32,7 @@ It executes nothing and never prints values: hook and MCP commands appear as the
 It exits 1 when it finds drift.
 See [decision 0003](decisions/0003-extension-inventory.md) for the scanned locations and their sources.
 `health` never creates, migrates or writes state, settings or receipts.
-It exits 1 when no agent has Yoke hooks installed, an installed agent's hook executable or settings entries are missing, Claude settings disable the hooks, Codex `config.toml` turns hooks off, or the state database cannot be read.
+It exits 1 when no agent has Yoke hooks installed, an installation receipt or settings file cannot be read, an installed agent's hook executable or settings entries are missing, Claude settings disable the hooks, Codex `config.toml` turns hooks off or allows managed hooks only, or the state database cannot be read.
 Observe mode, untrusted or stale policy, an agent without a recorded hook event, and a project without an unfinished plan are reported as guidance with exit 0.
 Codex hook approval through `/hooks` and Claude policy delivered by MDM or the claude.ai console are not visible to Yoke, and the report says so.
 
@@ -118,7 +118,7 @@ See [workflows](workflows.md) for the approval and evidence model.
 | `yoke share <id>` | Append a note to project knowledge without trusting it |
 | `yoke memory pin <id> [--unpin]` | Change pin status |
 | `yoke memory digest <session-id> [--transcript <path>]` | Generate memories from pending facts with the configured CLI, up to 10 batches of 100 facts per run |
-| `yoke jobs [--all] [--json]` | List queued, running, failed and dead background jobs with their last error; `--all` adds succeeded jobs. Never creates or upgrades the state database: with no state it lists nothing, and with an older schema it exits 1 |
+| `yoke jobs [--all] [--json]` | List queued, running, failed and dead background jobs with their last error, including digests queued at session start for sessions whose end hook never ran; `--all` adds succeeded jobs. Never creates or upgrades the state database: with no state it lists nothing, and with an older schema it exits 1 |
 | `yoke jobs retry <id>` | Give a dead job a fresh set of attempts and start a worker; requires a human terminal |
 | `yoke memory export <file> [--all] [--overwrite]` | Export current-project or all-project memory as plaintext |
 | `yoke memory import <file> --map '<source>=<destination>' [--dry-run]` | Import with explicit project-path mappings; repeat `--map` per source project |
