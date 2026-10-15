@@ -105,7 +105,7 @@ struct Slot(Arc<AtomicUsize>);
 impl Slot {
     fn acquire(active: &Arc<AtomicUsize>) -> Option<Self> {
         active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < CONNECTION_CAP).then_some(n + 1)
             })
             .ok()?;

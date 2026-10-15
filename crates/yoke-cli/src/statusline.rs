@@ -192,11 +192,25 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let directory = home.path().join(".yoke");
         std::fs::create_dir(&directory).unwrap();
-        let store = Store::open(directory.join("state.db")).unwrap();
+        // Hooks truncate the WAL when the last connection closes, so build the state in a
+        // scratch directory, copy the live main file with its sidecars while a second
+        // connection still holds the WAL open, and read that copy with no connection open.
+        let scratch = home.path().join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let store = Store::open(scratch.join("state.db")).unwrap();
         store
             .set_kv(crate::update::LATEST_VERSION_KEY, "v999.0.0")
             .unwrap();
+        let holder = rusqlite::Connection::open(scratch.join("state.db")).unwrap();
+        let rows: i64 = holder
+            .query_row("SELECT count(*) FROM kv", [], |row| row.get(0))
+            .unwrap();
+        assert!(rows > 0);
+        for name in ["state.db", "state.db-wal", "state.db-shm"] {
+            std::fs::copy(scratch.join(name), directory.join(name)).unwrap();
+        }
         drop(store);
+        drop(holder);
         let before = files(&directory);
         assert!(before.contains_key(std::ffi::OsStr::new("state.db-shm")));
         assert!(!before[std::ffi::OsStr::new("state.db-wal")].is_empty());
