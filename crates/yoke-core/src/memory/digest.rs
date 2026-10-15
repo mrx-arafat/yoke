@@ -11,6 +11,9 @@ use crate::redact::{redact, redact_payload};
 const BATCH_FACTS: usize = 100;
 const BATCH_BYTES: usize = 128 * 1024;
 const MAX_BATCHES: usize = 10;
+/// A session with pending facts and no recorded activity for this long is treated as
+/// orphaned: its agent was killed before the end-of-session hook ran, or that hook failed.
+pub const ORPHAN_IDLE_SECS: i64 = 1800;
 
 /// Outcome of one drain run; `pending` means facts remain for a later run.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -34,11 +37,14 @@ struct DigestMemory {
     fact_ids: Vec<i64>,
 }
 
+/// Stable identity of one session's digest within a project, shared by the digest clock and
+/// the job queue key so every scheduler agrees on which work is the same.
+pub fn digest_identity(session: &str, project: &str) -> String {
+    format!("{:x}", Sha256::digest(format!("{project}\0{session}")))
+}
+
 fn key(session: &str, project: &str) -> String {
-    format!(
-        "memory.digest.{:x}",
-        Sha256::digest(format!("{project}\0{session}"))
-    )
+    format!("memory.digest.{}", digest_identity(session, project))
 }
 
 pub fn digest_due(
@@ -70,6 +76,41 @@ fn has_pending(store: &Store, session: &str, project: &str) -> Result<bool> {
         params![redact(session), project],
         |row| row.get(0),
     )?)
+}
+
+/// Sessions of `project` with pending facts and no decision or fact recorded after
+/// `now - idle_secs`, oldest activity first. `current` is the session starting now and is
+/// never idle. `sessions.ended_at` is ignored on purpose: a session whose end hook ran but
+/// failed to queue its digest is recovered exactly like a killed one.
+pub fn orphaned_sessions(
+    store: &Store,
+    project: &str,
+    current: &str,
+    now: i64,
+    idle_secs: i64,
+    limit: usize,
+) -> Result<Vec<String>> {
+    if idle_secs < 0 {
+        bail!("orphan idle interval must not be negative");
+    }
+    let mut statement = store.connection().prepare(
+        "SELECT session_id FROM (
+            SELECT f.session_id AS session_id,
+                   max(max(f.ts),coalesce((SELECT max(d.ts) FROM decisions d WHERE d.session_id=f.session_id),0)) AS activity
+            FROM facts f WHERE f.project=?1 AND f.digested=0 AND f.session_id!=?2
+            GROUP BY f.session_id)
+         WHERE activity<=?3 ORDER BY activity,session_id LIMIT ?4",
+    )?;
+    let rows = statement.query_map(
+        params![
+            project,
+            redact(current),
+            now.saturating_sub(idle_secs),
+            limit.min(10_000) as i64
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Digest pending facts in bounded batches, at most `MAX_BATCHES` per call.

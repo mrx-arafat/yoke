@@ -134,6 +134,11 @@ impl Store {
         let mut connection = Connection::open(path).context("open state database")?;
         connection.busy_timeout(Duration::from_secs(2))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
+        // The sidecars persist (below), so without a size limit the last connection to close
+        // never truncates the WAL: each hook process rebuilds the WAL index from the whole
+        // file on open and appends after it, so the file and the open cost grow until an
+        // automatic checkpoint. With a limit the closing checkpoint leaves an empty WAL.
+        connection.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT)?;
         // Table rebuilds in migrations must not cascade into child rows; enforcement is
         // restored once the migrated schema passes a foreign key check.
         connection.pragma_update(None, "foreign_keys", false)?;
@@ -431,6 +436,10 @@ impl Store {
 
 /// Rows one retention statement may delete, which bounds each write transaction.
 const PRUNE_BATCH: usize = 5000;
+
+/// Bytes a restarted WAL is truncated to inside a long-lived connection; the value only has to
+/// be non-negative for the closing checkpoint of a last connection to truncate the WAL to zero.
+const WAL_SIZE_LIMIT: i64 = 4 * 1024 * 1024;
 
 /// Rows one retention pass deleted; `complete` is false when the time budget ran out first.
 #[derive(Debug, Default, PartialEq, Eq, Serialize)]

@@ -19,7 +19,10 @@ use crate::{
 
 mod digest;
 mod portable;
-pub use digest::{digest_due, digest_with_command, DigestReport};
+pub use digest::{
+    digest_due, digest_identity, digest_with_command, orphaned_sessions, DigestReport,
+    ORPHAN_IDLE_SECS,
+};
 pub use portable::{export_archive, import_archive, ExportReport, ImportReport};
 
 pub(crate) const TEXT_LIMIT: usize = 65_536;

@@ -16,7 +16,10 @@ const JOBS_PER_WORKER: usize = 5;
 #[derive(Subcommand)]
 pub enum JobsCommand {
     /// Give a dead job a fresh set of attempts. Requires a human terminal.
-    Retry { id: i64 },
+    Retry {
+        /// Dead job id from yoke jobs.
+        id: i64,
+    },
     /// Run due jobs; hooks start this automatically in the background.
     #[command(hide = true)]
     Work,
@@ -135,17 +138,7 @@ fn work() -> Result<()> {
         };
         match result {
             Ok(follow_up) => {
-                jobs::succeed(&store, &job, timestamp()?)?;
-                if follow_up {
-                    jobs::enqueue(
-                        &store,
-                        &job.kind,
-                        &job.dedupe_key,
-                        &job.project,
-                        &job.payload,
-                        timestamp()?,
-                    )?;
-                }
+                jobs::succeed(&store, &job, timestamp()?, follow_up)?;
             }
             Err(error) => {
                 let retryable = error.downcast_ref::<Permanent>().is_none();

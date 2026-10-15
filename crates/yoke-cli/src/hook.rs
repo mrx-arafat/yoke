@@ -191,6 +191,12 @@ struct HookState {
 
 /// Hook errors never escape into ordinary CLI stdout.
 pub fn run(event: &str, agent: Agent) -> i32 {
+    // Redaction compiles its patterns on first use, about a millisecond of CPU that otherwise
+    // sits on the critical path at the decision write. A helper thread compiles them now,
+    // while this thread opens the state database and loads the policy; the first redaction
+    // on this thread then finds them ready (or waits for the helper to finish them). The
+    // patterns and their output are unchanged. A thread that cannot start costs nothing.
+    let _ = std::thread::Builder::new().spawn(yoke_core::redact::warm);
     let kind = EventKind::parse(event);
     let mut state = HookState {
         home: None,
@@ -253,10 +259,10 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
         }
     });
     let store = state.store.as_ref().expect("opened above");
-    let cwd = std::env::current_dir().context("resolve hook working directory")?;
-    state.row.project = cwd.display().to_string();
+    let process_cwd = std::env::current_dir().context("resolve hook working directory")?;
+    state.row.project = process_cwd.display().to_string();
     // Resolve mode before reading malformed input so enforce-mode errors still deny.
-    let mut loaded = config::load_trusted(store, &cwd, &home)?;
+    let mut loaded = config::load_trusted(store, &process_cwd, &home)?;
     state.mode = Some(loaded.config.mode);
     publish(state.mode);
     state.row.mode = loaded.config.mode.as_str().into();
@@ -286,9 +292,10 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
             ensure!(path.is_absolute(), "hook cwd must be absolute");
             path.canonicalize().context("resolve payload cwd")?
         }
-        None => cwd,
+        None => process_cwd.clone(),
     };
-    if ev.cwd.is_some() {
+    // Agents send the directory the hook already runs in; its policy was loaded above.
+    if ev.cwd.is_some() && cwd != process_cwd {
         loaded = config::load_trusted(store, &cwd, &home)?;
     }
     state.mode = Some(loaded.config.mode);
@@ -443,6 +450,17 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
         }
         if let Err(error) = schedule_update(store, &home, state.row.ts) {
             warn_advisory(&home, "update check scheduling failed", &error);
+        }
+        if loaded.config.memory.digest && !ev.session_id.is_empty() {
+            // Facts of sessions whose end hook never ran are digested now; `tick` starts the worker.
+            if let Err(error) = crate::memory::schedule_orphan_digests(
+                store,
+                &loaded.project_root,
+                &ev.session_id,
+                now,
+            ) {
+                warn_advisory(&home, "orphan digest recovery failed", &error);
+            }
         }
         if let Err(error) = crate::jobs::tick(store, &home, now, days) {
             warn_advisory(&home, "background job recovery failed", &error);

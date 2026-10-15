@@ -443,3 +443,26 @@ fn plan_migrations_upgrade_released_schemas_atomically_and_round_trip() -> Resul
     }
     Ok(())
 }
+
+#[test]
+fn last_close_leaves_an_empty_persistent_wal_that_readers_still_open() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("state.db");
+    let wal = directory.path().join("state.db-wal");
+    let shm = directory.path().join("state.db-shm");
+    for ts in 1..=3 {
+        // Each hook process is the only connection: it writes, closes, and the next one opens.
+        let store = Store::open(&path)?;
+        store.record_decision(&decision(ts, "allow"), 4096)?;
+        drop(store);
+        assert_eq!(
+            std::fs::metadata(&wal)?.len(),
+            0,
+            "WAL must be truncated when the last connection closes, not grow across processes"
+        );
+        assert!(shm.exists(), "WAL index must persist for read-only readers");
+    }
+    let reader = Store::open_read_only(&path)?;
+    assert_eq!(reader.decisions(&DecisionFilter::default())?.len(), 3);
+    Ok(())
+}

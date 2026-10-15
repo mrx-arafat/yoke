@@ -484,3 +484,79 @@ fn context_stays_within_budget_and_explains_each_selection() -> Result<()> {
         .is_empty());
     Ok(())
 }
+
+#[test]
+fn orphaned_sessions_are_idle_sessions_of_the_project_with_pending_facts() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let project = directory.path().to_str().unwrap();
+    let store = Store::open(directory.path().join("state.db"))?;
+    let decision = |session: &str, event: &str, ts: i64| DecisionRecord {
+        ts,
+        session_id: session.into(),
+        agent: "claude".into(),
+        project: project.into(),
+        event: event.into(),
+        tool: None,
+        mode: "enforce".into(),
+        outcome: "allow".into(),
+        reason: None,
+        gates: json!([]),
+        payload: String::new(),
+    };
+    // Killed after its last fact and decision at 100; no session_end ever arrived.
+    record_fact(&store, "killed", project, "file_write", "Edit: a", 100)?;
+    store.record_decision(&decision("killed", "post_tool_use", 100), 4096)?;
+    // Ended normally at 60, but the digest was never queued.
+    let ended = record_fact(&store, "ended", project, "file_write", "Edit: b", 50)?;
+    store.record_decision(&decision("ended", "session_end", 60), 4096)?;
+    // Still working: an old fact, but a decision just now.
+    record_fact(&store, "live", project, "file_write", "Edit: c", 100)?;
+    store.record_decision(&decision("live", "pre_tool_use", 1_899), 4096)?;
+    // Nothing pending, another project, and the session that is starting now.
+    let digested = record_fact(&store, "digested", project, "file_write", "Edit: d", 10)?;
+    store
+        .connection()
+        .execute("UPDATE facts SET digested=1 WHERE id=?1", [digested])?;
+    record_fact(
+        &store,
+        "elsewhere",
+        "/other-project",
+        "file_write",
+        "Edit: e",
+        10,
+    )?;
+    record_fact(&store, "current", project, "file_write", "Edit: f", 10)?;
+    let orphans = |now, limit| orphaned_sessions(&store, project, "current", now, 1_800, limit);
+    assert_eq!(
+        orphans(1_900, 10)?,
+        vec!["ended".to_string(), "killed".into()]
+    );
+    assert_eq!(orphans(1_899, 10)?, vec!["ended".to_string()]);
+    assert_eq!(orphans(1_900, 1)?, vec!["ended".to_string()]);
+    assert!(orphaned_sessions(&store, project, "current", 1_900, -1, 10).is_err());
+    // Recovery digests an orphan exactly once: a drained session is never selected again.
+    let report = digest_with_command(
+        &store,
+        "ended",
+        project,
+        "",
+        1_900,
+        &mut fixture_output(&format!(
+            r#"{{"memories":[{{"text":"b was edited","fact_ids":[{ended}]}}]}}"#
+        )),
+        Duration::from_secs(5),
+        &mut || Ok(()),
+    )?;
+    assert_eq!(
+        report,
+        DigestReport {
+            batches: 1,
+            facts: 1,
+            memories: 1,
+            pending: false
+        }
+    );
+    assert_eq!(orphans(1_900, 10)?, vec!["killed".to_string()]);
+    assert!(!digest_due(&store, "ended", project, 10_000, 0)?);
+    Ok(())
+}

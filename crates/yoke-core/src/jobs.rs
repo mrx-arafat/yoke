@@ -47,29 +47,38 @@ pub fn enqueue(
     payload: &str,
     now: i64,
 ) -> Result<(Job, bool)> {
+    store.transaction(|tx| enqueue_in(tx, kind, dedupe_key, project, payload, now))
+}
+
+fn enqueue_in(
+    connection: &Connection,
+    kind: &str,
+    dedupe_key: &str,
+    project: &str,
+    payload: &str,
+    now: i64,
+) -> Result<(Job, bool)> {
     ensure!(
         (1..=64).contains(&kind.len()) && (1..=512).contains(&dedupe_key.len()),
         "job kind and dedupe key must be nonempty and bounded"
     );
     ensure!(payload.len() <= 65_536, "job payload exceeds 64 KiB");
-    store.transaction(|tx| {
-        let active = tx
-            .query_row(
-                &format!("SELECT id FROM jobs WHERE dedupe_key=?1 AND state IN {ACTIVE}"),
-                [dedupe_key],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        if let Some(id) = active {
-            return Ok((get_on(tx, id)?, false));
-        }
-        tx.execute(
-            "INSERT INTO jobs(kind,dedupe_key,project,payload,state,max_attempts,run_after,created_at,updated_at)
-             VALUES (?1,?2,?3,?4,'queued',?5,?6,?6,?6)",
-            params![kind, dedupe_key, project, payload, MAX_ATTEMPTS, now],
-        )?;
-        Ok((get_on(tx, tx.last_insert_rowid())?, true))
-    })
+    let active = connection
+        .query_row(
+            &format!("SELECT id FROM jobs WHERE dedupe_key=?1 AND state IN {ACTIVE}"),
+            [dedupe_key],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if let Some(id) = active {
+        return Ok((get_on(connection, id)?, false));
+    }
+    connection.execute(
+        "INSERT INTO jobs(kind,dedupe_key,project,payload,state,max_attempts,run_after,created_at,updated_at)
+         VALUES (?1,?2,?3,?4,'queued',?5,?6,?6,?6)",
+        params![kind, dedupe_key, project, payload, MAX_ATTEMPTS, now],
+    )?;
+    Ok((get_on(connection, connection.last_insert_rowid())?, true))
 }
 
 /// Requeue running jobs whose owner let the lease expire, or mark them dead when no attempts remain.
@@ -124,7 +133,7 @@ pub fn claim(store: &Store, now: i64, owner: u32, lease_secs: i64) -> Result<Opt
 pub fn heartbeat(store: &Store, job: &Job, now: i64, lease_secs: i64) -> Result<()> {
     ensure!(lease_secs > 0, "job lease must be positive");
     owned_update(
-        store,
+        store.connection(),
         job,
         "lease_expires=?4,updated_at=?5",
         params![
@@ -137,13 +146,32 @@ pub fn heartbeat(store: &Store, job: &Job, now: i64, lease_secs: i64) -> Result<
     )
 }
 
-pub fn succeed(store: &Store, job: &Job, now: i64) -> Result<()> {
-    owned_update(
-        store,
-        job,
-        "state='succeeded',owner_pid=NULL,lease_expires=NULL,last_error=NULL,updated_at=?4",
-        params![job.id, job.owner_pid, job.attempts, now],
-    )
+/// Mark the job succeeded. With `follow_up`, a fresh job for the same work (kind, key, project
+/// and payload) is queued in the same transaction, so a crash can never leave the work
+/// finished with its remainder unqueued; the follow-up is returned.
+pub fn succeed(store: &Store, job: &Job, now: i64, follow_up: bool) -> Result<Option<Job>> {
+    store.transaction(|tx| {
+        owned_update(
+            tx,
+            job,
+            "state='succeeded',owner_pid=NULL,lease_expires=NULL,last_error=NULL,updated_at=?4",
+            params![job.id, job.owner_pid, job.attempts, now],
+        )?;
+        if !follow_up {
+            return Ok(None);
+        }
+        Ok(Some(
+            enqueue_in(
+                tx,
+                &job.kind,
+                &job.dedupe_key,
+                &job.project,
+                &job.payload,
+                now,
+            )?
+            .0,
+        ))
+    })
 }
 
 /// Record a redacted, capped error. Retryable failures back off until attempts run out.
@@ -160,7 +188,7 @@ pub fn fail(
         ("dead", now)
     };
     owned_update(
-        store,
+        store.connection(),
         job,
         "state=?4,run_after=?5,owner_pid=NULL,lease_expires=NULL,last_error=?6,updated_at=?7",
         params![
@@ -176,8 +204,13 @@ pub fn fail(
     Ok(state)
 }
 
-fn owned_update(store: &Store, job: &Job, set: &str, values: impl rusqlite::Params) -> Result<()> {
-    let changed = store.connection().execute(
+fn owned_update(
+    connection: &Connection,
+    job: &Job,
+    set: &str,
+    values: impl rusqlite::Params,
+) -> Result<()> {
+    let changed = connection.execute(
         &format!("UPDATE jobs SET {set} WHERE id=?1 AND state='running' AND owner_pid IS ?2 AND attempts=?3"),
         values,
     )?;
@@ -234,6 +267,18 @@ pub fn due(store: &Store, now: i64) -> Result<bool> {
         [now],
         |row| row.get(0),
     )?)
+}
+
+/// The newest job for this key that has not succeeded: queued, running, failed or dead.
+pub fn unfinished(store: &Store, dedupe_key: &str) -> Result<Option<Job>> {
+    Ok(store
+        .connection()
+        .query_row(
+            &format!("SELECT {COLUMNS} FROM jobs WHERE dedupe_key=?1 AND state!='succeeded' ORDER BY id DESC LIMIT 1"),
+            [dedupe_key],
+            job_row,
+        )
+        .optional()?)
 }
 
 /// Remove finished jobs strictly older than the retention boundary.

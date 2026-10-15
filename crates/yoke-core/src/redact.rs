@@ -55,6 +55,16 @@ pub fn redact_payload(input: &str, cap: usize) -> String {
     output
 }
 
+/// Compile every pattern now, so a caller can pay for it off its critical path.
+pub fn warm() {
+    LazyLock::force(&SENSITIVE_KEY);
+    LazyLock::force(&PEM);
+    LazyLock::force(&TOKEN);
+    LazyLock::force(&BEARER);
+    LazyLock::force(&AUTHORIZATION);
+    LazyLock::force(&ASSIGNMENT);
+}
+
 pub(crate) fn redact_value(value: &mut Value) {
     match value {
         Value::Object(fields) => {
