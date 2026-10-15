@@ -38,18 +38,20 @@ It is one binary and one SQLite file on your machine, with no daemon and no tele
 ## Quickstart
 
 Yoke targets macOS and Linux, and its release workflow builds both for x86_64 and aarch64.
-You need Git, a stable Rust toolchain, and Claude Code or Codex.
+You need Claude Code or Codex.
+While no release is published, installing builds from source, so you also need a stable Rust toolchain, which the install script offers to install.
 
-**Install or upgrade in one line.**
-It builds `main`, connects both agents, creates or upgrades the state database, and checks the hooks:
+**Install or upgrade in one line:**
 
 ```sh
-cargo install --locked --git https://github.com/mrx-arafat/yoke yoke-cli && yoke install --agent claude,codex && yoke log --limit 1 >/dev/null && yoke health
+curl -fsSL https://raw.githubusercontent.com/mrx-arafat/yoke/main/install.sh | bash
 ```
 
-Use `--agent claude` or `--agent codex` if you run only one agent.
-Rerunning it is safe: an unchanged installation reports no changes, and after an upgrade its `yoke log` step migrates the state database.
-If your hooks still point at a Yoke binary in another location, run `yoke uninstall --agent claude,codex` with the new binary first, because the install refuses with `executable changed` until you do.
+The script installs `yoke` into `~/.local/bin` and never uses `sudo`.
+It downloads the release executable for your platform and refuses it unless its SHA-256 checksum matches, and while no release exists it builds `main` from source with Cargo, offering to install Rust if Cargo is missing.
+It then connects the Claude Code and Codex hooks it finds, creates or upgrades the state database once those hooks run the new binary, and runs `yoke health`.
+Rerunning it upgrades in place, and if your hooks run a Yoke binary from another location, it moves them to the new one.
+Read [`install.sh`](install.sh) first if you prefer; [Getting started](docs/getting-started.md#1-build-and-install-the-executable) lists its settings, such as `YOKE_INSTALL_DIR` and `YOKE_AGENTS`.
 Then approve the hooks in Codex with `/hooks` and create a policy as in step 2.
 The steps below do the same thing one at a time.
 

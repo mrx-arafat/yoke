@@ -11,7 +11,31 @@ SQLite is bundled through the Rust dependency, so a separate database server is 
 
 ## 1. Build and install the executable
 
-From the repository root:
+To install or upgrade without a checkout, run the install script:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mrx-arafat/yoke/main/install.sh | bash
+```
+
+It supports macOS and Linux on x86_64 and aarch64, and it never uses `sudo`.
+It downloads `yoke-<target>` and `yoke-<target>.sha256` from the latest GitHub release, the same assets `yoke update` uses, and refuses to install unless the SHA-256 checksum matches.
+When the release has no executable for your platform, including while no release is published, it builds from source with `cargo install --locked --git https://github.com/mrx-arafat/yoke yoke-cli`.
+If Cargo is missing, it asks before installing Rust with rustup; without a terminal it stops with the exact command unless `YOKE_INSTALL_RUST=1` is set.
+It replaces the executable atomically, runs `yoke install` for the agents it finds, creates or migrates the state database with `yoke log` once the hooks run the new executable, and reports `yoke health`.
+With `YOKE_AGENTS=none`, or when it finds no agent, it leaves the database alone, so hooks that still run an older executable keep working.
+If your hooks run a Yoke executable from another location, it runs `yoke uninstall` with the new executable and then installs again.
+These environment variables change what it does:
+
+| Variable | Effect |
+| --- | --- |
+| `YOKE_INSTALL_DIR` | Absolute install directory, default `~/.local/bin`. |
+| `YOKE_VERSION` | Release tag to download, or to build with `--tag`, instead of the latest. |
+| `YOKE_DOWNLOAD_URL` | Base URL of a mirror that serves the release assets. |
+| `YOKE_FROM_SOURCE=1` | Build from source even when a release exists. |
+| `YOKE_INSTALL_RUST=1` | Install Rust without asking when Cargo is missing. |
+| `YOKE_AGENTS` | Agents to connect, such as `claude` or `claude,codex`, or `none`; by default each agent found on `PATH` or by its configuration directory. |
+
+To build from a local checkout instead, from the repository root:
 
 ```sh
 cargo build --release
@@ -20,7 +44,7 @@ cargo install --path crates/yoke-cli --locked
 yoke --help
 ```
 
-To install without a checkout, build straight from GitHub instead: `cargo install --locked --git https://github.com/mrx-arafat/yoke yoke-cli`.
+To build straight from GitHub without the script: `cargo install --locked --git https://github.com/mrx-arafat/yoke yoke-cli`.
 Cargo installs the executable into its configured binary directory, normally `~/.cargo/bin`.
 Ensure that directory is on your PATH.
 The remaining commands run from the project you want Yoke to govern, which need not be Yoke's own repository.
