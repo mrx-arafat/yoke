@@ -1048,9 +1048,11 @@ fn starting_a_second_plan_names_the_unfinished_one_and_how_to_release_it() {
     let refused = start(&f.store, &other, "elsewhere", "fixture-session").unwrap_err();
 
     let message = format!("{refused:#}");
+    let root = f.root.canonicalize().unwrap();
     for expected in [
         "example",
         "building",
+        root.to_str().unwrap(),
         "yoke plan cancel example",
         "yoke plan reassign example",
     ] {
