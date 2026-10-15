@@ -1007,3 +1007,64 @@ fn plan_binds_a_session_whose_latest_event_is_in_another_project() {
         .unwrap();
     assert_eq!(bound.slug, "elsewhere");
 }
+
+/// A session owns at most one unfinished plan, so the refusal must tell the human how to release it.
+#[test]
+fn starting_a_second_plan_names_the_unfinished_one_and_how_to_release_it() {
+    let f = Fixture::new();
+    f.building("title='Example'\n[[check]]\nname='proof'\nrun='true'");
+    let other = f._temp.path().join("other");
+    fs::create_dir(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    git(&other, &["commit", "-q", "--allow-empty", "-m", "seed"]);
+    // The session first spoke in the fixture project, then in `other`.
+    f.store
+        .record_decision(
+            &DecisionRecord {
+                ts: 3,
+                session_id: "fixture-session".into(),
+                agent: "claude".into(),
+                project: other.canonicalize().unwrap().to_str().unwrap().into(),
+                event: "session_start".into(),
+                tool: None,
+                mode: "observe".into(),
+                outcome: "allow".into(),
+                reason: None,
+                gates: serde_json::json!([]),
+                payload: "{}".into(),
+            },
+            4096,
+        )
+        .unwrap();
+    let plan = create(&f.store, &other, ".yoke/plans", "elsewhere", "Elsewhere").unwrap();
+    fs::write(
+        &plan.file,
+        "+++\ntitle='Elsewhere'\n[[check]]\nname='proof'\nrun='true'\n+++\n\nGoal.\n",
+    )
+    .unwrap();
+    let prepared = prepare_approval(&f.store, &other, "elsewhere").unwrap();
+    approve(&f.store, &prepared).unwrap();
+
+    let refused = start(&f.store, &other, "elsewhere", "fixture-session").unwrap_err();
+
+    let message = format!("{refused:#}");
+    for expected in [
+        "example",
+        "building",
+        "yoke plan cancel example",
+        "yoke plan reassign example",
+    ] {
+        assert!(message.contains(expected), "{message}");
+    }
+    assert_eq!(
+        get(&f.store, &other, "elsewhere").unwrap().state,
+        "approved"
+    );
+    assert_eq!(
+        active(&f.store, &f.root, "fixture-session")
+            .unwrap()
+            .unwrap()
+            .slug,
+        "example"
+    );
+}

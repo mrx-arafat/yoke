@@ -127,6 +127,8 @@ Recovery also works if the plan header was edited after the interruption; the tr
 A human abandons an unfinished plan with `yoke plan cancel <slug> --reason '<why>'`, which records the reason and releases the plan's session.
 A human hands a building, waiting, or stalled plan to a replacement session with `yoke plan reassign <slug> --session <session-id>`.
 Reassignment keeps the approved checks and review base, records the move as a transition, and leaves only the new session bound.
+A session owns at most one unfinished plan, even across projects, because the Stop guard and plan context are per session.
+`yoke plan start` or `yoke plan reassign` aimed at a session that still owns an unfinished plan is refused, and the refusal names that plan, its state, and its project so the human can finish, cancel, or reassign it from that project first.
 The stop guard limits repeated blocking through `stop.max_blocks`; inspect plan state rather than repeatedly retrying a blocked stop.
 A done plan stays bound to its session and is accepted at Stop while the working tree matches the tree its checks passed on.
 Committing exactly the bytes the checks passed on keeps a done plan done; a plan completed before Yoke recorded that content anchor still reopens after any new commit.

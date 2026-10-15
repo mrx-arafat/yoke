@@ -211,10 +211,15 @@ fn bind_session(tx: &Transaction<'_>, plan: &PlanRecord, session: &str) -> Resul
     let active = active.context("session not found for this project; run a hook first")?;
     if let Some(id) = active.filter(|id| *id != plan.id) {
         let previous = by_id(tx, id)?;
+        let (slug, state, project) = (&previous.slug, &previous.state, &previous.project);
+        // A session owns at most one unfinished plan, so the refusal must name that plan and the
+        // human-only commands that release it; both resolve the slug from that plan's project.
         ensure!(
             previous.state == "done",
-            "session already has unfinished plan {}",
-            previous.slug
+            "session {session} still owns unfinished plan `{slug}` ({state}) in {project}; \
+             a session owns at most one unfinished plan, so finish it first, or in a human \
+             terminal in that project run `yoke plan cancel {slug} --reason '<why>'` or \
+             `yoke plan reassign {slug} --session <replacement-session>`"
         );
     }
     tx.execute(
