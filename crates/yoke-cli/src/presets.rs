@@ -10,13 +10,18 @@ pub enum PresetCommand {
     List,
     /// Append readable TOML; a human must trust it before any gate can run.
     Add {
+        /// Preset name from yoke preset list.
         name: String,
+        /// Append to the global ~/.yoke/config.toml instead of yoke.toml.
         #[arg(long)]
         global: bool,
+        /// web-redirect: short instruction naming what to use for web access.
         #[arg(long)]
         replacement: Option<String>,
+        /// token-saver: executable on PATH that wraps the matched commands.
         #[arg(long)]
         wrapper: Option<String>,
+        /// token-saver: command words to rewrite, for example cargo test.
         #[arg(long)]
         command_prefix: Option<String>,
         /// Required for token-saver: Codex rewrites allow the changed tool call.

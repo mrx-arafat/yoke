@@ -180,7 +180,7 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
                         "bin: {}",
                         quote(&std::env::current_exe()?.display().to_string())
                     );
-                    println!("description: \"Local trusted gates for coding agents\"");
+                    println!("description: {}", quote(env!("CARGO_PKG_DESCRIPTION")));
                     println!("mode: {}", loaded.config.mode.as_str());
                     println!(
                         "project: {}",

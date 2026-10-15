@@ -162,17 +162,32 @@ fn check_only_records_valid_version_and_keeps_previous_on_bad_metadata() {
 fn bounded_process_rejects_excess_output_failure_and_deadline() {
     let mut output = Command::new("/bin/sh");
     output.args(["-c", "printf 12345"]);
-    assert!(transport::collect(&mut output, 4, Duration::from_secs(2))
-        .unwrap_err()
-        .to_string()
-        .contains("size limit"));
+    assert!(
+        transport::collect("update download", &mut output, 4, Duration::from_secs(2))
+            .unwrap_err()
+            .to_string()
+            .contains("size limit")
+    );
     let mut failed = Command::new("/bin/sh");
     failed.args(["-c", "exit 7"]);
-    assert!(transport::collect(&mut failed, 4, Duration::from_secs(2)).is_err());
+    let message = transport::collect("release check", &mut failed, 4, Duration::from_secs(2))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.starts_with("release check failed (exit status: 7)"),
+        "{message}"
+    );
+    assert!(!message.contains("download"), "{message}");
     let mut blocked = Command::new("/bin/sh");
     blocked.args(["-c", "exec sleep 10"]);
     let start = Instant::now();
-    assert!(transport::collect(&mut blocked, 4, Duration::from_millis(40)).is_err());
+    assert!(transport::collect(
+        "update download",
+        &mut blocked,
+        4,
+        Duration::from_millis(40)
+    )
+    .is_err());
     assert!(start.elapsed() < Duration::from_secs(2));
 }
 

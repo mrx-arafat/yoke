@@ -38,7 +38,7 @@ struct Asset {
 
 /// Check GitHub in at most one bounded request, recording only validated metadata.
 pub fn check_latest(store: &Store) -> Result<String> {
-    check_with(store, &mut transport::download)
+    check_with(store, &mut transport::check)
 }
 
 /// Check for a release or atomically install a newer release for this build target.

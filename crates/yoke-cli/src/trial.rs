@@ -25,6 +25,7 @@ pub enum TrialCommand {
         /// Exclusive end: YYYY-MM-DD (local midnight) or RFC 3339 with offset.
         #[arg(long)]
         until: Option<String>,
+        /// Only decisions from this agent.
         #[arg(long, value_enum)]
         agent: Option<AgentArg>,
         /// Flagged decisions per page.
@@ -33,6 +34,7 @@ pub enum TrialCommand {
         /// Continue flagged decisions below this id, from a previous next_before.
         #[arg(long)]
         before: Option<i64>,
+        /// Print the report as JSON.
         #[arg(long)]
         json: bool,
     },

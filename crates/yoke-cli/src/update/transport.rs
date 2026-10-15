@@ -5,7 +5,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context, Result};
 
+/// Fetch for `yoke update`; errors describe an update download.
 pub(super) fn download(url: &str, limit: usize) -> Result<Vec<u8>> {
+    fetch("update download", url, limit)
+}
+
+/// The same bounded request for `yoke update --check`, which installs nothing,
+/// so errors describe a release check rather than a download.
+pub(super) fn check(url: &str, limit: usize) -> Result<Vec<u8>> {
+    fetch("release check", url, limit)
+}
+
+fn fetch(what: &str, url: &str, limit: usize) -> Result<Vec<u8>> {
     ensure!(url.starts_with("https://"), "update requires HTTPS");
     let mut command = Command::new("curl");
     command.args([
@@ -32,17 +43,26 @@ pub(super) fn download(url: &str, limit: usize) -> Result<Vec<u8>> {
         "--url",
         url,
     ]);
-    collect(&mut command, limit, Duration::from_secs(35))
+    collect(what, &mut command, limit, Duration::from_secs(35))
 }
 
-pub(super) fn collect(command: &mut Command, limit: usize, timeout: Duration) -> Result<Vec<u8>> {
+/// Run `command` with bounded output and time; `what` names the operation in errors.
+pub(super) fn collect(
+    what: &str,
+    command: &mut Command,
+    limit: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .context("starting update download; ensure curl is installed")?;
-    let stdout = child.stdout.take().context("download stdout unavailable")?;
+        .with_context(|| format!("starting {what}; ensure curl is installed"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .with_context(|| format!("{what} stdout unavailable"))?;
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -56,15 +76,18 @@ pub(super) fn collect(command: &mut Command, limit: usize, timeout: Duration) ->
     let result = (|| {
         let bytes = receiver
             .recv_timeout(timeout)
-            .context("update download exceeded deadline")??;
-        ensure!(bytes.len() <= limit, "update download exceeds size limit");
+            .with_context(|| format!("{what} exceeded deadline"))??;
+        ensure!(bytes.len() <= limit, "{what} exceeds size limit");
         loop {
             if let Some(status) = child.try_wait()? {
-                ensure!(status.success(), "update download failed ({status}); check connectivity and release availability");
+                ensure!(
+                    status.success(),
+                    "{what} failed ({status}); check connectivity and release availability"
+                );
                 return Ok(bytes);
             }
             if start.elapsed() >= timeout {
-                bail!("update download exceeded deadline");
+                bail!("{what} exceeded deadline");
             }
             std::thread::sleep(Duration::from_millis(10));
         }

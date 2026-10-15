@@ -12,7 +12,10 @@ use crate::commands::{self, quote};
 #[derive(Subcommand)]
 pub enum NotificationsCommand {
     /// Human-only: acknowledge one notification by id, or every unread one with `all`.
-    Ack { target: String },
+    Ack {
+        /// Notification id, or all for every unread one in scope.
+        target: String,
+    },
 }
 
 const PENDING: &str = "Older history is still being read in short steps so hooks are not held up; run yoke notifications again to see all of it.";

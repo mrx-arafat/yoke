@@ -6,7 +6,7 @@ members = ["crates/yoke-cli", "crates/yoke-core"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "A harness that steers coding agents with configurable quality gates."
+description = "Local, trusted quality gates for Claude Code and Codex."
 
 [workspace.dependencies]
 serde = { version = "1.0.210", features = ["derive"] }

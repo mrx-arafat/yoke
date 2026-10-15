@@ -8,7 +8,9 @@ use crate::{commands, AgentArg};
 pub enum PlanCommand {
     /// Create an editable draft; approval does not happen automatically.
     New {
+        /// Plan slug, also the draft file name under plans.dir.
         slug: String,
+        /// Title written into the draft header.
         #[arg(long)]
         title: Option<String>,
     },
@@ -16,13 +18,17 @@ pub enum PlanCommand {
     List,
     /// Show a plan's tasks, requirements, feedback and evidence, or list plans.
     Status {
+        /// Plan to show; omit it to list every plan.
         slug: Option<String>,
+        /// Print every field and the plan body as JSON.
         #[arg(long)]
         json: bool,
     },
     /// Ask the independent reviewer to validate a plan before approval.
     Validate {
+        /// Plan to validate.
         slug: String,
+        /// Agent that will build the plan; the other agent reviews it.
         #[arg(long, value_enum)]
         agent: AgentArg,
     },
@@ -33,60 +39,87 @@ pub enum PlanCommand {
     },
     /// Human-only: record evidence that a `human = true` requirement is met.
     Accept {
+        /// Plan slug.
         slug: String,
+        /// Requirement id declared with human = true.
         requirement: String,
+        /// What was checked and how.
         #[arg(long)]
         evidence: String,
     },
     /// Anchor feedback to `plan`, `requirement:<id>`, `task:<id>`, `check:<name>` or `heading:<slug>`.
     Comment {
+        /// Plan slug.
         slug: String,
+        /// Where the feedback applies, for example task:<id> or check:<name>.
         #[arg(long)]
         anchor: String,
+        /// Comment text.
         #[arg(long)]
         text: String,
     },
     /// Reply to a finding or comment; only a human can close it.
     Reply {
+        /// Plan slug.
         slug: String,
+        /// Finding or comment id from yoke plan status.
         id: i64,
+        /// Reply text.
         #[arg(long)]
         text: String,
     },
     /// Human-only: mark a finding or comment resolved.
     Resolve {
+        /// Plan slug.
         slug: String,
+        /// Finding or comment id from yoke plan status.
         id: i64,
+        /// Note recorded with the resolution.
         #[arg(long)]
         note: Option<String>,
     },
     /// Human-only: accept the risk of a finding or comment without changing the plan.
     Acknowledge {
+        /// Plan slug.
         slug: String,
+        /// Finding or comment id from yoke plan status.
         id: i64,
+        /// Note recorded with the acknowledgement.
         #[arg(long)]
         note: Option<String>,
     },
     /// Review and freeze exact check commands in a human terminal.
-    Approve { slug: String },
+    Approve {
+        /// Plan to approve.
+        slug: String,
+    },
     /// Bind an approved plan to an existing recorded agent session.
     Start {
+        /// Plan to start.
         slug: String,
+        /// Recorded session id that will build the plan.
         #[arg(long)]
         session: String,
     },
     /// Record a question and wait for a human response.
     Ask {
+        /// Question for the human; the plan waits until a human resumes it.
         question: String,
+        /// Plan asking the question.
         #[arg(long)]
         slug: Option<String>,
+        /// Recorded session id of the active plan, used instead of --slug.
         #[arg(long)]
         session: Option<String>,
     },
     /// Human-only: resume a waiting or stalled plan, or recover one whose check was interrupted.
-    Resume { slug: String },
+    Resume {
+        /// Plan to resume.
+        slug: String,
+    },
     /// Human-only: cancel an unfinished plan and release its session.
     Cancel {
+        /// Plan to cancel.
         slug: String,
         /// Audit reason recorded with the cancellation.
         #[arg(long)]
@@ -94,19 +127,25 @@ pub enum PlanCommand {
     },
     /// Human-only: move a building, waiting, or stalled plan to a replacement session.
     Reassign {
+        /// Plan to hand over.
         slug: String,
+        /// Recorded session id that takes over the plan.
         #[arg(long)]
         session: String,
     },
     /// Run frozen checks and required independent review on the actual tree.
     Check {
+        /// Plan to check.
         slug: String,
+        /// Agent that built the change; the other agent reviews it.
         #[arg(long, value_enum)]
         agent: AgentArg,
     },
     /// Show the exact diff the independent review sees; read-only.
     Diff {
+        /// Plan whose recorded base the diff starts from.
         slug: String,
+        /// Print the diff and its base as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -116,8 +155,11 @@ pub enum PlanCommand {
 pub enum TaskCommand {
     /// Mark a task done after its dependencies; human-owned tasks need a human terminal.
     Done {
+        /// Plan slug.
         slug: String,
+        /// Task id from the plan header.
         task: String,
+        /// What was done and how it was verified.
         #[arg(long)]
         evidence: Option<String>,
     },
