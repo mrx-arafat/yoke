@@ -200,6 +200,22 @@ fn count(value: &Value, key: &str, optional: bool) -> Result<i64> {
         .with_context(|| format!("invalid transcript counter {key}"))
 }
 
+/// The last turn's Codex counters in the order of the totals, only when every present
+/// counter is a non-negative integer; the field is a restart hint, never an accounting source.
+fn last_turn(info: &Value) -> Option<[i64; 4]> {
+    let last = info.get("last_token_usage")?.as_object()?;
+    let get = |key: &str| match last.get(key) {
+        None => Some(0),
+        Some(value) => value.as_i64().filter(|n| *n >= 0),
+    };
+    Some([
+        get("input_tokens")?,
+        get("output_tokens")?,
+        get("cached_input_tokens")?,
+        get("cache_write_input_tokens")?,
+    ])
+}
+
 fn identifier(value: &str) -> Result<String> {
     ensure!(
         !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control),
@@ -428,18 +444,25 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path) -> Result<Snapsh
                 count(usage, "cached_input_tokens", true)?,
                 count(usage, "cache_write_input_tokens", true)?,
             ];
-            ensure!(
-                current.iter().zip(previous).all(|(n, before)| *n >= before),
-                "Codex cumulative counters decreased; refusing ambiguous accounting"
-            );
+            // Codex repeats a token count without new usage.
+            if current == previous {
+                continue;
+            }
+            // The total restarts from zero on a new conversation segment, such as after a
+            // thread settings change. A restart shows as a total that decreased, or as a total equal to
+            // the last turn's usage while an earlier total existed. Either starts a new
+            // segment counted from zero: samples before it stay, and only usage since the
+            // restart is added, so re-importing the file yields the same samples.
+            let restarted = current.iter().zip(previous).any(|(n, before)| *n < before)
+                || (previous != [0; 4] && last_turn(&payload.info) == Some(current));
+            if restarted {
+                previous = [0; 4];
+            }
             let mut delta = [0; 4];
             for index in 0..4 {
                 delta[index] = current[index] - previous[index];
             }
             previous = current;
-            if delta == [0; 4] {
-                continue;
-            }
             let cached = delta[2]
                 .checked_add(delta[3])
                 .context("cache counters overflow")?;
@@ -824,6 +847,66 @@ mod tests {
         assert_eq!(result[0].output_tokens, 20);
         assert_eq!(result[0].unknown_pricing_samples, 2);
         assert!(result[0].estimated_cost_usd.is_none());
+    }
+
+    #[test]
+    fn codex_counter_resets_start_a_new_segment_without_freezing_or_double_counting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        // Same field shape as a real rollout: a cumulative total plus the last turn's usage,
+        // as [input, output, cached] where input includes the cached tokens.
+        let event = |total: [u64; 3], last: [u64; 3]| {
+            let usage = |[input, output, cached]: [u64; 3]| json!({"input_tokens":input,"cached_input_tokens":cached,"output_tokens":output,"reasoning_output_tokens":0,"total_tokens":input+output});
+            json!({"type":"event_msg","timestamp":"2026-10-14T10:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":usage(total),"last_token_usage":usage(last),"model_context_window":272000}}}).to_string()
+        };
+        let totals = |store: &Store| {
+            let t = report(store, None, Some("s"), &UsageRange::default(), Period::Day)
+                .unwrap()
+                .totals;
+            (
+                t.samples,
+                t.input_tokens,
+                t.output_tokens,
+                t.cache_read_tokens,
+            )
+        };
+        let before_reset = format!(
+            "{}\n{}\n{}\n",
+            event([100, 10, 20], [100, 10, 20]),
+            event([100, 10, 20], [100, 10, 20]),
+            event([300, 30, 60], [200, 20, 40])
+        );
+        std::fs::write(&path, &before_reset).unwrap();
+        ingest(&store, "codex", "s", "/project", &path).unwrap();
+        assert_eq!(totals(&store), (2, 240, 30, 60));
+        // The total restarts at zero on a new conversation segment: once as
+        // a decrease (repeated, as agents repeat token counts), then again without a decrease
+        // but equal to the last turn's usage, where the cached tokens outgrow the delta.
+        let after_reset = format!(
+            "{before_reset}{}\n{}\n{}\n{}\n",
+            event([50, 5, 10], [50, 5, 10]),
+            event([50, 5, 10], [50, 5, 10]),
+            event([120, 12, 30], [70, 7, 20]),
+            event([130, 13, 100], [130, 13, 100])
+        );
+        std::fs::write(&path, &after_reset).unwrap();
+        let imported = ingest(&store, "codex", "s", "/project", &path).map(|rows| rows.len());
+        assert_eq!(
+            (imported.map_err(|error| error.to_string()), totals(&store)),
+            (Ok(1), (5, 360, 55, 190))
+        );
+        // Re-importing the same file keeps the same samples and never double counts.
+        ingest(&store, "codex", "s", "/project", &path).unwrap();
+        assert_eq!(totals(&store), (5, 360, 55, 190));
+        // Accounting continues in the new segment after the reset.
+        std::fs::write(
+            &path,
+            format!("{after_reset}{}\n", event([150, 15, 110], [20, 2, 10])),
+        )
+        .unwrap();
+        ingest(&store, "codex", "s", "/project", &path).unwrap();
+        assert_eq!(totals(&store), (6, 370, 57, 200));
     }
 
     fn claude_row(id: &str, model: &str, input: u64, ts: Option<&str>) -> Value {
