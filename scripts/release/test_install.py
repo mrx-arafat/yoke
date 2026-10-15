@@ -61,12 +61,15 @@ class InstallScriptTests(unittest.TestCase):
             "YOKE_INSTALL_DIR": str(self.bin),
             "YOKE_AGENTS": "none",
         }
+        # A new session has no controlling terminal, so no question can wait for input.
         return subprocess.run(
             ["sh", str(ROOT / "install.sh")],
             env=env,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=60,
+            start_new_session=True,
         )
 
     def test_installs_release_with_valid_checksum(self) -> None:

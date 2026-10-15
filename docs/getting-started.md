@@ -17,22 +17,46 @@ To install or upgrade without a checkout, run the install script:
 curl -fsSL https://raw.githubusercontent.com/mrx-arafat/yoke/main/install.sh | bash
 ```
 
-It supports macOS and Linux on x86_64 and aarch64, and it never uses `sudo`.
+It supports macOS and Linux on x86_64 and aarch64, including a fresh server over SSH as root.
+On Alpine, use `| sh` instead of `| bash`, because Alpine ships without bash.
+It uses `sudo` only to install a C compiler, after asking.
+Every question defaults to yes and is read from your terminal, so it works through the pipe.
 It downloads `yoke-<target>` and `yoke-<target>.sha256` from the latest GitHub release, the same assets `yoke update` uses, and refuses to install unless the SHA-256 checksum matches.
 When the release has no executable for your platform, including while no release is published, it builds from source with `cargo install --locked --git https://github.com/mrx-arafat/yoke yoke-cli`.
-If Cargo is missing, it asks before installing Rust with rustup; without a terminal it stops with the exact command unless `YOKE_INSTALL_RUST=1` is set.
-It replaces the executable atomically, runs `yoke install` for the agents it finds, creates or migrates the state database with `yoke log` once the hooks run the new executable, and reports `yoke health`.
-With `YOKE_AGENTS=none`, or when it finds no agent, it leaves the database alone, so hooks that still run an older executable keep working.
+Release executables need glibc, so on Alpine and other musl systems it always builds from source.
+Before building, it asks to install whatever is missing, picking the package manager by its command:
+
+| Platform | Package manager | What the installer adds when missing |
+| --- | --- | --- |
+| macOS | none | Opens the Command Line Tools installer with `xcode-select --install`, then stops so you can rerun it when they finish |
+| Ubuntu, Debian | `apt-get` | `build-essential`, then Rust with rustup |
+| Fedora, Rocky Linux, Amazon Linux 2023 | `dnf` | `gcc`, then Rust with rustup |
+| Older yum-based systems | `yum` | `gcc`, then Rust with rustup |
+| openSUSE | `zypper` | `gcc`, then Rust with rustup |
+| Arch Linux | `pacman` | `gcc`, then Rust with rustup |
+| Alpine | `apk` | `build-base`, then Rust with rustup |
+
+On Linux it installs the compiler directly as root and otherwise with `sudo`.
+Without a terminal, each of these steps stops with the exact command to run, unless `YOKE_YES=1` answers yes.
+It installs into `/usr/local/bin` as root and into `~/.local/bin` otherwise, replacing the executable atomically.
+An executable in `/usr/local/bin` serves every user, but hooks and state are per user, so each user who runs an agent runs the installer once.
+It runs `yoke install` for the agents it finds, creates or migrates the state database with `yoke log` once the hooks run the new executable, and reports `yoke health`.
+With `YOKE_AGENTS=none`, or when it finds no agent, it leaves the database alone, so hooks that still run an older executable keep working; rerun it after installing an agent to connect that agent's hooks.
 If your hooks run a Yoke executable from another location, it runs `yoke uninstall` with the new executable and then installs again.
+When the install directory is not on your `PATH`, it asks to add one line marked `# added by yoke install.sh` to `~/.bashrc`, and to `~/.zshrc` when your shell is zsh; open a new login shell or run `exec $SHELL -l` afterwards.
+When no trusted global policy exists and you are at a terminal, it offers to add the `git-safety` preset to `~/.yoke/config.toml` in observe mode and runs `yoke trust --global`, which shows the exact bytes and waits for you to type the confirmation phrase.
+`YOKE_YES=1` never answers that confirmation; without a terminal the script prints `yoke preset add git-safety --global` and `yoke trust --global` for you to run.
 These environment variables change what it does:
 
 | Variable | Effect |
 | --- | --- |
-| `YOKE_INSTALL_DIR` | Absolute install directory, default `~/.local/bin`. |
+| `YOKE_INSTALL_DIR` | Absolute install directory, default `/usr/local/bin` for root and `~/.local/bin` otherwise. |
 | `YOKE_VERSION` | Release tag to download, or to build with `--tag`, instead of the latest. |
 | `YOKE_DOWNLOAD_URL` | Base URL of a mirror that serves the release assets. |
 | `YOKE_FROM_SOURCE=1` | Build from source even when a release exists. |
+| `YOKE_YES=1` | Answer yes to every question, also without a terminal, for cloud-init or CI; trusting a policy still needs a human. |
 | `YOKE_INSTALL_RUST=1` | Install Rust without asking when Cargo is missing. |
+| `YOKE_NO_MODIFY_PATH=1` | Never add the install directory to shell startup files. |
 | `YOKE_AGENTS` | Agents to connect, such as `claude` or `claude,codex`, or `none`; by default each agent found on `PATH` or by its configuration directory. |
 
 To build from a local checkout instead, from the repository root:

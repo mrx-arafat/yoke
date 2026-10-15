@@ -47,9 +47,10 @@ While no release is published, installing builds from source, so you also need a
 curl -fsSL https://raw.githubusercontent.com/mrx-arafat/yoke/main/install.sh | bash
 ```
 
-The script installs `yoke` into `~/.local/bin` and never uses `sudo`.
-It downloads the release executable for your platform and refuses it unless its SHA-256 checksum matches, and while no release exists it builds `main` from source with Cargo, offering to install Rust if Cargo is missing.
-It then connects the Claude Code and Codex hooks it finds, creates or upgrades the state database once those hooks run the new binary, and runs `yoke health`.
+It works on macOS and on common Linux distributions, including a fresh server: run as root, it installs `yoke` into `/usr/local/bin`, and otherwise into `~/.local/bin`, offering to add that to your `PATH`.
+It downloads the release executable for your platform and refuses it unless its SHA-256 checksum matches, and while no release exists, or on Alpine and other musl systems, it builds `main` from source, offering to install a C compiler and Rust when they are missing.
+It uses `sudo` only to install a C compiler, after asking; every question defaults to yes, and `YOKE_YES=1` answers them without a terminal.
+It then connects the Claude Code and Codex hooks it finds, creates or upgrades the state database once those hooks run the new binary, offers a starter global policy for you to review and trust, and runs `yoke health`.
 Rerunning it upgrades in place, and if your hooks run a Yoke binary from another location, it moves them to the new one.
 Read [`install.sh`](install.sh) first if you prefer; [Getting started](docs/getting-started.md#1-build-and-install-the-executable) lists its settings, such as `YOKE_INSTALL_DIR` and `YOKE_AGENTS`.
 Then approve the hooks in Codex with `/hooks` and create a policy as in step 2.

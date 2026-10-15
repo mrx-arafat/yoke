@@ -4,18 +4,24 @@
 #   curl -fsSL https://raw.githubusercontent.com/mrx-arafat/yoke/main/install.sh | bash
 #
 # Downloads the release executable for this platform and verifies its SHA-256
-# checksum, or builds from source with Cargo when no release asset exists.
-# Then connects the agent hooks, creates or migrates the state database and
-# checks health. It never uses sudo.
+# checksum, or builds from source with Cargo when no release asset exists,
+# installing a C compiler and Rust first when they are missing. Then connects
+# the agent hooks, creates or migrates the state database, offers a starter
+# global policy for you to trust, and checks health. It uses sudo only to
+# install a C compiler, after asking. Every question defaults to yes.
 #
 # Environment:
-#   YOKE_INSTALL_DIR    absolute install directory (default: $HOME/.local/bin)
-#   YOKE_VERSION        release tag to install, for example v0.1.0 (default: latest)
-#   YOKE_DOWNLOAD_URL   base URL serving yoke-<target> and yoke-<target>.sha256
-#   YOKE_FROM_SOURCE=1  build from source with Cargo instead of downloading
-#   YOKE_INSTALL_RUST=1 install Rust with rustup without asking when Cargo is missing
-#   YOKE_AGENTS         agents to connect, for example claude,codex, or none
-#                       (default: each of claude and codex that is found)
+#   YOKE_INSTALL_DIR      absolute install directory
+#                         (default: /usr/local/bin for root, else $HOME/.local/bin)
+#   YOKE_VERSION          release tag to install, for example v0.1.0 (default: latest)
+#   YOKE_DOWNLOAD_URL     base URL serving yoke-<target> and yoke-<target>.sha256
+#   YOKE_FROM_SOURCE=1    build from source with Cargo instead of downloading
+#   YOKE_YES=1            answer yes to every question, also without a terminal;
+#                         trusting a policy still needs you to type the phrase
+#   YOKE_INSTALL_RUST=1   install Rust with rustup without asking when Cargo is missing
+#   YOKE_NO_MODIFY_PATH=1 never add the install directory to shell startup files
+#   YOKE_AGENTS           agents to connect, for example claude,codex, or none
+#                         (default: each of claude and codex that is found)
 
 say() { printf 'yoke-install: %s\n' "$*"; }
 err() { printf 'yoke-install: error: %s\n' "$*" >&2; }
@@ -29,6 +35,38 @@ cleanup() {
     if [ -n "$tmp" ]; then rm -rf "$tmp"; fi
 }
 
+has_tty() { (exec </dev/tty) 2>/dev/null; }
+
+# Ask $1 on the terminal, defaulting to yes. Returns 0 for yes, 1 for no and 2 without a
+# terminal. YOKE_YES=1 answers yes without asking.
+ask() {
+    if [ "${YOKE_YES:-}" = 1 ]; then
+        say "$1 yes (YOKE_YES=1)"
+        return 0
+    fi
+    has_tty || return 2
+    printf 'yoke-install: %s [Y/n] ' "$1" >/dev/tty
+    read -r answer </dev/tty || answer=
+    case $answer in
+        '' | y | Y | yes | Yes | YES) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Alpine and other musl systems cannot run the glibc release executables.
+is_musl() {
+    if command -v ldd >/dev/null 2>&1; then
+        case $(ldd --version 2>&1 || true) in
+            *musl*) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    for loader in /lib/ld-musl-*; do
+        if [ -e "$loader" ]; then return 0; fi
+    done
+    return 1
+}
+
 detect_target() {
     arch=$(uname -m)
     case $arch in
@@ -38,7 +76,10 @@ detect_target() {
     esac
     case $(uname -s) in
         Darwin) target=$arch-apple-darwin ;;
-        Linux) target=$arch-unknown-linux-gnu ;;
+        Linux)
+            target=$arch-unknown-linux-gnu
+            if is_musl; then target=$arch-unknown-linux-musl; fi
+            ;;
         *) die "unsupported operating system: $(uname -s) (Yoke supports macOS and Linux)" ;;
     esac
 }
@@ -120,6 +161,64 @@ download_release() {
     candidate=$tmp/$name
 }
 
+# Cargo links with the system C compiler, which also builds the bundled SQLite.
+ensure_cc() {
+    if [ "$(uname -s)" = Darwin ]; then
+        if xcode-select -p >/dev/null 2>&1; then return 0; fi
+        status=0
+        ask "building Yoke needs the Xcode Command Line Tools; open their installer with xcode-select --install?" || status=$?
+        if [ "$status" -eq 0 ]; then
+            xcode-select --install || true
+            die "rerun this installer when the Command Line Tools finish installing"
+        fi
+        die "building Yoke needs the Xcode Command Line Tools; run xcode-select --install, then rerun this installer"
+    fi
+    if command -v cc >/dev/null 2>&1; then return 0; fi
+    # Detect the package manager by its command, not by distribution name.
+    if command -v apt-get >/dev/null 2>&1; then
+        cc_cmd="apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential"
+    elif command -v dnf >/dev/null 2>&1; then
+        cc_cmd="dnf install -y gcc"
+    elif command -v yum >/dev/null 2>&1; then
+        cc_cmd="yum install -y gcc"
+    elif command -v zypper >/dev/null 2>&1; then
+        cc_cmd="zypper --non-interactive install gcc"
+    elif command -v pacman >/dev/null 2>&1; then
+        cc_cmd="pacman -Sy --noconfirm --needed gcc"
+    elif command -v apk >/dev/null 2>&1; then
+        cc_cmd="apk add build-base"
+    else
+        die "building Yoke needs a C compiler (cc); install gcc with your package manager, then rerun"
+    fi
+    if [ "$(id -u)" = 0 ]; then
+        how="as root"
+    elif command -v sudo >/dev/null 2>&1; then
+        how="with sudo"
+    else
+        die "building Yoke needs a C compiler; as root, run: $cc_cmd, then rerun"
+    fi
+    status=0
+    ask "building Yoke needs a C compiler; run '$cc_cmd' $how?" || status=$?
+    case $status in
+        0) ;;
+        1) die "a C compiler is required; install it $how with: $cc_cmd, then rerun" ;;
+        *) die "a C compiler is required; install it $how with: $cc_cmd, or rerun with YOKE_YES=1" ;;
+    esac
+    say "installing a C compiler $how; this takes a minute"
+    status=0
+    if [ "$(id -u)" = 0 ]; then
+        sh -c "$cc_cmd" >"$tmp/compiler.log" 2>&1 || status=$?
+    else
+        # shellcheck disable=SC2024 # the log is the user's own file in $tmp
+        sudo sh -c "$cc_cmd" >"$tmp/compiler.log" 2>&1 || status=$?
+    fi
+    if [ "$status" -ne 0 ]; then
+        cat "$tmp/compiler.log" >&2
+        die "installing a C compiler $how failed"
+    fi
+    command -v cc >/dev/null 2>&1 || die "cc is still missing after installing a C compiler"
+}
+
 ensure_cargo() {
     if command -v cargo >/dev/null 2>&1; then return 0; fi
     cargo_env=${CARGO_HOME:-$HOME/.cargo}/env
@@ -129,21 +228,22 @@ ensure_cargo() {
         if command -v cargo >/dev/null 2>&1; then return 0; fi
     fi
     rustup_cmd="curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path"
-    if [ "${YOKE_INSTALL_RUST:-}" = 1 ]; then
-        :
-    elif (exec </dev/tty) 2>/dev/null; then
-        printf 'yoke-install: building Yoke needs Cargo. Install Rust with rustup now? [y/N] ' >/dev/tty
-        read -r answer </dev/tty || answer=
-        case $answer in
-            y | Y | yes | YES) ;;
-            *) die "Cargo is required. Install Rust with: $rustup_cmd" ;;
-        esac
-    else
-        die "Cargo is required. Install Rust with: $rustup_cmd (or rerun with YOKE_INSTALL_RUST=1)"
+    status=0
+    if [ "${YOKE_INSTALL_RUST:-}" != 1 ]; then
+        ask "building Yoke needs Cargo; install Rust with rustup?" || status=$?
     fi
-    say "installing Rust with rustup"
+    case $status in
+        0) ;;
+        1) die "Cargo is required. Install Rust with: $rustup_cmd" ;;
+        *) die "Cargo is required. Install Rust with: $rustup_cmd (or rerun with YOKE_YES=1)" ;;
+    esac
+    say "installing Rust with rustup into ${CARGO_HOME:-$HOME/.cargo}; this takes a minute"
     fetch https://sh.rustup.rs "$tmp/rustup.sh" || die "could not download https://sh.rustup.rs"
-    sh "$tmp/rustup.sh" -y --profile minimal --no-modify-path || die "rustup failed"
+    # rustup prints shell setup advice that this script follows itself, so keep its log for errors.
+    if ! sh "$tmp/rustup.sh" -y --profile minimal --no-modify-path >"$tmp/rustup.log" 2>&1; then
+        cat "$tmp/rustup.log" >&2
+        die "rustup failed"
+    fi
     # shellcheck disable=SC1090 # rustup's environment script
     . "$cargo_env"
     command -v cargo >/dev/null 2>&1 || die "cargo is still not on PATH after installing Rust"
@@ -151,6 +251,7 @@ ensure_cargo() {
 
 # Sets $candidate to an executable built by cargo install into a temporary root.
 build_from_source() {
+    ensure_cc
     ensure_cargo
     set -- --locked --git https://github.com/mrx-arafat/yoke --root "$tmp/root"
     if [ -n "${YOKE_VERSION:-}" ]; then set -- "$@" --tag "$YOKE_VERSION"; fi
@@ -182,8 +283,8 @@ connect_agents() {
         if command -v claude >/dev/null 2>&1 || [ -d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ]; then agents=claude; fi
         if command -v codex >/dev/null 2>&1 || [ -d "${CODEX_HOME:-$HOME/.codex}" ]; then agents=${agents:+$agents,}codex; fi
         if [ -z "$agents" ]; then
-            say "found neither Claude Code nor Codex; skipping hooks"
-            say "after installing one, run: yoke install --agent claude,codex"
+            say "found neither Claude Code nor Codex, so no hooks were connected"
+            say "after installing one, rerun this installer to connect its hooks"
             return 0
         fi
     fi
@@ -213,6 +314,84 @@ connect_agents() {
     esac
 }
 
+# Append $path_line to the startup file $1 unless it already has it.
+add_path_line() {
+    if [ -f "$1" ]; then
+        while IFS= read -r existing || [ -n "$existing" ]; do
+            if [ "$existing" = "$path_line" ]; then
+                say "$1 already adds $dir to PATH"
+                return 0
+            fi
+        done <"$1"
+    fi
+    printf '\n%s\n' "$path_line" >>"$1" || die "cannot write $1"
+    say "added $dir to PATH in $1"
+}
+
+# Sets $yoke_cmd to how the user runs Yoke, adding $dir to PATH for new shells when asked.
+setup_path() {
+    yoke_cmd=yoke
+    case ":$PATH:" in
+        *":$dir:"*)
+            found=$(command -v yoke || true)
+            if [ "$found" != "$bin" ]; then
+                say "warning: yoke on your PATH is $found, which shadows $bin"
+                say "remove it (cargo uninstall yoke-cli if Cargo installed it) or put $dir first on PATH"
+                yoke_cmd=$bin
+            fi
+            return 0
+            ;;
+    esac
+    path_line="export PATH=\"$dir:\$PATH\"  # added by yoke install.sh"
+    files="$HOME/.bashrc"
+    case ${SHELL:-} in */zsh) files="$files and $HOME/.zshrc" ;; esac
+    status=1
+    if [ "${YOKE_NO_MODIFY_PATH:-}" != 1 ]; then
+        status=0
+        ask "$dir is not on your PATH; add it in $files?" || status=$?
+    fi
+    if [ "$status" -ne 0 ]; then
+        yoke_cmd=$bin
+        say "$dir is not on your PATH; to add it, put this line in your shell startup file:"
+        say "  $path_line"
+        return 0
+    fi
+    add_path_line "$HOME/.bashrc"
+    case ${SHELL:-} in */zsh) add_path_line "$HOME/.zshrc" ;; esac
+    say "new login shells find yoke; in this shell, run: exec \$SHELL -l"
+}
+
+# Offer a starter global policy when none is trusted. Only a human at the terminal can
+# trust it, by typing the confirmation phrase; YOKE_YES never answers that.
+activate() {
+    report=$("$bin" health 2>&1) || true
+    case $report in
+        *'/.yoke/config.toml",true,'*) return 0 ;;
+    esac
+    status=2
+    if has_tty; then
+        status=0
+        ask "no trusted global policy yet; add the git-safety preset in observe mode, which records but blocks nothing, and review it for trust?" || status=$?
+    fi
+    if [ "$status" -eq 0 ]; then
+        "$bin" preset add git-safety --global || status=1
+    fi
+    if [ "$status" -eq 0 ]; then
+        say "review the policy below; type trust to approve it, or anything else to skip"
+        "$bin" trust --global </dev/tty >/dev/tty 2>&1 || true
+        report=$("$bin" health 2>&1) || true
+        case $report in
+            *'/.yoke/config.toml",true,'*)
+                say "trusted the global policy; Yoke now records what it would deny in every project"
+                return 0
+                ;;
+        esac
+    fi
+    say "to activate Yoke for every project, review and trust a starter global policy in your own terminal:"
+    say "  $yoke_cmd preset add git-safety --global"
+    say "  $yoke_cmd trust --global"
+}
+
 main() {
     set -eu
     tmp=
@@ -225,14 +404,25 @@ main() {
         *[!A-Za-z0-9._-]* | [!A-Za-z0-9]*) die "invalid YOKE_VERSION: $YOKE_VERSION" ;;
     esac
     detect_target
-    dir=${YOKE_INSTALL_DIR:-$HOME/.local/bin}
+    if [ "$(id -u)" = 0 ]; then
+        dir=${YOKE_INSTALL_DIR:-/usr/local/bin}
+    else
+        dir=${YOKE_INSTALL_DIR:-$HOME/.local/bin}
+    fi
     case $dir in /*) ;; *) die "YOKE_INSTALL_DIR must be an absolute path: $dir" ;; esac
     bin=$dir/yoke
     mkdir -p "$dir" || die "cannot create $dir"
     tmp=$(mktemp -d) || die "cannot create a temporary directory"
     say "installing Yoke for $target into $dir"
 
-    if [ "${YOKE_FROM_SOURCE:-}" = 1 ]; then
+    from_source=${YOKE_FROM_SOURCE:-}
+    case $target in
+        *-musl)
+            say "this system uses musl libc and release executables need glibc, so Yoke is built from source"
+            from_source=1
+            ;;
+    esac
+    if [ "$from_source" = 1 ]; then
         build_from_source
     else
         status=0
@@ -259,6 +449,8 @@ main() {
     else
         say "left the state database as it is, because no hooks were connected to $bin"
     fi
+    setup_path
+    if [ "$connected" = 1 ]; then activate; fi
     say "checking health: yoke health"
     status=0
     "$bin" health || status=$?
@@ -268,23 +460,11 @@ main() {
         *) die "yoke health failed with exit status $status" ;;
     esac
 
-    case ":$PATH:" in
-        *":$dir:"*)
-            found=$(command -v yoke || true)
-            if [ "$found" != "$bin" ]; then
-                say "warning: yoke on your PATH is $found, which shadows $bin"
-                say "remove it (cargo uninstall yoke-cli if Cargo installed it) or put $dir first on PATH"
-            fi
-            ;;
-        *)
-            say "$dir is not on your PATH. Add it with one of:"
-            say "  bash: echo 'export PATH=\"$dir:\$PATH\"' >> ~/.bashrc"
-            say "  zsh:  echo 'export PATH=\"$dir:\$PATH\"' >> ~/.zshrc"
-            ;;
-    esac
     say "next steps:"
-    say "  1. in Codex, approve the Yoke hooks with /hooks"
-    say "  2. in each project to govern, run yoke init, review yoke.toml, then yoke trust from your own terminal"
+    if [ "$connected" = 1 ]; then
+        case ,$agents, in *,codex,*) say "  - in Codex, approve the Yoke hooks with /hooks" ;; esac
+    fi
+    say "  - in each project to govern, run $yoke_cmd init, review yoke.toml, then $yoke_cmd trust from your own terminal"
 }
 
 main "$@"

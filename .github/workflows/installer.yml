@@ -1,0 +1,85 @@
+name: Installer
+
+on:
+  push:
+    paths:
+      - install.sh
+      - .github/workflows/installer.yml
+  pull_request:
+    paths:
+      - install.sh
+      - .github/workflows/installer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-root:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:24.04
+          - ubuntu:22.04
+          - debian:12
+          - fedora:41
+          - rockylinux:9
+          - amazonlinux:2023
+          - opensuse/leap:15.6
+          - alpine:3.20
+          - archlinux:latest
+    # A fresh server: root, no compiler, no Rust, no terminal.
+    container: ${{ matrix.image }}
+    defaults:
+      run:
+        shell: sh
+    steps:
+      # Test scaffolding only: minimal images lack curl, which the one-line install needs.
+      # The installer itself must install the compiler and Rust.
+      - name: Install curl as on a minimal server
+        run: |
+          if ! command -v curl >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get update -qq && apt-get install -y -qq curl ca-certificates
+            elif command -v dnf >/dev/null 2>&1; then
+              dnf install -y curl ca-certificates
+            elif command -v zypper >/dev/null 2>&1; then
+              zypper --non-interactive install curl ca-certificates
+            elif command -v pacman >/dev/null 2>&1; then
+              pacman -Sy --noconfirm --needed curl ca-certificates
+            elif command -v apk >/dev/null 2>&1; then
+              apk add curl ca-certificates
+            fi
+          fi
+      # This commit's install.sh, fetched with curl because JavaScript actions such as
+      # checkout do not run in every minimal image.
+      - name: Install Yoke as root with every question answered yes
+        env:
+          REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          YOKE_YES: "1"
+        run: |
+          mkdir -p "$HOME/.claude"
+          curl -fsSL "https://raw.githubusercontent.com/$REPOSITORY/$COMMIT/install.sh" -o /tmp/install.sh
+          if command -v bash >/dev/null 2>&1; then bash </tmp/install.sh; else sh </tmp/install.sh; fi
+      - name: Check the executable, the Claude hooks and the state schema
+        run: |
+          test "$(command -v yoke)" = /usr/local/bin/yoke
+          yoke --version
+          grep -F "/usr/local/bin/yoke' run-hook --agent claude PreToolUse" "$HOME/.claude/settings.json"
+          yoke health >/tmp/health.txt || true
+          cat /tmp/health.txt
+          # The installer migrates the database to the schema this executable supports.
+          line=$(grep '^state:' /tmp/health.txt)
+          schema=${line##* schema=}
+          schema=${schema%% *}
+          supported=${line##* supported=}
+          test -n "$schema" && test "$schema" = "$supported"
