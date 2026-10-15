@@ -40,6 +40,19 @@ It is one binary and one SQLite file on your machine, with no daemon and no tele
 Yoke targets macOS and Linux, and its release workflow builds both for x86_64 and aarch64.
 You need Git, a stable Rust toolchain, and Claude Code or Codex.
 
+**Install or upgrade in one line.**
+It builds `main`, connects both agents, creates or upgrades the state database, and checks the hooks:
+
+```sh
+cargo install --locked --git https://github.com/mrx-arafat/yoke yoke-cli && yoke install --agent claude,codex && yoke log --limit 1 >/dev/null && yoke health
+```
+
+Use `--agent claude` or `--agent codex` if you run only one agent.
+Rerunning it is safe: an unchanged installation reports no changes, and after an upgrade its `yoke log` step migrates the state database.
+If your hooks still point at a Yoke binary in another location, run `yoke uninstall --agent claude,codex` with the new binary first, because the install refuses with `executable changed` until you do.
+Then approve the hooks in Codex with `/hooks` and create a policy as in step 2.
+The steps below do the same thing one at a time.
+
 **1. Build and install from source**, because no binary release exists yet:
 
 ```sh

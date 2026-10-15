@@ -20,6 +20,7 @@ cargo install --path crates/yoke-cli --locked
 yoke --help
 ```
 
+To install without a checkout, build straight from GitHub instead: `cargo install --locked --git https://github.com/mrx-arafat/yoke yoke-cli`.
 Cargo installs the executable into its configured binary directory, normally `~/.cargo/bin`.
 Ensure that directory is on your PATH.
 The remaining commands run from the project you want Yoke to govern, which need not be Yoke's own repository.
