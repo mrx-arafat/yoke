@@ -43,6 +43,13 @@ Add the fewest behavioral regressions necessary and keep external agent credenti
 Hook changes need real payload/output checks; UI changes need browser interaction and a subsequent snapshot of the resulting state.
 Unit checks alone do not establish agent integration or rendered UI correctness.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull request.
+It checks formatting, runs clippy with warnings denied, runs the full `cargo test --workspace --locked` suite on Ubuntu and macOS, enforces `deny.toml` with `cargo deny check`, validates `CHANGELOG.md`, and runs the release packaging unit tests.
+Tests marked `#[ignore]` (the synthetic soak trial and the real-reviewer checks) stay out of CI and run only when invoked explicitly with `--ignored`.
+Local runs stay focused on the smallest tests covering a change; CI is where the full suite runs.
+
 ## Documentation and generated files
 
 Update user guides when commands, configuration, or documented behavior change.
