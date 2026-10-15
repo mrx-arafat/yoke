@@ -8,7 +8,11 @@ use yoke_core::plan::{self, EvidenceStatus, RequirementStatus, TaskState};
 use yoke_core::store::Store;
 
 fn badge(class: &str, label: &str) -> String {
-    format!(r#"<span class="badge {class}">{}</span>"#, escape(label))
+    format!(
+        r#"<span class="badge {}">{}</span>"#,
+        escape(class),
+        escape(label)
+    )
 }
 
 /// One plan: contract, progress, feedback, transitions and check evidence.

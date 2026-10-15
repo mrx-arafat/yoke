@@ -17,6 +17,7 @@ It runs as a command rather than a background daemon; the optional console runs 
 | [Development handoff](next-steps.md) | Resume from the hardening checkpoint and complete outstanding acceptance |
 | [Upgrade notes](upgrade-notes.md) | See every behaviour change and upgrade step before replacing a binary |
 | [Trials](trials.md) | Collect and record the observe-day and enforce-week trial evidence |
+| [Console acceptance](console-acceptance.md) | Generate disposable fixtures and run the human console acceptance pass with an evidence template |
 | [Contributing](../CONTRIBUTING.md) | Navigate the code and validate a focused change |
 
 ## Mental model

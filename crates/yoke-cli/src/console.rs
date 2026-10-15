@@ -254,9 +254,9 @@ fn serve(
         if path != "/actions" {
             return respond(request, 404, "text/plain", "Unknown action endpoint");
         }
-        let body = std::str::from_utf8(request.body())?;
         let result = (|| {
-            ensure!(body.len() <= 16384, "Action request too large");
+            ensure!(request.body().len() <= 16384, "Action request too large");
+            let body = std::str::from_utf8(request.body()).context("Action body must be UTF-8")?;
             actions.apply(store, console, serde_json::from_str(body)?)
         })();
         return match result {

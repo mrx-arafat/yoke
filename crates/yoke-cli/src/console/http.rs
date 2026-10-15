@@ -492,4 +492,41 @@ mod tests {
         drop(permits);
         assert!(Slot::acquire(&active).is_some());
     }
+
+    #[test]
+    fn loopback_port_is_exclusive_until_drop_and_only_get_and_post_parse() {
+        let server = Server::bind_loopback().unwrap();
+        let address = server.local_addr().unwrap();
+        assert_eq!(
+            address.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert!(
+            TcpListener::bind(address).is_err(),
+            "a second listener took the console port"
+        );
+        for raw in [
+            "HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "OPTIONS * HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "PUT / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            "DELETE / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET / HTTP/1.1\r\n\r\n",
+            "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n",
+            "GET http://localhost/ HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ] {
+            let mut client = TcpStream::connect(address).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            client.write_all(raw.as_bytes()).unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 400 "), "{raw:?}: {response}");
+        }
+        drop(server);
+        assert!(
+            TcpListener::bind(address).is_ok(),
+            "the console port stayed bound after shutdown"
+        );
+    }
 }

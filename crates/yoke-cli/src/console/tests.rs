@@ -319,3 +319,518 @@ fn trust_page_shows_the_trusted_bytes_after_the_disk_file_is_deleted() {
     assert!(!html.contains("Disk changed"));
     assert!(html.contains("<p>global / Not present</p>"), "{html}");
 }
+
+/// Drives `serve` through the real loopback transport, as a browser would.
+struct Live {
+    server: http::Server,
+    host: String,
+    c: Console,
+    store: Store,
+    actions: actions::Actions,
+    connections: Arc<AtomicUsize>,
+}
+
+impl Live {
+    fn new(temp: &std::path::Path) -> Self {
+        let project = temp.canonicalize().unwrap();
+        let database = project.join("state.db");
+        let store = Store::open(&database).unwrap();
+        let server = http::Server::bind_loopback().unwrap();
+        let host = server.local_addr().unwrap().to_string();
+        let c = Console {
+            home: project.clone(),
+            project,
+            database,
+            token: random_token().unwrap(),
+            csrf: random_token().unwrap(),
+            host: host.clone(),
+        };
+        Self {
+            server,
+            host,
+            c,
+            store,
+            actions: actions::Actions::default(),
+            connections: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn port(&self) -> &str {
+        self.host.rsplit(':').next().unwrap()
+    }
+
+    /// One request and its full response; `extra` are header lines without CRLF.
+    fn exchange(&mut self, method: &str, target: &str, extra: &[String], body: &[u8]) -> String {
+        use std::io::{Read, Write};
+        let mut client = std::net::TcpStream::connect(&self.host).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut raw = format!("{method} {target} HTTP/1.1\r\n");
+        if !extra
+            .iter()
+            .any(|line| line.to_ascii_lowercase().starts_with("host:"))
+        {
+            raw.push_str(&format!("Host: {}\r\n", self.host));
+        }
+        for line in extra {
+            raw.push_str(line);
+            raw.push_str("\r\n");
+        }
+        if method == "POST" {
+            raw.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        raw.push_str("\r\n");
+        client.write_all(raw.as_bytes()).unwrap();
+        client.write_all(body).unwrap();
+        let request = self.server.recv().unwrap();
+        let _ = serve(
+            &self.c,
+            &self.store,
+            &mut self.actions,
+            &self.connections,
+            request,
+        );
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        response
+    }
+}
+
+#[test]
+fn serve_rejects_foreign_hosts_traversal_and_unsafe_posts_and_sets_security_headers() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut live = Live::new(temp.path());
+    let base = launch::base(&live.c);
+    let port = live.port().to_owned();
+    let cookie = format!("Cookie: yoke_{port}={}", live.c.token);
+    let secure = |response: &str| {
+        let head = response.split("\r\n\r\n").next().unwrap().to_owned();
+        for required in [
+            "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'\r\n",
+            "X-Content-Type-Options: nosniff\r\n",
+            "X-Frame-Options: DENY\r\n",
+            "Cache-Control: no-store\r\n",
+            "Referrer-Policy: no-referrer\r\n",
+        ] {
+            assert!(head.contains(required), "missing {required:?} in {head}");
+        }
+        assert!(!head.contains("Set-Cookie"), "{head}");
+    };
+    // DNS rebinding: a foreign Host never reaches a page, even with the session cookie.
+    let (local, spoof) = (
+        format!("localhost:{port}"),
+        format!("127.0.0.1.evil.example:{port}"),
+    );
+    for host in ["evil.example", local.as_str(), spoof.as_str()] {
+        let response = live.exchange(
+            "GET",
+            &format!("{base}decisions"),
+            &[format!("Host: {host}"), cookie.clone()],
+            b"",
+        );
+        assert!(response.starts_with("HTTP/1.1 403 "), "{host}: {response}");
+        secure(&response);
+    }
+    // Path handling: no route is file-backed, so traversal in any spelling is an unknown page.
+    for target in [
+        format!("{base}../assets/console.css"),
+        format!("{base}%2e%2e/%2e%2e/etc/passwd"),
+        format!("{base}assets\\..\\console.css"),
+        format!("{base}assets/../../etc/passwd"),
+        format!("{base}decisions/../assets/console.css"),
+        format!("{base}./decisions"),
+        format!("{base}Decisions"),
+        format!("{base}assets/console.css/.."),
+    ] {
+        let response = live.exchange("GET", &target, std::slice::from_ref(&cookie), b"");
+        assert!(
+            response.starts_with("HTTP/1.1 404 ") && response.ends_with("Page not found"),
+            "{target}: {response}"
+        );
+    }
+    // Every page carries the hardening headers and hands console.js its CSRF token.
+    let response = live.exchange(
+        "GET",
+        &format!("{base}decisions"),
+        std::slice::from_ref(&cookie),
+        b"",
+    );
+    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+    assert!(response.contains("Content-Type: text/html; charset=utf-8\r\n"));
+    assert!(response.contains(&format!(
+        r#"<meta name="yoke-csrf" content="{}">"#,
+        live.c.csrf
+    )));
+    secure(&response);
+    // The event stream sits behind the same session check and never opens a slot for strangers.
+    let response = live.exchange("GET", &format!("{base}events"), &[], b"");
+    assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+    assert_eq!(
+        live.connections.load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    // POST needs the cookie, the exact Origin, the CSRF header and JSON, on the action route only.
+    let origin = format!("Origin: http://{}", live.host);
+    let csrf = format!("X-Yoke-CSRF: {}", live.c.csrf);
+    let json = "Content-Type: application/json".to_owned();
+    let body = br#"{"action":"approve","ticket":"nope"}"#;
+    let actions = format!("{base}actions");
+    for (name, extra) in [
+        (
+            "no cookie",
+            vec![origin.clone(), csrf.clone(), json.clone()],
+        ),
+        (
+            "no csrf",
+            vec![cookie.clone(), origin.clone(), json.clone()],
+        ),
+        (
+            "wrong csrf",
+            vec![
+                cookie.clone(),
+                origin.clone(),
+                json.clone(),
+                "X-Yoke-CSRF: csrf".into(),
+            ],
+        ),
+        (
+            "foreign origin",
+            vec![
+                cookie.clone(),
+                format!("Origin: http://localhost:{port}"),
+                csrf.clone(),
+                json.clone(),
+            ],
+        ),
+        (
+            "null origin",
+            vec![
+                cookie.clone(),
+                "Origin: null".into(),
+                csrf.clone(),
+                json.clone(),
+            ],
+        ),
+        (
+            "no origin",
+            vec![cookie.clone(), csrf.clone(), json.clone()],
+        ),
+        (
+            "form content type",
+            vec![
+                cookie.clone(),
+                origin.clone(),
+                csrf.clone(),
+                "Content-Type: application/x-www-form-urlencoded".into(),
+            ],
+        ),
+        (
+            "cross-site fetch metadata",
+            vec![
+                cookie.clone(),
+                origin.clone(),
+                csrf.clone(),
+                json.clone(),
+                "Sec-Fetch-Site: cross-site".into(),
+            ],
+        ),
+    ] {
+        let response = live.exchange("POST", &actions, &extra, body);
+        assert!(response.starts_with("HTTP/1.1 403 "), "{name}: {response}");
+        secure(&response);
+    }
+    let full = vec![cookie.clone(), origin.clone(), csrf.clone(), json.clone()];
+    let response = live.exchange("POST", &format!("{base}decisions"), &full, body);
+    assert!(response.starts_with("HTTP/1.1 404 "), "{response}");
+    let response = live.exchange("POST", &actions, &full, body);
+    assert!(response.starts_with("HTTP/1.1 409 "), "{response}");
+    assert!(response.contains("Content-Type: application/json\r\n"));
+    secure(&response);
+    let payload: serde_json::Value =
+        serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(payload["error"]["code"], "action_failed");
+    assert_eq!(
+        payload["error"]["message"],
+        "Approval expired or already used; review the current header again."
+    );
+    // The action body cap applies before any parsing.
+    let huge = format!(r#"{{"action":"{}"}}"#, "a".repeat(16400));
+    let response = live.exchange("POST", &actions, &full, huge.as_bytes());
+    assert!(
+        response.starts_with("HTTP/1.1 409 ") && response.contains("Action request too large"),
+        "{response}"
+    );
+    // A non-UTF-8 action body gets an answer instead of a dropped connection.
+    let response = live.exchange("POST", &actions, &full, &[0xff, 0xfe]);
+    assert!(
+        response.starts_with("HTTP/1.1 409 ") && response.contains("Action body must be UTF-8"),
+        "{response}"
+    );
+    // Reflected request content passes through redaction before it is echoed.
+    let leak = br#"{"action":"approve","ghp_0123456789abcdefghijklmnop":1}"#;
+    let response = live.exchange("POST", &actions, &full, leak);
+    assert!(
+        response.starts_with("HTTP/1.1 409 ")
+            && response.contains("[REDACTED]")
+            && !response.contains("ghp_0123"),
+        "{response}"
+    );
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+#[test]
+fn hostile_records_render_escaped_and_secrets_redacted_on_every_page() {
+    use yoke_core::{memory, plan, store::DecisionRecord};
+    const SCRIPT: &str = "<script>alert(1)</script>";
+    const BREAKOUT: &str = "\"><img src=x onerror=alert(2)>";
+    const CLOSER: &str = "</script><script>alert(3)</script>";
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join(".yoke")).unwrap();
+    // The project folder name is hostile too: it reaches titles, pickers and resume commands.
+    let project = root.join(BREAKOUT);
+    std::fs::create_dir_all(&project).unwrap();
+    let project_str = project.to_string_lossy().into_owned();
+    let database = home.join(".yoke/state.db");
+    let store = Store::open(&database).unwrap();
+    let now = unix_now();
+    store
+        .record_decision(
+            &DecisionRecord {
+                ts: now,
+                session_id: CLOSER.into(),
+                agent: "claude".into(),
+                project: project_str.clone(),
+                event: "pre_tool_use".into(),
+                tool: Some(BREAKOUT.into()),
+                mode: "enforce".into(),
+                outcome: "error".into(),
+                reason: Some(format!("{SCRIPT} token=sk-live-0123456789")),
+                gates: serde_json::json!([{"gate": SCRIPT, "api_key": "hunter2-gate"}]),
+                payload: serde_json::json!({"command": SCRIPT, "authorization": "Bearer hunter2-payload"})
+                    .to_string(),
+            },
+            4096,
+        )
+        .unwrap();
+    // One memory is a CommonMark HTML block, the other carries inline HTML, a link and an image.
+    for text in [
+        SCRIPT.to_owned(),
+        format!(
+            "Note {SCRIPT} [x](javascript:alert(4)) ![y](https://evil.invalid/a.png) {BREAKOUT}"
+        ),
+    ] {
+        memory::remember(&store, &project_str, &text, false, now).unwrap();
+    }
+    let transcript = root.join("transcript.jsonl");
+    let row = serde_json::json!({"type":"assistant","sessionId":CLOSER,"timestamp":"2026-10-13T18:30:00Z","message":{"id":"m","model":BREAKOUT,"usage":{"input_tokens":7,"output_tokens":3}}});
+    std::fs::write(&transcript, format!("{row}\n")).unwrap();
+    yoke_core::usage::ingest(&store, "claude", CLOSER, &project_str, &transcript).unwrap();
+    let created = plan::create(&store, &project, ".yoke/plans", "hostile", "Hostile").unwrap();
+    std::fs::write(
+        &created.file,
+        format!("+++\ntitle='{SCRIPT}'\n[[check]]\nname='diff'\nrun='git diff --check'\n+++\n\n# Body\n{BREAKOUT}\n[x](javascript:alert(4))\n"),
+    )
+    .unwrap();
+    plan::comment(
+        &store,
+        &project,
+        "hostile",
+        "plan",
+        &format!("{SCRIPT} {BREAKOUT}"),
+        plan::Actor::Agent,
+    )
+    .unwrap();
+    let c = Console {
+        home,
+        project: project.clone(),
+        database,
+        token: random_token().unwrap(),
+        csrf: "csrf".into(),
+        host: "127.0.0.1:1".into(),
+    };
+    let mut actions = actions::Actions::default();
+    let confirmation = actions
+        .apply(
+            &store,
+            &c,
+            serde_json::from_value(
+                serde_json::json!({"action":"prepare-approval","slug":"hostile"}),
+            )
+            .unwrap(),
+        )
+        .unwrap()["data"]["confirmation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let params = BTreeMap::new();
+    let detail = BTreeMap::from([("slug".to_owned(), "hostile".to_owned())]);
+    let escaped_script = "&lt;script&gt;alert(1)&lt;/script&gt;";
+    let escaped_breakout = "&quot;&gt;&lt;img src=x onerror=alert(2)&gt;";
+    let escaped_closer = "&lt;/script&gt;&lt;script&gt;alert(3)&lt;/script&gt;";
+    let rendered = [
+        (
+            "decisions",
+            pages::decisions(&store, &c, &params).unwrap(),
+            escaped_script,
+        ),
+        (
+            "sessions",
+            views::sessions(&store, &c, &params).unwrap(),
+            escaped_closer,
+        ),
+        (
+            "plans",
+            views::plans(&store, &c, &params).unwrap(),
+            "hostile",
+        ),
+        (
+            "plan detail",
+            views::plans(&store, &c, &detail).unwrap(),
+            escaped_script,
+        ),
+        (
+            "memory",
+            views::memories(&store, &c, &params).unwrap(),
+            escaped_script,
+        ),
+        (
+            "usage",
+            usage::page(&store, &c, &params).unwrap(),
+            escaped_breakout,
+        ),
+        (
+            "notifications",
+            notifications::page(&store, &c, &params).unwrap(),
+            escaped_script,
+        ),
+        (
+            "projects",
+            projects::overview(&store, &c).unwrap(),
+            escaped_breakout,
+        ),
+        ("settings", settings::page(&store, &c).unwrap(), "settings"),
+        ("trust", views::trust(&store, &c).unwrap(), "trust"),
+        (
+            "shell",
+            render::shell(&c, "decisions", "", 0),
+            escaped_breakout,
+        ),
+        ("approval dialog", confirmation, escaped_script),
+    ];
+    for (name, html, expected) in &rendered {
+        assert!(
+            html.contains(expected),
+            "{name} skipped the hostile record: {html}"
+        );
+        for raw in [
+            SCRIPT,
+            "<img src=x",
+            "\"><img",
+            "<script>alert(3)",
+            "javascript:",
+            "sk-live-",
+            "hunter2",
+        ] {
+            assert!(!html.contains(raw), "{name} leaks {raw:?}: {html}");
+        }
+    }
+    assert!(rendered[0].1.contains("[REDACTED]"));
+    assert!(
+        rendered[11].1.contains(escaped_breakout),
+        "comment text reaches the dialog escaped"
+    );
+}
+
+#[test]
+fn approval_ticket_binds_to_the_displayed_header_and_current_revision() {
+    use yoke_core::plan;
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().canonicalize().unwrap();
+    let database = project.join("state.db");
+    let store = Store::open(&database).unwrap();
+    let c = Console {
+        home: project.clone(),
+        project: project.clone(),
+        database,
+        token: "token".into(),
+        csrf: "csrf".into(),
+        host: "127.0.0.1:1".into(),
+    };
+    let created = plan::create(&store, &project, ".yoke/plans", "bind", "Bind").unwrap();
+    let header = |title: &str| {
+        format!(
+            "+++\ntitle='{title}'\n[[check]]\nname='diff'\nrun='git diff --check'\n+++\n\n# Bind\n"
+        )
+    };
+    std::fs::write(&created.file, header("First")).unwrap();
+    let mut actions = actions::Actions::default();
+    let apply = |actions: &mut actions::Actions, value: serde_json::Value| {
+        actions.apply(&store, &c, serde_json::from_value(value).unwrap())
+    };
+    let ticket = |prepared: &serde_json::Value| {
+        let html = prepared["data"]["confirmation"].as_str().unwrap();
+        html.split("data-ticket=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let prepare = serde_json::json!({"action":"prepare-approval","slug":"bind"});
+    let prepared = apply(&mut actions, prepare.clone()).unwrap();
+    assert!(prepared["data"]["confirmation"]
+        .as_str()
+        .unwrap()
+        .contains("SHA-256"));
+    let first = ticket(&prepared);
+    // The agent edits the contract after the human opened the confirmation.
+    std::fs::write(&created.file, header("Second")).unwrap();
+    let approve = |ticket: &str| serde_json::json!({"action":"approve","ticket":ticket});
+    let refused = apply(&mut actions, approve(&first)).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("plan header changed after it was displayed"),
+        "{refused:#}"
+    );
+    assert_eq!(plan::get(&store, &project, "bind").unwrap().state, "draft");
+    // A refused ticket is spent, so the human has to review the new header.
+    let spent = apply(&mut actions, approve(&first)).unwrap_err();
+    assert!(
+        spent
+            .to_string()
+            .contains("Approval expired or already used"),
+        "{spent:#}"
+    );
+    let second = ticket(&apply(&mut actions, prepare.clone()).unwrap());
+    apply(&mut actions, approve(&second)).unwrap();
+    let approved = plan::get(&store, &project, "bind").unwrap();
+    assert_eq!(approved.state, "approved");
+    assert!(approved
+        .approved_header
+        .as_deref()
+        .unwrap()
+        .contains("title='Second'"));
+    // A ticket prepared before another transition is refused by the revision guard.
+    let stale = ticket(&apply(&mut actions, prepare).unwrap());
+    plan::cancel(&store, &project, "bind", "superseded").unwrap();
+    let concurrent = apply(&mut actions, approve(&stale)).unwrap_err();
+    assert!(
+        concurrent.to_string().contains("plan changed concurrently"),
+        "{concurrent:#}"
+    );
+    assert_eq!(
+        plan::get(&store, &project, "bind").unwrap().state,
+        "cancelled"
+    );
+}
