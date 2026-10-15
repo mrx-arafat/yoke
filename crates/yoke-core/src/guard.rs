@@ -970,7 +970,9 @@ mod tests {
             ("git status", false),
             ("sqlite3 tests/fixtures/other.db .tables", false),
             ("rm -rf .", false),
-            ("cd /tmp && rm -rf .", false),
+            // Not /tmp: tests create their home under it on Linux, and deleting an ancestor of
+            // ~/.yoke is denied by design.
+            ("cd /opt && rm -rf .", false),
             ("echo x 2>&1 | tee log.txt", false),
             ("cat list.txt | xargs rm -f", false),
             (r"find target -name '*.o' -exec rm {} ;", false),
