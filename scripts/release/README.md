@@ -32,4 +32,6 @@ uv run --no-project python -m unittest discover -s scripts/release -p 'test_*.py
 
 The packaging command refuses an existing output directory.
 No script tags, pushes, updates an installed executable, or publishes a release.
+Before pushing a release tag, run the read-only preflight: `uv run --no-project python scripts/release/preflight.py --tag vMAJOR.MINOR.PATCH`.
+It prints PASS, FAIL or SKIP per machine-checkable item and lists the human gates it cannot check.
 The four-platform workflow and release-upload permissions require a future authorized GitHub run.
