@@ -16,7 +16,8 @@ It runs as a command rather than a background daemon; the optional console runs 
 | [Uninstalling](uninstalling.md) | Remove the hooks, the executable, and Yoke's files in the right order |
 | [Releasing](releasing.md) | Take a release candidate to a published release, and withdraw a bad one |
 | [Release acceptance](release-acceptance.md) | See the gate status and the evidence for builds, checksums, notices, install and update |
-| [Development handoff](next-steps.md) | Resume from the hardening checkpoint and complete outstanding acceptance |
+| [Field testing](field-testing.md) | Read what the first field test covered, how Yoke behaves in real use, every finding and its status, and how to repeat the test |
+| [Development handoff](next-steps.md) | Resume from the current state of `main` and complete the open field test items and outstanding acceptance |
 | [Upgrade notes](upgrade-notes.md) | See every behaviour change and upgrade step before replacing a binary |
 | [Trials](trials.md) | Collect and record the observe-day and enforce-week trial evidence |
 | [Console acceptance](console-acceptance.md) | Generate disposable fixtures and run the human console acceptance pass with an evidence template |

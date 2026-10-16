@@ -17,6 +17,12 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 
 ## Storage and upgrade
 
+### Redaction masks URL passwords and leaves prose readable
+
+- What changed: redaction now masks passwords in URLs such as `scheme://user:PASSWORD@host`, masks the whole value of a `key: value` line, and no longer masks ordinary words after "token", "secret" or "password" or names such as `ask-codex`.
+- Who is affected: anyone who stored notes or ran hooks with credentials in URLs before this change.
+- What to do: rows stored by earlier versions keep their original text, so review old notes with `yoke recall` and run `yoke forget <id>` on any that hold a credential.
+
 ### Notification project identity
 
 - What changed: notification ownership now uses an exact private project identity rather than a display-redacted path, preventing distinct paths from sharing an inbox or acknowledgement authority.
