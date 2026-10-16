@@ -2,10 +2,12 @@
 
 import hashlib
 import http.server
+import json
 import os
 import platform
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -29,6 +31,37 @@ install) echo "changes: 0" ;;
 health) echo '  "/h/.yoke/config.toml",false,false' ;;
 esac
 """
+# Runs argv[1] under /bin/sh with a controlling terminal, typing argv[2] at every [y/N]
+# question and Enter at every [Y/n] question. It runs in its own interpreter because forking
+# a pseudo-terminal from the test process, which has server threads, is not safe.
+TERMINAL_DRIVER = """
+import json, os, pty, select, sys, time
+answer = sys.argv[2].encode()
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv("/bin/sh", ["sh", sys.argv[1]])
+output, answered = b"", 0
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline:
+    if not select.select([fd], [], [], 0.2)[0]:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    output += chunk
+    if len(output) > answered and output.endswith(b"[y/N] "):
+        os.write(fd, answer + b"\\n")
+        answered = len(output)
+    elif len(output) > answered and output.endswith(b"[Y/n] "):
+        os.write(fd, b"\\n")
+        answered = len(output)
+_, status = os.waitpid(pid, 0)
+print(json.dumps({"output": output.decode(errors="replace"), "status": os.waitstatus_to_exitcode(status)}))
+"""
+
 # Reports a database from a newer Yoke the way `yoke health` does, and logs every call.
 NEWER_STATE_YOKE = b"""#!/bin/sh
 echo "$*" >> "$YOKE_TEST_LOG"
@@ -49,6 +82,27 @@ install)
     fi ;;
 uninstall) : > "$YOKE_TEST_MOVED"; echo "changes: 3" ;;
 health) echo '  "/h/.yoke/config.toml",false,false' ;;
+esac
+"""
+# Answers the installer's statusline check the way `yoke install --statusline-if-absent
+# --dry-run` does, according to $YOKE_TEST_STATUSLINE: absent, yoke (already Yoke's) or foreign.
+STATUSLINE_YOKE = b"""#!/bin/sh
+echo "$*" >> "$YOKE_TEST_LOG"
+case $1 in
+--version) echo 9.9.9 ;;
+install)
+    case " $* " in
+    *" --statusline-if-absent --dry-run "*)
+        case $YOKE_TEST_STATUSLINE in
+        absent) echo "changes: 1" ;;
+        yoke) echo "changes: 0" ;;
+        foreign)
+            echo "changes: 0"
+            echo 'warning: "statusline kept: Claude already has a statusLine (`echo hi`); Yoke left it unchanged."' ;;
+        esac ;;
+    *) echo "changes: 1" ;;
+    esac ;;
+health) echo '  "/h/.yoke/config.toml",true,false' ;;
 esac
 """
 
@@ -183,6 +237,107 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn(f"still at {old}", result.stdout)
         self.assertIn(f"rm -f '{old}'", result.stdout)
         self.assertIn("records hook events", result.stdout)
+
+    def statusline_install(self, state: str, **extra: str) -> tuple[str, list[str]]:
+        log = self.home / "yoke-calls.log"
+        (self.mirror / self.name).write_bytes(STATUSLINE_YOKE)
+        result = self.install(
+            hashlib.sha256(STATUSLINE_YOKE).hexdigest(),
+            YOKE_AGENTS="claude,codex",
+            YOKE_YES="1",
+            YOKE_TEST_LOG=str(log),
+            YOKE_TEST_STATUSLINE=state,
+            **extra,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout, log.read_text().splitlines()
+
+    def terminal_install(self, state: str, answer: bytes) -> tuple[str, list[str]]:
+        """Run install.sh with a controlling terminal; `answer` is typed at a [y/N] question
+        and Enter at every [Y/n] question."""
+        log = self.home / "yoke-calls.log"
+        (self.mirror / self.name).write_bytes(STATUSLINE_YOKE)
+        digest = hashlib.sha256(STATUSLINE_YOKE).hexdigest()
+        (self.mirror / f"{self.name}.sha256").write_text(f"{digest}  {self.name}\n")
+        env = {
+            "PATH": os.environ["PATH"],
+            "HOME": str(self.home),
+            "TMPDIR": str(self.scratch),
+            "YOKE_DOWNLOAD_URL": self.url,
+            "YOKE_INSTALL_DIR": str(self.bin),
+            "YOKE_AGENTS": "claude",
+            "YOKE_NO_MODIFY_PATH": "1",
+            "YOKE_TEST_LOG": str(log),
+            "YOKE_TEST_STATUSLINE": state,
+        }
+        driven = subprocess.run(
+            [sys.executable, "-c", TERMINAL_DRIVER, str(ROOT / "install.sh"), answer.decode()],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(driven.returncode, 0, driven.stderr)
+        result = json.loads(driven.stdout)
+        output = result["output"]
+        self.assertEqual(result["status"], 0, output)
+        return output, log.read_text().splitlines()
+
+    def test_a_person_at_a_terminal_keeps_their_statusline_by_pressing_enter(
+        self,
+    ) -> None:
+        output, calls = self.terminal_install("foreign", b"")
+
+        self.assertIn("wrap it so Yoke's line comes first? ", output)
+        self.assertNotIn("install --agent claude --statusline", calls)
+        self.assertIn("keeping your statusline", output)
+        self.assertNotIn("YOKE_YES", output.split("keeping your statusline")[1].split("\n")[0])
+
+    def test_a_person_at_a_terminal_can_choose_to_wrap_their_statusline(self) -> None:
+        output, calls = self.terminal_install("foreign", b"y")
+
+        self.assertIn("install --agent claude --statusline", calls)
+        self.assertIn("shows Yoke's line", output)
+
+    def test_adds_yokes_statusline_when_claude_has_none_and_says_when_it_shows(
+        self,
+    ) -> None:
+        stdout, calls = self.statusline_install("absent")
+
+        self.assertIn("install --agent claude --statusline-if-absent", calls)
+        self.assertIn("shows Yoke's line", stdout)
+        self.assertIn("restart running sessions", stdout)
+        self.assertIn("5-hour and weekly quota", stdout)
+        self.assertIn("yoke usage", stdout)
+
+    def test_yes_never_replaces_or_wraps_a_statusline_the_user_already_has(
+        self,
+    ) -> None:
+        stdout, calls = self.statusline_install("foreign")
+
+        # Only the dry run asked; nothing changed the user's command.
+        self.assertEqual(
+            [c for c in calls if "statusline" in c],
+            ["install --agent claude --statusline-if-absent --dry-run"],
+        )
+        self.assertIn("keeping your statusline", stdout)
+        self.assertIn("yoke install --agent claude --statusline", stdout)
+        self.assertNotIn("shows Yoke's line", stdout)
+
+    def test_a_statusline_that_is_already_yokes_is_left_alone(self) -> None:
+        stdout, calls = self.statusline_install("yoke")
+
+        self.assertEqual(
+            [c for c in calls if "statusline" in c],
+            ["install --agent claude --statusline-if-absent --dry-run"],
+        )
+        self.assertIn("already shows Yoke's line", stdout)
+
+    def test_no_statusline_variable_skips_the_whole_step(self) -> None:
+        stdout, calls = self.statusline_install("absent", YOKE_NO_STATUSLINE="1")
+
+        self.assertEqual([c for c in calls if "statusline" in c], [])
+        self.assertIn("YOKE_NO_STATUSLINE=1", stdout)
 
 
 if __name__ == "__main__":

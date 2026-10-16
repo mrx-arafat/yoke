@@ -79,7 +79,7 @@ fn fixture() -> (TempDir, InstallOptions) {
         executable: root.join("bin/yoke's executable"),
         agents: vec![Agent::Claude, Agent::Codex],
         dry_run: false,
-        statusline: false,
+        statusline: Statusline::Off,
     };
     (dir, options)
 }
@@ -146,7 +146,7 @@ fn dry_run_and_codex_only_statusline_leave_the_entire_temp_root_untouched() {
     assert!(!install(&options).unwrap().changes.is_empty());
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
     assert!(uninstall(&options).unwrap().changes.is_empty());
-    options.statusline = true;
+    options.statusline = Statusline::Wrap;
     assert!(!install(&options).unwrap().changes.is_empty());
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
     options.dry_run = false;
@@ -161,7 +161,7 @@ fn dry_run_and_codex_only_statusline_leave_the_entire_temp_root_untouched() {
 #[test]
 fn statusline_wraps_existing_command_and_restores_exact_settings() {
     let (_dir, mut options) = fixture();
-    options.statusline = true;
+    options.statusline = Statusline::Wrap;
     let original = "{\n  \"theme\":\"dark\",\"statusLine\": {\"type\":\"command\",\"command\":\"printf '%s' \\\"kept value\\\"\",\"padding\":2}\n}\n";
     put(&options.claude_settings, original);
     install(&options).unwrap();
@@ -188,7 +188,7 @@ fn adding_statusline_to_hook_receipt_preserves_later_edits_and_user_override() {
     value["theme"] = json!("light");
     value["statusLine"] = json!({"type":"command","command":"cat","padding":3});
     put(&options.claude_settings, &value.to_string());
-    options.statusline = true;
+    options.statusline = Statusline::Wrap;
     install(&options).unwrap();
     // Receipt persisted, settings write interrupted: retry must finish once.
     put(&options.claude_settings, &value.to_string());
@@ -245,7 +245,7 @@ fn uninstall_preserves_settings_and_hooks_added_after_install() {
 #[test]
 fn preexisting_identical_hook_is_not_owned_and_legacy_flag_restores_with_later_edits() {
     let (_dir, options) = fixture();
-    let planned = prepare(&options, Agent::Claude).unwrap();
+    let planned = prepare(&options, Agent::Claude, &mut Vec::new()).unwrap();
     let group = planned
         .added
         .iter()
@@ -305,7 +305,7 @@ fn malformed_settings_and_ambiguous_ownership_fail_without_overwriting() {
 #[test]
 fn interrupted_install_recovers_from_receipt_and_refuses_symlink_targets() {
     let (_dir, options) = fixture();
-    let receipt = prepare(&options, Agent::Claude).unwrap();
+    let receipt = prepare(&options, Agent::Claude, &mut Vec::new()).unwrap();
     put(
         &receipt_path(&options, Agent::Claude),
         &serde_json::to_string(&receipt).unwrap(),
@@ -437,7 +437,7 @@ fn interrupted_label_upgrade_can_uninstall_and_user_handler_edits_are_not_overwr
 #[test]
 fn preexisting_unlabeled_hooks_remain_unowned_without_duplicate_commands() {
     let (_dir, options) = fixture();
-    let mut group = prepare(&options, Agent::Claude)
+    let mut group = prepare(&options, Agent::Claude, &mut Vec::new())
         .unwrap()
         .added
         .into_iter()
@@ -582,4 +582,64 @@ fn drift_advice_is_the_repair_that_actually_works() {
         ..options
     })
     .is_err());
+}
+
+#[test]
+fn if_absent_adds_the_statusline_only_when_none_is_set_and_never_replaces_one() {
+    // No statusLine yet: Yoke's is added, without a wrapper.
+    let (_dir, mut options) = fixture();
+    options.statusline = Statusline::IfAbsent;
+    let report = install(&options).unwrap();
+    assert!(report
+        .warnings
+        .iter()
+        .all(|w| !w.contains("statusline kept")));
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(&options.claude_settings).unwrap()).unwrap();
+    let command = settings["statusLine"]["command"].as_str().unwrap();
+    assert!(command.ends_with("' statusline"), "{command}");
+    assert!(install(&options).unwrap().changes.is_empty());
+
+    // Another command is kept byte for byte, reported, and not recorded as owned.
+    let (_dir, mut options) = fixture();
+    options.statusline = Statusline::IfAbsent;
+    let original = "{\"statusLine\": {\"type\":\"command\",\"command\":\"echo hi\"}}";
+    put(&options.claude_settings, original);
+    let report = install(&options).unwrap();
+    let kept = report
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("statusline kept:"))
+        .unwrap_or_else(|| panic!("{:?}", report.warnings));
+    assert!(kept.contains("echo hi") && kept.contains("yoke install --agent claude --statusline"));
+    let installed: Value =
+        serde_json::from_str(&fs::read_to_string(&options.claude_settings).unwrap()).unwrap();
+    assert_eq!(
+        installed["statusLine"],
+        json!({"type":"command","command":"echo hi"})
+    );
+    uninstall(&options).unwrap();
+    assert_eq!(
+        fs::read_to_string(&options.claude_settings).unwrap(),
+        original
+    );
+
+    // A statusLine that already runs a yoke is Yoke's: nothing to add, nothing to report.
+    let (_dir, mut options) = fixture();
+    options.statusline = Statusline::IfAbsent;
+    put(
+        &options.claude_settings,
+        r#"{"statusLine":{"type":"command","command":"'/old/bin/yoke' statusline --wrap 'echo hi'"}}"#,
+    );
+    let report = install(&options).unwrap();
+    assert!(report
+        .warnings
+        .iter()
+        .all(|w| !w.contains("statusline kept")));
+    let installed: Value =
+        serde_json::from_str(&fs::read_to_string(&options.claude_settings).unwrap()).unwrap();
+    assert_eq!(
+        installed["statusLine"]["command"],
+        "'/old/bin/yoke' statusline --wrap 'echo hi'"
+    );
 }

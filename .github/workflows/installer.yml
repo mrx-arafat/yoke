@@ -75,6 +75,9 @@ jobs:
           test "$(command -v yoke)" = /usr/local/bin/yoke
           yoke --version
           grep -F "/usr/local/bin/yoke' run-hook --agent claude PreToolUse" "$HOME/.claude/settings.json"
+          # A fresh install gives Claude Code Yoke's statusline, which is also what records its quota.
+          grep -F '"statusLine"' "$HOME/.claude/settings.json"
+          grep -F "/usr/local/bin/yoke' statusline" "$HOME/.claude/settings.json"
           yoke health >/tmp/health.txt || true
           cat /tmp/health.txt
           # The installer migrates the database to the schema this executable supports.
@@ -122,6 +125,8 @@ jobs:
           marked='export PATH="/home/dev/.local/bin:$PATH"  # added by yoke install.sh'
           grep -Fx "$marked" /home/dev/.bashrc
           grep -F "/home/dev/.local/bin/yoke' run-hook --agent claude PreToolUse" /home/dev/.claude/settings.json
+          grep -F '"statusLine"' /home/dev/.claude/settings.json
+          grep -F "/home/dev/.local/bin/yoke' statusline" /home/dev/.claude/settings.json
           su - dev -c '/home/dev/.local/bin/yoke health' >/tmp/health.txt || true
           cat /tmp/health.txt
           # The installer migrates the database to the schema this executable supports.
@@ -151,10 +156,12 @@ jobs:
         shell: bash
     steps:
       # Test scaffolding only: curl fetches the installer, expect plays the person at the terminal.
-      - name: Install curl and expect, and make a fake Claude Code directory
+      - name: Install curl and expect, and make a fake Claude Code directory with a statusline
         run: |
           apt-get update -qq && apt-get install -y -qq curl ca-certificates expect
           mkdir -p "$HOME/.claude"
+          # A statusline the user already has: the installer must keep it unless asked to wrap it.
+          printf '%s\n' '{"statusLine":{"type":"command","command":"echo user-statusline"}}' >"$HOME/.claude/settings.json"
       - name: Fetch this commit's install.sh
         env:
           REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
@@ -164,13 +171,18 @@ jobs:
         run: |
           cat >/tmp/drive.exp <<'EOF'
           # Runs $DRIVE_CMD in a pseudo-terminal the way a person would: Enter for every
-          # [Y/n] question, and the exact phrase that yoke trust asks for.
+          # [Y/n] and [y/N] question, and the exact phrase that yoke trust asks for.
           set timeout 2400
           set asked {}
           set typed_phrase 0
           spawn bash -c $env(DRIVE_CMD)
           expect {
               -re {yoke-install: ([^\r\n]*)\[Y/n\] $} {
+                  lappend asked $expect_out(1,string)
+                  send "\r"
+                  exp_continue
+              }
+              -re {yoke-install: ([^\r\n]*)\[y/N\] $} {
                   lappend asked $expect_out(1,string)
                   send "\r"
                   exp_continue
@@ -212,12 +224,15 @@ jobs:
           YOKE_INSTALL_DIR: /opt/yoke/bin
           YOKE_FROM_SOURCE: "1"
           DRIVE_CMD: cat /tmp/install.sh | bash
-          DRIVE_EXPECT: "{C compiler} Cargo PATH {global policy}"
+          DRIVE_EXPECT: "{C compiler} Cargo PATH {wrap it so Yoke's line comes first} {global policy}"
         run: expect /tmp/drive.exp
       - name: Check that the typed confirmation trusted the starter global policy
         run: |
           test -x /opt/yoke/bin/yoke
           grep -F '# Yoke preset: git-safety' "$HOME/.yoke/config.toml"
+          # Enter at the statusline question keeps the user's own command untouched.
+          grep -F 'echo user-statusline' "$HOME/.claude/settings.json"
+          ! grep -F "yoke' statusline" "$HOME/.claude/settings.json"
           # shellcheck disable=SC2016 # the line is written with a literal $PATH
           grep -Fx 'export PATH="/opt/yoke/bin:$PATH"  # added by yoke install.sh' "$HOME/.bashrc"
           /opt/yoke/bin/yoke health >/tmp/health.txt || true

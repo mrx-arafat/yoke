@@ -212,7 +212,7 @@ fn collect(inputs: Inputs) -> Result<Report> {
             ));
         }
         if name == "claude" && !agent.install.statusline {
-            guidance.push("Optional: Claude's statusline is not installed; `yoke install --agent claude --statusline` shows Yoke's mode, plan, alerts and your quota in Claude Code's prompt bar, and `yoke usage` prints the same quota without it.".into());
+            guidance.push("Optional: Claude Code's status bar does not show Yoke's line; `yoke install --agent claude --statusline` adds it (a statusline you already have is wrapped, with its colors removed and its lines joined) and shows Yoke's mode, plan, alerts and your quota, and `yoke usage` prints the same quota without it.".into());
         }
         if name == "codex" {
             guidance.extend(agent.install.notes.iter().cloned());

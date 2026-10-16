@@ -20,7 +20,7 @@ Text output shows times as local `YYYY-MM-DD HH:MM` (`yoke log` adds seconds); `
 | `yoke config [--json]` | Inspect effective settings, origins, and snapshot freshness |
 | `yoke gates` | List trusted gates |
 | `yoke run-hook <event> [--agent claude\|codex]` | Read one JSON event from stdin; agent defaults to Claude |
-| `yoke install [--agent claude,codex] [--dry-run] [--statusline]` | Install managed agent integrations; statusline is for Claude |
+| `yoke install [--agent claude,codex] [--dry-run] [--statusline \| --statusline-if-absent]` | Install managed agent integrations; `--statusline` adds Claude's statusline and wraps an existing command, `--statusline-if-absent` adds it only when none is set and reports any other one it left alone |
 | `yoke uninstall [--agent claude,codex] [--dry-run]` | Remove owned integration entries; it does not remove the executable, the PATH line or `~/.yoke` (see [uninstalling](uninstalling.md)) |
 | `yoke health [--json]` | Read-only report of the executable, state schema, mode, policy trust and staleness, each agent's hook installation, enablement and last recorded event, unfinished plans, problems and guidance; exits 1 when a check fails |
 | `yoke update [--check]` | Check releases or verify and replace the current executable; when no stable release is published yet it says so and exits 0 |

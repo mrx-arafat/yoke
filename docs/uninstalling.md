@@ -10,7 +10,7 @@ The order matters: remove the hooks first and the executable second, because the
 
 | What | Where | Removed in |
 | --- | --- | --- |
-| Hook entries | Claude `settings.json`, Codex `hooks.json`, and `hooks = true` under `[features]` in Codex `config.toml` | [Step 1](#1-remove-the-hooks) |
+| Hook entries | Claude `settings.json` (including the `statusLine` Yoke added or wrapped), Codex `hooks.json`, and `hooks = true` under `[features]` in Codex `config.toml` | [Step 1](#1-remove-the-hooks) |
 | Ownership receipts | `~/.yoke/install-claude.json` and `~/.yoke/install-codex.json` | [Step 1](#1-remove-the-hooks) |
 | The executable | `~/.local/bin/yoke`, `/usr/local/bin/yoke` when the installer ran as root, `$YOKE_INSTALL_DIR/yoke`, or `~/.cargo/bin/yoke` for a Cargo install | [Step 2](#2-remove-the-executable) |
 | A `PATH` line | `~/.bashrc`, and `~/.zshrc` when your `SHELL` was zsh, only if you let the installer add it | [Step 3](#3-remove-the-path-line) |
@@ -51,6 +51,7 @@ What it does:
 - It removes only the entries Yoke added, as recorded in the receipts.
 - When you have not touched the files since installing, each one is restored byte for byte.
 - When you have edited them since, your edits stay and only Yoke's entries go.
+- A Claude `statusLine` that Yoke added is removed again, one that Yoke wrapped goes back to your original command, and one the installer kept because it was already yours is never touched.
 - A file that did not exist before the install is deleted again.
   The `.claude` and `.codex` directories stay behind, empty.
 - If a Yoke entry itself was changed or duplicated, it stops with an error naming the hook and leaves the file untouched.

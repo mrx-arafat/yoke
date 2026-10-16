@@ -50,7 +50,8 @@ curl -fsSL https://raw.githubusercontent.com/mrx-arafat/yoke/main/install.sh | b
 It works on macOS and on common Linux distributions, including a fresh server: run as root, it installs `yoke` into `/usr/local/bin`, and otherwise into `~/.local/bin`, offering to add that to your `PATH`.
 It downloads the release executable for your platform and refuses it unless its SHA-256 checksum matches, and while no release exists, or on Alpine and other musl systems, it builds `main` from source, offering to install a C compiler and Rust when they are missing.
 It uses `sudo` only to install a C compiler, after asking; every question defaults to yes, and `YOKE_YES=1` answers them without a terminal.
-It then connects the Claude Code and Codex hooks it finds, creates or upgrades the state database once those hooks run the new binary, offers a starter global policy for you to review and trust, and runs `yoke health`.
+It then connects the Claude Code and Codex hooks it finds, creates or upgrades the state database once those hooks run the new binary, adds Yoke's line (mode, context, 5-hour and weekly quota) to Claude Code's status bar when you have no statusline, offers a starter global policy for you to review and trust, and runs `yoke health`.
+A statusline you already have is never replaced: the installer keeps it, and wraps it only if you answer yes at a terminal (`YOKE_NO_STATUSLINE=1` skips the step).
 Rerunning it upgrades in place, and if your hooks run a Yoke binary from another location, it moves them to the new one.
 Read [`install.sh`](install.sh) first if you prefer; [Getting started](docs/getting-started.md#1-build-and-install-the-executable) lists its settings, such as `YOKE_INSTALL_DIR` and `YOKE_AGENTS`.
 Then approve the hooks in Codex with `/hooks` and create a policy as in step 2.
@@ -281,7 +282,7 @@ In enforce mode, session start injects pinned notes, trusted shared knowledge an
 
 ### Usage, trials and extensions
 
-- `yoke install --agent claude --statusline` adds Yoke's mode, plan, alert and quota line to Claude Code (the 5-hour and weekly percent used and the reset time, when Claude reports them), wrapping an existing statusline command if you have one. Without it, none of this shows inside the agent.
+- Yoke's statusline adds its mode, plan, alert and quota line to Claude Code (the 5-hour and weekly percent used and the reset time, when Claude reports them). The install script adds it when you have no statusline; otherwise run `yoke install --agent claude --statusline`, which wraps an existing statusline command. Without it, none of this shows inside the agent.
 - `yoke usage` prints each agent's quota (percent used and left, reset times), token and estimated-cost totals for today and the last 7 days, and the newest sessions, read-only.
 - The console Usage page and `yoke usage` estimate API token prices from agent transcripts; an unpriced model shows as unknown rather than a guessed amount, and the figures are not invoices.
 - `yoke trial report --since <date>` summarizes recorded decisions into release-trial evidence, read-only.

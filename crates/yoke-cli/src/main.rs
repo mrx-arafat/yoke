@@ -196,6 +196,9 @@ enum Cmd {
         /// Also install the Claude statusline, wrapping any existing command.
         #[arg(long)]
         statusline: bool,
+        /// Install the Claude statusline only when none is set; keep any other command.
+        #[arg(long, conflicts_with = "statusline")]
+        statusline_if_absent: bool,
     },
     /// Remove only hooks managed by Yoke.
     Uninstall {

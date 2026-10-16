@@ -28,6 +28,17 @@ pub enum Agent {
     Codex,
 }
 
+/// What `yoke install` does with Claude's `statusLine` setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Statusline {
+    /// Leave it alone.
+    Off,
+    /// Add Yoke's when none is set. Any other command stays untouched and is reported.
+    IfAbsent,
+    /// Add Yoke's, wrapping an existing command so its output follows Yoke's line.
+    Wrap,
+}
+
 #[derive(Clone)]
 pub struct InstallOptions {
     pub claude_settings: PathBuf,
@@ -39,7 +50,7 @@ pub struct InstallOptions {
     pub executable: PathBuf,
     pub agents: Vec<Agent>,
     pub dry_run: bool,
-    pub statusline: bool,
+    pub statusline: Statusline,
 }
 
 const CLAUDE_MANAGED_DIR: &str = if cfg!(target_os = "macos") {
@@ -72,7 +83,7 @@ pub fn options(home: &Path, executable: PathBuf, agents: Vec<Agent>) -> Result<I
         executable,
         agents,
         dry_run: false,
-        statusline: false,
+        statusline: Statusline::Off,
     })
 }
 
@@ -132,7 +143,7 @@ const COMMON_EVENTS: &[&str] = &[
 
 fn validate(options: &InstallOptions) -> Result<()> {
     ensure!(
-        !options.statusline || options.agents.contains(&Agent::Claude),
+        options.statusline == Statusline::Off || options.agents.contains(&Agent::Claude),
         "statusline requires selecting Claude; no settings changed"
     );
     ensure!(!options.agents.is_empty(), "select at least one agent");
@@ -350,7 +361,7 @@ fn settings(raw: Option<&str>) -> Result<Value> {
     Ok(value)
 }
 
-fn prepare(options: &InstallOptions, agent: Agent) -> Result<Receipt> {
+fn prepare(options: &InstallOptions, agent: Agent, warnings: &mut Vec<String>) -> Result<Receipt> {
     let path = hook_path(options, agent).to_path_buf();
     let before = files::read(&path)?;
     let mut value = settings(before.as_deref())?;
@@ -391,8 +402,13 @@ fn prepare(options: &InstallOptions, agent: Agent) -> Result<Receipt> {
             });
         }
     }
-    let statusline = if agent == Agent::Claude && options.statusline {
-        Some(statusline::add(&options.executable, &mut value)?)
+    let statusline = if agent == Agent::Claude {
+        statusline::apply(
+            options.statusline,
+            &options.executable,
+            &mut value,
+            warnings,
+        )?
     } else {
         None
     };
@@ -537,8 +553,12 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
                             },
                         );
                     }
-                } else if options.statusline {
-                    let owned = statusline::add(&options.executable, &mut value)?;
+                } else if let Some(owned) = statusline::apply(
+                    options.statusline,
+                    &options.executable,
+                    &mut value,
+                    &mut report.warnings,
+                )? {
                     let after = Some(json::render(planned.as_deref().unwrap_or("{}"), &value)?);
                     report
                         .changes
@@ -574,7 +594,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
                 });
             }
         } else {
-            let receipt = prepare(options, agent)?;
+            let receipt = prepare(options, agent, &mut report.warnings)?;
             change(&mut report, receipt.hooks.clone());
             if let Some(config) = &receipt.config {
                 change(&mut report, config.clone());

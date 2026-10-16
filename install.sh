@@ -6,9 +6,11 @@
 # Downloads the release executable for this platform and verifies its SHA-256
 # checksum, or builds from source with Cargo when no release asset exists,
 # installing a C compiler and Rust first when they are missing. Then connects
-# the agent hooks, creates or migrates the state database, offers a starter
-# global policy for you to trust, and checks health. It uses sudo only to
-# install a C compiler, after asking. Every question defaults to yes.
+# the agent hooks, creates or migrates the state database, adds Yoke's line to
+# Claude Code's status bar when you have none, offers a starter global policy for
+# you to trust, and checks health. It uses sudo only to install a C compiler,
+# after asking. Every question defaults to yes, except wrapping a statusline you
+# already have, which defaults to no and which YOKE_YES=1 never answers.
 #
 # Environment:
 #   YOKE_INSTALL_DIR      absolute install directory
@@ -20,6 +22,7 @@
 #                         trusting a policy still needs you to type the phrase
 #   YOKE_INSTALL_RUST=1   install Rust with rustup without asking when Cargo is missing
 #   YOKE_NO_MODIFY_PATH=1 never add the install directory to shell startup files
+#   YOKE_NO_STATUSLINE=1  never touch Claude Code's statusLine setting
 #   YOKE_AGENTS           agents to connect, for example claude,codex, or none
 #                         (default: each of claude and codex that is found)
 
@@ -49,6 +52,18 @@ ask() {
     read -r answer </dev/tty || answer=
     case $answer in
         '' | y | Y | yes | Yes | YES) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Like ask, but the answer defaults to no and YOKE_YES=1 does not answer it: it changes
+# something the user already set up. Returns 0 for yes, 1 for no and 2 without a terminal.
+ask_no() {
+    has_tty || return 2
+    printf 'yoke-install: %s [y/N] ' "$1" >/dev/tty
+    read -r answer </dev/tty || answer=
+    case $answer in
+        y | Y | yes | Yes | YES) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -413,10 +428,60 @@ activate() {
     say "  $yoke_cmd trust --global"
 }
 
+# Claude Code draws Yoke's line only when its statusLine runs `yoke statusline`, and that line
+# is also what records Claude's quota for `yoke usage`. Add it when none is set. Never replace
+# a statusline the user already has, and wrap it only when they say yes at a terminal: Yoke
+# strips its colors, joins its lines, and drops the whole line if it takes over 250 ms.
+# Sets $statusline_on to 1 when Claude Code now runs Yoke's statusline.
+setup_statusline() {
+    case ,$agents, in *,claude,*) ;; *) return 0 ;; esac
+    if [ "${YOKE_NO_STATUSLINE:-}" = 1 ]; then
+        say "skipping Claude's statusline because YOKE_NO_STATUSLINE=1; to add it later: $yoke_cmd install --agent claude --statusline-if-absent"
+        return 0
+    fi
+    if ! plan=$("$bin" install --agent claude --statusline-if-absent --dry-run 2>&1); then
+        printf '%s\n' "$plan" >&2
+        say "skipping Claude's statusline because this yoke could not check it (an older release without --statusline-if-absent?); see: $yoke_cmd install --help"
+        return 0
+    fi
+    case $plan in
+        *"statusline kept"*)
+            status=1
+            why="keeping your statusline"
+            if [ "${YOKE_YES:-}" = 1 ]; then
+                why="keeping your statusline (YOKE_YES=1 never replaces or wraps one)"
+            else
+                status=0
+                ask_no "Claude Code already has a statusline; wrap it so Yoke's line comes first? Yoke removes its colors, joins its lines, and drops it if it takes over 250 ms" || status=$?
+            fi
+            if [ "$status" -eq 0 ]; then
+                "$bin" install --agent claude --statusline || die "yoke install --agent claude --statusline failed"
+                statusline_on=1
+            else
+                say "$why; to show Yoke's line in front of it: $yoke_cmd install --agent claude --statusline"
+            fi
+            ;;
+        *"changes: 0"*)
+            say "Claude Code already shows Yoke's line"
+            ;;
+        *)
+            status=0
+            ask "add Yoke's line (mode, context, 5-hour and weekly quota) to Claude Code's status bar?" || status=$?
+            if [ "$status" -eq 0 ]; then
+                "$bin" install --agent claude --statusline-if-absent || die "yoke install --agent claude --statusline-if-absent failed"
+                statusline_on=1
+            else
+                say "not adding Yoke's statusline; to add it later: $yoke_cmd install --agent claude --statusline-if-absent"
+            fi
+            ;;
+    esac
+}
+
 main() {
     set -eu
     tmp=
     staged=
+    statusline_on=
     trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -471,7 +536,10 @@ main() {
         say "left the state database as it is, because no hooks were connected to $bin"
     fi
     setup_path
-    if [ "$connected" = 1 ]; then activate; fi
+    if [ "$connected" = 1 ]; then
+        setup_statusline
+        activate
+    fi
     say "checking health: yoke health"
     status=0
     "$bin" health || status=$?
@@ -488,6 +556,10 @@ main() {
     say "  - in each project to govern, run $yoke_cmd init, review yoke.toml, then $yoke_cmd trust from your own terminal"
     if [ "$connected" = 1 ]; then
         case ,$agents, in *,codex,*) say "  - in Codex, approve the Yoke hooks with /hooks; Codex skips unapproved hooks without any warning" ;; esac
+        if [ "$statusline_on" = 1 ]; then
+            say "Claude Code shows Yoke's line (mode, context, 5-hour and weekly quota) from its next session; restart running sessions"
+        fi
+        case ,$agents, in *,codex,*) say "Codex has no statusline hook; $yoke_cmd usage shows Codex quota when Codex records it" ;; esac
     fi
 }
 

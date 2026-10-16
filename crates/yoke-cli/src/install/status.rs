@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use super::{
     features, files, hook_path, json as settings_json, matches_owned, read_receipt, settings,
-    Agent, InstallOptions, Receipt,
+    statusline, Agent, InstallOptions, Receipt,
 };
 
 const MAX_SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
@@ -21,7 +21,7 @@ pub struct AgentStatus {
     pub installed: bool,
     pub settings: PathBuf,
     pub executable: Option<PathBuf>,
-    /// Whether the installation owns Claude's statusline wrapper.
+    /// Whether Claude Code's statusLine runs Yoke's: owned by the installation, or already so.
     pub statusline: bool,
     /// Conditions under which installed hooks do not run as installed.
     pub problems: Vec<String>,
@@ -118,6 +118,12 @@ fn agent_status(options: &InstallOptions, agent: Agent, project: &Path) -> Agent
                 "Claude managed policy from MDM or the claude.ai console is not visible to Yoke"
                     .into(),
             );
+            // A statusLine that runs `yoke statusline` shows Yoke's line whoever wrote it.
+            status.statusline = status.statusline
+                || hooks_file
+                    .as_ref()
+                    .and_then(|value| value.get("statusLine"))
+                    .is_some_and(statusline::runs_yoke);
         }
         Agent::Codex => {
             let enabled = files::read(&options.codex_config)

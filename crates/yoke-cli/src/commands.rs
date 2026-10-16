@@ -124,8 +124,22 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
             agent,
             dry_run,
             statusline,
-        }) => install(agent, dry_run, statusline, false),
-        Some(Cmd::Uninstall { agent, dry_run }) => install(agent, dry_run, false, true),
+            statusline_if_absent,
+        }) => install(
+            agent,
+            dry_run,
+            if statusline {
+                install::Statusline::Wrap
+            } else if statusline_if_absent {
+                install::Statusline::IfAbsent
+            } else {
+                install::Statusline::Off
+            },
+            false,
+        ),
+        Some(Cmd::Uninstall { agent, dry_run }) => {
+            install(agent, dry_run, install::Statusline::Off, true)
+        }
         Some(Cmd::Health { json }) => crate::health::run(json),
         Some(Cmd::Extensions { json }) => crate::extensions::run(json),
         Some(Cmd::Notifications {
@@ -372,7 +386,12 @@ fn trust(global: bool) -> Result<()> {
     Ok(())
 }
 
-fn install(agents: Vec<AgentArg>, dry_run: bool, statusline: bool, remove: bool) -> Result<()> {
+fn install(
+    agents: Vec<AgentArg>,
+    dry_run: bool,
+    statusline: install::Statusline,
+    remove: bool,
+) -> Result<()> {
     let agents = agents
         .into_iter()
         .map(|agent| match agent {

@@ -5,6 +5,8 @@ use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::Statusline;
+
 #[derive(Serialize, Deserialize, PartialEq)]
 pub(super) struct Owned {
     pub before: Option<Value>,
@@ -56,6 +58,64 @@ pub(super) fn add(executable: &Path, value: &mut Value) -> Result<Owned> {
     let owned = build(executable, value.get("statusLine").cloned())?;
     value["statusLine"] = owned.after.clone();
     Ok(owned)
+}
+
+/// Apply `mode` to `value`. Returns the ownership record when Yoke's statusline was added.
+pub(super) fn apply(
+    mode: Statusline,
+    executable: &Path,
+    value: &mut Value,
+    warnings: &mut Vec<String>,
+) -> Result<Option<Owned>> {
+    match mode {
+        Statusline::Off => Ok(None),
+        Statusline::Wrap => add(executable, value).map(Some),
+        Statusline::IfAbsent => match value.get("statusLine") {
+            None => add(executable, value).map(Some),
+            Some(existing) if runs_yoke(existing) => Ok(None),
+            Some(existing) => {
+                warnings.push(kept_warning(existing));
+                Ok(None)
+            }
+        },
+    }
+}
+
+/// Whether a statusLine already runs some `yoke statusline`, which is Yoke's whoever wrote it.
+pub(super) fn runs_yoke(existing: &Value) -> bool {
+    let Some(command) = existing["command"].as_str() else {
+        return false;
+    };
+    // Yoke writes `'<path>/yoke' statusline` with the program path in single quotes.
+    let command = command.trim_start();
+    let (program, rest) = match command.strip_prefix('\'') {
+        Some(quoted) => match quoted.split_once('\'') {
+            Some(parts) => parts,
+            None => return false,
+        },
+        None => command.split_once(' ').unwrap_or((command, "")),
+    };
+    Path::new(program)
+        .file_name()
+        .is_some_and(|name| name == "yoke")
+        && (rest == " statusline" || rest.starts_with(" statusline "))
+}
+
+/// The line the installer script looks for; keep the `statusline kept:` prefix stable.
+fn kept_warning(existing: &Value) -> String {
+    let command = existing["command"].as_str().map_or_else(
+        || "not a command".to_owned(),
+        |command| {
+            let mut shown: String = command.chars().take(80).collect();
+            if shown.len() < command.len() {
+                shown.push_str("...");
+            }
+            format!("`{shown}`")
+        },
+    );
+    format!(
+        "statusline kept: Claude already has a statusLine ({command}); Yoke left it unchanged. `yoke install --agent claude --statusline` puts Yoke's line first and that command's output after it, with its colors removed and its lines joined."
+    )
 }
 
 pub(super) fn restore(value: &mut Value, owned: &Owned) {

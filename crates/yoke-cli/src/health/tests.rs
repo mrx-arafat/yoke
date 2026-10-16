@@ -15,7 +15,7 @@ fn fixture() -> (TempDir, install::InstallOptions) {
         executable: root.join("bin/yoke"),
         agents: vec![install::Agent::Claude, install::Agent::Codex],
         dry_run: false,
-        statusline: false,
+        statusline: install::Statusline::Off,
     };
     put(&options.executable, "");
     fs::set_permissions(&options.executable, fs::Permissions::from_mode(0o755)).unwrap();
@@ -406,7 +406,7 @@ fn claude_without_the_statusline_is_pointed_at_it_once_it_is_installed() {
 
     // Reinstalling with the flag adds the statusline to the same hooks.
     install::install(&install::InstallOptions {
-        statusline: true,
+        statusline: install::Statusline::Wrap,
         agents: vec![install::Agent::Claude],
         ..options.clone()
     })
@@ -414,4 +414,29 @@ fn claude_without_the_statusline_is_pointed_at_it_once_it_is_installed() {
     let with = collect(inputs(root, options)).unwrap();
     assert!(agent(&with, "claude").install.statusline);
     assert!(!guidance_with(&with, "--statusline"), "{:?}", with.guidance);
+}
+
+#[test]
+fn a_statusline_someone_else_pointed_at_yoke_counts_as_installed() {
+    let (dir, options) = fixture();
+    let root = dir.path();
+    install::install(&options).unwrap();
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&options.claude_settings).unwrap()).unwrap();
+    settings["statusLine"] =
+        serde_json::json!({"type":"command","command":"'/elsewhere/bin/yoke' statusline"});
+    put(&options.claude_settings, &settings.to_string());
+
+    let report = collect(inputs(root, options.clone())).unwrap();
+    assert!(agent(&report, "claude").install.statusline);
+    assert!(
+        !guidance_with(&report, "--statusline"),
+        "{:?}",
+        report.guidance
+    );
+
+    settings["statusLine"] = serde_json::json!({"type":"command","command":"echo hi"});
+    put(&options.claude_settings, &settings.to_string());
+    let other = collect(inputs(root, options)).unwrap();
+    assert!(!agent(&other, "claude").install.statusline);
 }

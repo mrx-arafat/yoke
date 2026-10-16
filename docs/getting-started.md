@@ -41,6 +41,11 @@ Without a terminal, each of these steps stops with the exact command to run, unl
 It installs into `/usr/local/bin` as root and into `~/.local/bin` otherwise, replacing the executable atomically.
 An executable in `/usr/local/bin` serves every user, but hooks and state are per user, so each user who runs an agent runs the installer once.
 It runs `yoke install` for the agents it finds, creates or migrates the state database with `yoke log` once the hooks run the new executable, and reports `yoke health`.
+Once Claude's hooks are connected it also looks at Claude Code's `statusLine` setting.
+With none, it asks (default yes) and adds Yoke's line, which shows the mode, context and your 5-hour and weekly quota from Claude Code's next session; restart sessions that are already running.
+If you already have a statusline command, the installer keeps it and tells you the command that wraps it; at a terminal it asks first, defaults to no, and `YOKE_YES=1` never answers yes to it.
+If the line is already Yoke's, it does nothing.
+Codex has no statusline hook, so `yoke usage` is where Codex quota shows, when Codex records it.
 With `YOKE_AGENTS=none`, or when it finds no agent, it leaves the database alone, so hooks that still run an older executable keep working; rerun it after installing an agent to connect that agent's hooks.
 Before it replaces the executable it checks that the state database is not newer than the new executable, because hooks running an older `yoke` would deny every tool call; if it is, the script stops with nothing changed and says how to recover.
 If your hooks run a Yoke executable from another location, it runs `yoke uninstall` with the new executable and then installs again, and tells you where the earlier copy is still on disk so you can remove it.
@@ -62,6 +67,7 @@ These environment variables change what it does:
 | `YOKE_INSTALL_RUST=1` | Install Rust without asking when Cargo is missing. |
 | `YOKE_NO_MODIFY_PATH=1` | Never add the install directory to shell startup files. |
 | `YOKE_AGENTS` | Agents to connect, such as `claude` or `claude,codex`, or `none`; by default each agent found on `PATH` or by its configuration directory. |
+| `YOKE_NO_STATUSLINE=1` | Never touch Claude Code's `statusLine` setting. |
 
 To build from a local checkout instead, from the repository root:
 
@@ -130,14 +136,16 @@ If you run Claude Code with `CLAUDE_CONFIG_DIR` or Codex with `CODEX_HOME`, keep
 Restart or reload your agent's hook configuration as appropriate, perform a normal tool action, and inspect `yoke log` for the resulting decision.
 Run `yoke health` to confirm that each agent reports installed, enabled hooks and a recorded event; it exits 1 when a check fails.
 
-Claude's optional statusline is the way to see Yoke inside the agent: it puts the mode, plan state, alerts and your 5-hour and weekly quota in Claude Code's prompt bar.
-Hook installation alone does not add it:
+Claude's statusline is the way to see Yoke inside the agent: it puts the mode, plan state, alerts and your 5-hour and weekly quota in Claude Code's prompt bar.
+The install script adds it when you have no statusline, and `yoke install --agent claude,codex` does not; add it with:
 
 ```sh
+yoke install --agent claude --statusline-if-absent
 yoke install --agent claude --statusline
 ```
 
-This wraps an existing statusline command while preserving its input and settings.
+The first adds Yoke's line only when you have none, reports any other statusline it left alone, and does nothing when the line is already Yoke's.
+The second wraps an existing statusline command while preserving its input and settings: Yoke's line comes first and that command's output follows, but its colors are removed, its lines are joined, and the whole line is dropped when the command takes over 250 ms or fails.
 Uninstall restores the prior statusline when Yoke still owns it and preserves your subsequent changes.
 With the statusline installed, Claude's quota is also recorded for `yoke usage`, which prints quota, usage and recent sessions without the console.
 
