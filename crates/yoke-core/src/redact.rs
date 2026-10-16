@@ -8,30 +8,57 @@ use serde_json::Value;
 
 const MASK: &str = "[REDACTED]";
 
-static SENSITIVE_KEY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)token|secret|password|passwd|api[_-]?key|authorization").unwrap()
-});
+/// Names whose value is a secret, matched inside longer names such as `DB_PASSWORD`.
+const KEYWORDS: &str = "token|secret|password|passwd|api[_-]?key|authorization";
+
+static SENSITIVE_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!("(?i){KEYWORDS}")).unwrap());
 static PEM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)-----BEGIN [A-Z0-9 ]+-----.*?(?:-----END [A-Z0-9 ]+-----|\z)").unwrap()
 });
+// A prefix must start a word, so `ask-codex` and `<task-notification>` are not `sk-` keys.
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:ghp_|gho_|ghs_|github_pat_|sk-|xoxb-|xoxp-)[A-Za-z0-9_-]+|AKIA[A-Za-z0-9]{16}")
-        .unwrap()
+    Regex::new(
+        r"\b(?:ghp_|gho_|ghs_|github_pat_|sk-|xoxb-|xoxp-)[A-Za-z0-9_-]+|AKIA[A-Za-z0-9]{16}",
+    )
+    .unwrap()
 });
-// Group 1 is kept visible and the masked value starts after it. Group 2 is the value's first
-// character only; `quoted` and `Runs` find its end, so no regex rescans a long value.
+// Group 1 of `scheme://user:password@host` is the password. It may hold `@` and `:`, so it runs to
+// the last `@` before the path; whitespace, quotes and brackets end the search for it.
+static URL_PASSWORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r##"://[^\s:/?#@"'`<>]*:([^\s/?#"'`<>]+)@"##).unwrap());
+// For the four patterns below, group 1 is kept visible and the masked value starts after it.
+// Group 2 is the value's first character only; `quoted` and `Runs` find its end, so no regex
+// rescans a long value.
 static BEARER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)(\bBearer\s+)([^\s"'`,;\}\]])"#).unwrap());
 static AUTHORIZATION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(authorization["']?\s*(?:[:=]\s*|\s+))(?:Basic|Bearer)\s+([^\s"'`,;\}\]])"#)
         .unwrap()
 });
+// `key=value`, `key:value` and `--key value`. Only a flag takes its value after bare whitespace,
+// so prose such as `token is required` or `password-reset emails` is left alone.
 static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?ix)(["']?(?:--)?[a-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|authorization)[a-z0-9_.-]*["']?\s*(?:[=:]\s*|\s+))([^\s,;\}\]&])"#).unwrap()
+    Regex::new(&format!(
+        r#"(?i)(["']?[a-z0-9_.-]*(?:{KEYWORDS})[a-z0-9_.-]*["']?(?:\s*=\s*|\s*:)|--[a-z0-9_.-]*(?:{KEYWORDS})[a-z0-9_.-]*\s+)([^\s,;}}\]&])"#
+    ))
+    .unwrap()
 });
-/// Characters besides whitespace that end an unquoted value of the patterns above.
+// `key: value`, where the value is the rest of the line because prose and YAML have no other
+// delimiter. The name must end in the keyword (or its plural), so `Tokenizer:` and
+// `sshSecrets.ts:` are not keys, and must not follow a path separator, so `/run/secrets: No such
+// file` is not one either.
+static LINE_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r#"(?im)(?:^|[^a-z0-9_./\\-])([a-z0-9_.-]*(?:{KEYWORDS})s?["']?\s*:\s+)([^\s,;}}\]`])"#
+    ))
+    .unwrap()
+});
+/// Characters besides whitespace that end an unquoted value of the patterns above. A
+/// `LINE_ASSIGNMENT` value also ends at a line break, but not at other whitespace.
 const BEARER_STOP: &str = "\"'`,;}]";
 const ASSIGNMENT_STOP: &str = ",;}]&";
+const LINE_STOP: &str = "\"'`,;}]";
 
 /// Mask supported secret shapes in JSON and arbitrary text.
 pub fn redact(input: &str) -> String {
@@ -60,9 +87,11 @@ pub fn warm() {
     LazyLock::force(&SENSITIVE_KEY);
     LazyLock::force(&PEM);
     LazyLock::force(&TOKEN);
+    LazyLock::force(&URL_PASSWORD);
     LazyLock::force(&BEARER);
     LazyLock::force(&AUTHORIZATION);
     LazyLock::force(&ASSIGNMENT);
+    LazyLock::force(&LINE_ASSIGNMENT);
 }
 
 pub(crate) fn redact_value(value: &mut Value) {
@@ -86,22 +115,27 @@ pub(crate) fn redact_value(value: &mut Value) {
 fn redact_text(input: &str) -> String {
     let shapes = PEM.find_iter(input).chain(TOKEN.find_iter(input));
     let text = mask(input, shapes.map(|found| found.range()).collect());
-    let mut spans = Vec::new();
-    for (pattern, stop) in [
-        (&*AUTHORIZATION, BEARER_STOP),
-        (&*BEARER, BEARER_STOP),
-        (&*ASSIGNMENT, ASSIGNMENT_STOP),
+    let mut spans: Vec<_> = URL_PASSWORD
+        .captures_iter(&text)
+        .map(|found| found.get(1).unwrap().range())
+        .collect();
+    for (pattern, stop, line) in [
+        (&*AUTHORIZATION, BEARER_STOP, false),
+        (&*BEARER, BEARER_STOP, false),
+        (&*ASSIGNMENT, ASSIGNMENT_STOP, false),
+        (&*LINE_ASSIGNMENT, LINE_STOP, true),
     ] {
         let mut runs = Runs {
             text: &text,
             stop,
+            line,
             last: 0..0,
         };
-        // Resume at each value so a key inside it (`--token a/password b`) still masks its own.
+        // Resume at each value so a key inside it (`--token a/--password b`) still masks its own.
         let mut at = 0;
         while let Some(found) = pattern.captures_at(&text, at) {
             let value = found.get(2).unwrap().start();
-            // Only ASSIGNMENT values can start with a quote.
+            // Only the assignments' values can start with a quote.
             let end = quoted(&text, value).unwrap_or_else(|| runs.end(value));
             at = found.get(1).unwrap().end();
             spans.push(at..end);
@@ -136,10 +170,23 @@ fn quoted(text: &str, start: usize) -> Option<usize> {
 struct Runs<'a> {
     text: &'a str,
     stop: &'static str,
+    /// Whether the value runs to the end of its line instead of ending at whitespace.
+    line: bool,
     last: Range<usize>,
 }
 
 impl Runs<'_> {
+    /// Whether the value ends at `c`, which is followed by `rest`.
+    fn ends_at(&self, c: char, rest: &str) -> bool {
+        if !self.line {
+            return c.is_whitespace() || self.stop.contains(c);
+        }
+        // An apostrophe inside a word (`it's`) belongs to a prose value; one that ends a word
+        // closes a quote opened before the key.
+        let apostrophe = c == '\'' && rest.starts_with(char::is_alphanumeric);
+        matches!(c, '\n' | '\r') || (self.stop.contains(c) && !apostrophe)
+    }
+
     fn end(&mut self, start: usize) -> usize {
         if self.last.contains(&start) {
             // Inside a mask the last scan stepped over, the value ends at that mask's `]`.
@@ -151,7 +198,7 @@ impl Runs<'_> {
         while let Some(c) = self.text[end..].chars().next() {
             if mask_at(self.text, end) {
                 end += MASK.len();
-            } else if c.is_whitespace() || self.stop.contains(c) {
+            } else if self.ends_at(c, &self.text[end + c.len_utf8()..]) {
                 break;
             } else {
                 end += c.len_utf8();
@@ -197,17 +244,17 @@ mod tests {
         let corpus: &[(&str, &str, &[&str])] = &[
             // A value that swallows the next key must not hide that key's value.
             (
-                "--token sk-abc/password hunter2",
+                "--token sk-abc/--password hunter2",
                 "--token [REDACTED] [REDACTED]",
                 &["sk-abc", "hunter2"],
             ),
             (
-                "TOKEN=ghp_x:passwd p4ssw0rd",
+                "TOKEN=ghp_x:passwd: p4ssw0rd",
                 "TOKEN=[REDACTED] [REDACTED]",
                 &["ghp_x", "p4ssw0rd"],
             ),
             (
-                "--token ghp_abc.password p4ssw0rdXYZ",
+                "--token ghp_abc.password: p4ssw0rdXYZ",
                 "--token [REDACTED] [REDACTED]",
                 &["ghp_abc", "p4ssw0rdXYZ"],
             ),
@@ -264,8 +311,8 @@ mod tests {
                 &["hidden", "words"],
             ),
             (
-                "TOKEN=hidden-six secret: hidden-seven password=\"hidden-eight words\"",
-                "TOKEN=[REDACTED] secret: [REDACTED] password=[REDACTED]",
+                "TOKEN=hidden-six password=\"hidden-eight words\" secret: hidden-seven",
+                "TOKEN=[REDACTED] password=[REDACTED] secret: [REDACTED]",
                 &["hidden", "words"],
             ),
             (
@@ -305,14 +352,145 @@ mod tests {
     }
 
     #[test]
+    fn masks_url_passwords_and_whole_key_value_lines_but_keeps_prose() {
+        // (input, exact output, substrings that must not survive)
+        let corpus: &[(&str, &str, &[&str])] = &[
+            // Credentials in URL userinfo, in text, in a command and inside JSON.
+            (
+                "DATABASE_URL=postgres://admin:s3cr3tpw@db.internal:5432/app",
+                "DATABASE_URL=postgres://admin:[REDACTED]@db.internal:5432/app",
+                &["s3cr3tpw"],
+            ),
+            (
+                "git clone https://user:ghp_token@github.com/o/r",
+                "git clone https://user:[REDACTED]@github.com/o/r",
+                &["ghp_token"],
+            ),
+            (
+                "curl https://user:pass@host/x",
+                "curl https://user:[REDACTED]@host/x",
+                &[":pass"],
+            ),
+            (
+                "redis://:p@ss:w0rd@cache:6379/0",
+                "redis://:[REDACTED]@cache:6379/0",
+                &["p@ss", "w0rd"],
+            ),
+            (
+                r#"{"command":"curl https://user:hunter2@host/x","cwd":"/repo"}"#,
+                r#"{"command":"curl https://user:[REDACTED]@host/x","cwd":"/repo"}"#,
+                &["hunter2"],
+            ),
+            // A `key: value` value is the rest of the line, up to a quote or JSON closer.
+            (
+                "password: correct horse battery staple",
+                "password: [REDACTED]",
+                &["correct", "horse", "battery", "staple"],
+            ),
+            (
+                "note\npassword: correct horse\nuser: bob",
+                "note\npassword: [REDACTED]\nuser: bob",
+                &["correct", "horse"],
+            ),
+            (
+                r#"curl -d '{"password": 12345, "user": "bob"}'"#,
+                r#"curl -d '{"password": [REDACTED], "user": "bob"}'"#,
+                &["12345"],
+            ),
+            (
+                r#"curl -d '{"password": "hidden words", "user": "bob"}'"#,
+                r#"curl -d '{"password": [REDACTED], "user": "bob"}'"#,
+                &["hidden", "words"],
+            ),
+            (
+                r#"curl -H "X-Api-Key: hidden words" https://host/x"#,
+                r#"curl -H "X-Api-Key: [REDACTED]" https://host/x"#,
+                &["hidden", "words"],
+            ),
+            // An apostrophe inside the value is part of it; a quote that closes an earlier one is not.
+            (
+                "password: it's hidden here",
+                "password: [REDACTED]",
+                &["hidden", "here"],
+            ),
+            (
+                "curl -H 'X-Api-Key: hidden words' https://host/x",
+                "curl -H 'X-Api-Key: [REDACTED]' https://host/x",
+                &["hidden", "words"],
+            ),
+            // Flags still take the next word; `Authorization` still masks its credentials.
+            ("--token abc", "--token [REDACTED]", &["abc"]),
+            (
+                "Authorization: Bearer x",
+                "Authorization: [REDACTED]",
+                &["Bearer x"],
+            ),
+            // Prose, plain URLs and email-like text are not secrets.
+            (
+                "the tokenizer module handles keyboard input and password-reset emails",
+                "the tokenizer module handles keyboard input and password-reset emails",
+                &[],
+            ),
+            ("token is required", "token is required", &[]),
+            (
+                "password rotates every 90 days",
+                "password rotates every 90 days",
+                &[],
+            ),
+            ("Tokenizer: splits words", "Tokenizer: splits words", &[]),
+            // A key-like word at the end of a path or file name is not a key.
+            (
+                "rg: server/src/sshSecrets.ts: No such file or directory (os error 2)",
+                "rg: server/src/sshSecrets.ts: No such file or directory (os error 2)",
+                &[],
+            ),
+            (
+                "cat: /run/secrets: Is a directory\nls: cannot access '/etc/password': No such file",
+                "cat: /run/secrets: Is a directory\nls: cannot access '/etc/password': No such file",
+                &[],
+            ),
+            (
+                "existing password-mode fallback to public key.",
+                "existing password-mode fallback to public key.",
+                &[],
+            ),
+            // A secret prefix inside a word is not a key, but one that starts a word still is.
+            (
+                "skills ask-codex task-runner risk-review disk-cleanup mask-data <task-notification>",
+                "skills ask-codex task-runner risk-review disk-cleanup mask-data <task-notification>",
+                &[],
+            ),
+            (
+                "ask-codex with sk-abc and (ghp_abc) and \"xoxb-abc\"",
+                "ask-codex with [REDACTED] and ([REDACTED]) and \"[REDACTED]\"",
+                &["sk-abc", "ghp_abc", "xoxb-abc"],
+            ),
+            (
+                "https://github.com/o/r me@example.com ssh://git@github.com/o/r http://localhost:8080/path@x",
+                "https://github.com/o/r me@example.com ssh://git@github.com/o/r http://localhost:8080/path@x",
+                &[],
+            ),
+        ];
+        for (input, expected, secrets) in corpus {
+            let output = redact(input);
+            assert_eq!(output, *expected, "input: {input}");
+            for secret in *secrets {
+                assert!(!output.contains(secret), "{secret} survived in {output}");
+            }
+        }
+    }
+
+    #[test]
     fn redacts_a_mebibyte_of_glued_key_value_pairs_in_linear_time() {
         // Quadratic rescans took minutes here, long enough for an agent to time out a hook.
         let shapes = [
-            ("token=a", "token="),
-            ("password:x", "password:"),
-            ("api_key=1|", "api_key="),
-            ("secret=s/", "secret="),
-            ("token=[REDACTED]", "token="),
+            ("token=a", "token=[REDACTED] tail"),
+            ("password:x", "password:[REDACTED] tail"),
+            ("api_key=1|", "api_key=[REDACTED] tail"),
+            ("secret=s/", "secret=[REDACTED] tail"),
+            ("token=[REDACTED]", "token=[REDACTED] tail"),
+            // A `key: value` value runs to the end of its line, so the tail is masked too.
+            ("password: x ", "password: [REDACTED]"),
         ];
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -321,11 +499,11 @@ mod tests {
                 sender.send(redact(&input)).unwrap();
             }
         });
-        for (unit, key) in shapes {
+        for (unit, expected) in shapes {
             let output = receiver
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap_or_else(|_| panic!("1 MiB of {unit} took over 10 s"));
-            assert_eq!(output, format!("{key}[REDACTED] tail"));
+            assert_eq!(output, expected);
         }
     }
 
