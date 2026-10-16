@@ -18,7 +18,7 @@ Yoke is a clean-room implementation based on public documentation and idea-level
 | `crates/yoke-core/src/memory/` | Memory processing and portable archives |
 | `crates/yoke-core/src/store/` | SQLite migrations and read models |
 | `docs/` | User documentation, design records, and release records |
-| `scripts/` | Changelog generation and release packaging |
+| `scripts/` | Changelog generation, release packaging and preflight, and the Markdown link and dash checker |
 
 The CLI handles process integration and presentation; core owns policy, persistence, and workflow behavior.
 Executable policy comes from human-trusted snapshots rather than unapproved disk changes.
@@ -46,7 +46,7 @@ Unit checks alone do not establish agent integration or rendered UI correctness.
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push to `main` and on every pull request.
-It checks formatting, runs clippy with warnings denied, runs the full `cargo test --workspace --locked` suite on Ubuntu and macOS, enforces `deny.toml` with `cargo deny check`, validates `CHANGELOG.md`, and runs the release packaging unit tests.
+It checks formatting, runs clippy with warnings denied, runs the full `cargo test --workspace --locked` suite on Ubuntu and macOS, enforces `deny.toml` with `cargo deny check`, validates `CHANGELOG.md`, runs the release packaging unit tests, and checks Markdown links, anchors and dashes with `scripts/check_docs.py`.
 Tests marked `#[ignore]` (the synthetic soak trial and the real-reviewer checks) stay out of CI and run only when invoked explicitly with `--ignored`.
 Local runs stay focused on the smallest tests covering a change; CI is where the full suite runs.
 
