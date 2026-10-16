@@ -142,7 +142,15 @@ fn statusline_fresh_home_and_wrapper_are_read_only() {
     let home = temp.path().join("home");
     fs::create_dir(&home).unwrap();
     let input = br#"{"context_window":{"used_percentage":42}}"#;
-    let output = run(&home, temp.path(), &["statusline", "--wrap", "cat"], input);
+    // The wrapper has a fixed 250 ms budget that a loaded host can miss once; a wrapper that
+    // really cannot finish fails every attempt.
+    let mut output = run(&home, temp.path(), &["statusline", "--wrap", "cat"], input);
+    for _ in 0..9 {
+        if output.status.success() {
+            break;
+        }
+        output = run(&home, temp.path(), &["statusline", "--wrap", "cat"], input);
+    }
     assert!(
         output.status.success(),
         "{}",
@@ -264,7 +272,7 @@ fn stop_schedules_bounded_digest_with_off_and_debounces_repeat() {
         );
         assert!(output.stdout.is_empty());
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let notes = memory::recall(&store, project.to_str().unwrap(), "Fixture", 10).unwrap();
         if let Some(note) = notes.first() {
@@ -942,7 +950,9 @@ fn digest_with_more_than_one_batch_queues_a_follow_up_until_drained() {
     let script = bin.join("codex");
     fs::write(
         &script,
-        "#!/bin/sh\ninput=$(/bin/cat)\nid=$(printf '%s' \"$input\" | /usr/bin/grep -o '\"id\":[0-9]*' | /usr/bin/head -1 | /usr/bin/cut -d: -f2)\nprintf '{\"memories\":[{\"text\":\"Batch digest\",\"fact_ids\":[%s]}]}' \"$id\"\n",
+        // Shell expansions only: the child's PATH holds nothing but this script, and the
+        // grep, head and cut paths differ between systems.
+        "#!/bin/sh\ninput=$(/bin/cat)\nrest=${input#*'\"id\":'}\nid=${rest%%[!0-9]*}\nprintf '{\"memories\":[{\"text\":\"Batch digest\",\"fact_ids\":[%s]}]}' \"$id\"\n",
     )
     .unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();

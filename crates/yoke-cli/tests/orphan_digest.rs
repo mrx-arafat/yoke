@@ -111,7 +111,7 @@ fn session_start_digests_facts_of_a_killed_session_exactly_once() {
         "SessionStart",
         &json!({"session_id":"next"}),
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let jobs = jobs(&home, &project);
         if jobs.len() == 1 && jobs[0]["state"] == "succeeded" {

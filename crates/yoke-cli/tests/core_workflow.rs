@@ -48,6 +48,10 @@ impl Fixture {
         cmd.args(args)
             .current_dir(&self.project)
             .env("HOME", &self.home)
+            // The agents' config dirs follow these, so an inherited value would point install
+            // and uninstall at the caller's real configuration.
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
             .env_remove("YOKE_OFF")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -74,6 +78,31 @@ impl Fixture {
 fn payload() -> Value {
     json!({"session_id":"fixture-session","tool_name":"Bash","tool_input":{"command":"echo test","token":"private-token-value"}})
 }
+/// True while the process runs. A killed orphan that nothing has reaped is a zombie on hosts
+/// whose PID 1 does not reap children (containers), and a zombie is not running.
+fn process_exists(pid: i32) -> bool {
+    // SAFETY: signal zero only probes whether the process exists.
+    if unsafe { libc::kill(pid, 0) } == -1 {
+        return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    }
+    match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => !stat
+            .rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with(['Z', 'X'])),
+        Err(_) => true,
+    }
+}
+
+/// Read-only files stop writes for every user except root, which ignores file modes.
+fn file_modes_are_enforced() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = tempfile::tempdir().unwrap();
+    let probe = scratch.path().join("mode-probe");
+    fs::write(&probe, "").unwrap();
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::OpenOptions::new().write(true).open(&probe).is_err()
+}
+
 fn success(output: &Output) {
     assert!(
         output.status.success(),
@@ -205,6 +234,12 @@ fn off_exits_before_parse_or_state_and_trust_has_no_agent_bypass() {
 fn readonly_state_preserves_trusted_tool_decisions_without_audit_writes() {
     use std::os::unix::fs::PermissionsExt;
 
+    if !file_modes_are_enforced() {
+        eprintln!(
+            "skipped: this user can write read-only files, so read-only state cannot be simulated"
+        );
+        return;
+    }
     for (agent, schema_six) in [
         ("claude", false),
         ("codex", false),
@@ -759,7 +794,7 @@ fn daily_update_child_is_check_only_off_and_throttled() {
         success(&output);
         assert!(output.stdout.is_empty());
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if f.store()
             .get_kv("update.latest_version")
@@ -1048,19 +1083,13 @@ fn a_killed_checks_leftover_child_never_keeps_the_plan_from_resuming() {
         .trim()
         .parse()
         .unwrap();
-    let alive = |pid: i32| {
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .unwrap()
-            .success()
-    };
-    assert!(alive(sleeper), "the leftover child must still be running");
+    assert!(
+        process_exists(sleeper),
+        "the leftover child must still be running"
+    );
     let resumed = plan::resume(&store, &f.project, "orphan");
-    Command::new("kill")
-        .arg(sleeper.to_string())
-        .status()
-        .unwrap();
+    // SAFETY: SIGTERM goes to the sleeper this fixture started.
+    unsafe { libc::kill(sleeper, libc::SIGTERM) };
     assert_eq!(resumed.unwrap().state, "building");
 }
 
@@ -1302,19 +1331,16 @@ fn a_blocking_hook_answers_itself_before_the_agent_timeout() {
             started.elapsed() < std::time::Duration::from_secs(8),
             "{mode}"
         );
-        let child = fs::read_to_string(f.home.join(format!("gate-{mode}.pid"))).unwrap();
-        let gone = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while Command::new("kill")
-            .args(["-0", child.trim()])
-            .stderr(Stdio::null())
-            .status()
+        let child: i32 = fs::read_to_string(f.home.join(format!("gate-{mode}.pid")))
             .unwrap()
-            .success()
-        {
+            .trim()
+            .parse()
+            .unwrap();
+        let gone = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while process_exists(child) {
             assert!(
                 std::time::Instant::now() < gone,
-                "{mode}: gate child {} outlived the hook",
-                child.trim()
+                "{mode}: gate child {child} outlived the hook"
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }

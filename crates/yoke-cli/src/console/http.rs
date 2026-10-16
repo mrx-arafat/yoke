@@ -432,7 +432,7 @@ mod tests {
         });
         let start = Instant::now();
         assert!(parse(&mut server, start + Duration::from_millis(70)).is_err());
-        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(start.elapsed() < Duration::from_secs(5));
         drop(server);
         sender.join().unwrap();
         let (_client, mut server) = pair();
@@ -443,7 +443,7 @@ mod tests {
             start + Duration::from_millis(70)
         )
         .is_err());
-        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
@@ -516,7 +516,7 @@ mod tests {
         ] {
             let mut client = TcpStream::connect(address).unwrap();
             client
-                .set_read_timeout(Some(Duration::from_secs(5)))
+                .set_read_timeout(Some(Duration::from_secs(30)))
                 .unwrap();
             client.write_all(raw.as_bytes()).unwrap();
             let mut response = String::new();

@@ -389,6 +389,21 @@ mod tests {
         );
     }
 
+    /// True while the process exists. A killed orphan that nothing has reaped is a zombie on
+    /// hosts whose PID 1 does not reap children (containers), and a zombie is not running.
+    fn process_exists(pid: i32) -> bool {
+        // SAFETY: signal zero only probes whether the process exists.
+        if unsafe { libc::kill(pid, 0) } == -1 {
+            return io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+        }
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => !stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with(['Z', 'X'])),
+            Err(_) => true,
+        }
+    }
+
     fn bash_event(command: &str) -> AgentEvent {
         AgentEvent {
             tool_name: Some("Bash".into()),
@@ -609,7 +624,9 @@ mod tests {
             &bash_event("ls"),
             &context(root.path()),
         );
-        assert!(start.elapsed() < Duration::from_secs(3));
+        // The gate leaves a 30 s sleeper behind; returning in 1 s plus kill time, not 30 s, is
+        // what this pins, so the bound only has to sit well under the sleeper.
+        assert!(start.elapsed() < Duration::from_secs(15));
         assert!(out.blocked());
         assert_eq!(out.gates[0].result, "timeout");
         assert!(out.gates[0].ms >= 1000);
@@ -617,13 +634,8 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            // SAFETY: signal zero only probes the test-owned child's existence.
-            if unsafe { libc::kill(pid, 0) } == -1 {
-                assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
-                break;
-            }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while process_exists(pid) {
             assert!(
                 Instant::now() < deadline,
                 "descendant {pid} survived timeout"

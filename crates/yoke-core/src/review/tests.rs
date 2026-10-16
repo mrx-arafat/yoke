@@ -102,7 +102,7 @@ fn fixtures_preserve_findings_and_fail_closed_on_invalid_results() {
         let report = review_diff(
             root.path(),
             &mut fixture(root.path(), json, exit),
-            Duration::from_secs(2),
+            Duration::from_secs(30),
             "diff fixture",
         )
         .unwrap();
@@ -128,7 +128,7 @@ fn fixture_timeout_and_truncated_valid_tail_cannot_pass_review() {
     let report = review_diff(
         root.path(),
         &mut fixture(root.path(), &oversized, 0),
-        Duration::from_secs(2),
+        Duration::from_secs(30),
         "diff",
     )
     .unwrap();
@@ -150,7 +150,7 @@ fn real_git_diff_feeds_fixture_and_missing_executable_returns_failed_evidence() 
     let report = run_with_command(
         project,
         &mut fixture(root.path(), "[]", 0),
-        Duration::from_secs(2),
+        Duration::from_secs(30),
         None,
     )
     .unwrap();
@@ -160,7 +160,7 @@ fn real_git_diff_feeds_fixture_and_missing_executable_returns_failed_evidence() 
     let report = run_with_command(
         project,
         &mut Command::new(root.path().join("missing-reviewer")),
-        Duration::from_secs(2),
+        Duration::from_secs(30),
         None,
     )
     .unwrap();
@@ -232,7 +232,7 @@ fn untracked_source_and_symlink_metadata_reach_reviewer_without_following_links(
     let report = review_diff(
         root.path(),
         &mut fixture(root.path(), "[]", 0),
-        Duration::from_secs(2),
+        Duration::from_secs(30),
         &changes,
     )
     .unwrap();

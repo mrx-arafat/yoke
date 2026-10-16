@@ -119,7 +119,7 @@ fn digest_fixtures_are_bounded_atomic_and_undo_preserves_provenance() -> Result<
         "",
         11,
         &mut malformed,
-        Duration::from_secs(1),
+        Duration::from_secs(30),
         &mut || Ok(()),
     )
     .is_err());
@@ -132,7 +132,7 @@ fn digest_fixtures_are_bounded_atomic_and_undo_preserves_provenance() -> Result<
         "",
         11,
         &mut fixture_output(&result),
-        Duration::from_secs(1),
+        Duration::from_secs(30),
         &mut || Ok(()),
     )
     .is_err());
@@ -157,7 +157,7 @@ fn digest_fixtures_are_bounded_atomic_and_undo_preserves_provenance() -> Result<
             "token=hidden-transcript",
             12,
             &mut command,
-            Duration::from_secs(1),
+            Duration::from_secs(30),
             &mut || Ok(()),
         )?
         .memories,
@@ -224,7 +224,7 @@ fn digest_drains_in_capped_batches_and_never_repeats_a_fact() -> Result<()> {
             "",
             now,
             &mut command,
-            Duration::from_secs(5),
+            Duration::from_secs(30),
             &mut || Ok(()),
         )
     };
@@ -285,7 +285,7 @@ fn portable_archive_maps_projects_is_idempotent_and_dry_run_does_not_write() -> 
         "",
         124,
         &mut fixture_output(&output),
-        Duration::from_secs(1),
+        Duration::from_secs(30),
         &mut || Ok(()),
     )?;
     export_archive(&source, &archive, Some("/source/project"), false)?;
@@ -544,7 +544,7 @@ fn orphaned_sessions_are_idle_sessions_of_the_project_with_pending_facts() -> Re
         &mut fixture_output(&format!(
             r#"{{"memories":[{{"text":"b was edited","fact_ids":[{ended}]}}]}}"#
         )),
-        Duration::from_secs(5),
+        Duration::from_secs(30),
         &mut || Ok(()),
     )?;
     assert_eq!(

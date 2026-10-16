@@ -173,10 +173,13 @@ mod tests {
         assert!(!launch.redeem("wrong"));
         assert!(launch.redeem(&code));
         assert!(!launch.redeem(&code));
-        let mut stale = Launch::new().unwrap();
-        stale.issued = Instant::now().checked_sub(LIFETIME).unwrap();
-        let code = stale.code.clone().unwrap();
-        assert!(!stale.redeem(&code));
+        // A host that booted less than LIFETIME ago has no earlier instant to expire against.
+        if let Some(issued) = Instant::now().checked_sub(LIFETIME) {
+            let mut stale = Launch::new().unwrap();
+            stale.issued = issued;
+            let code = stale.code.clone().unwrap();
+            assert!(!stale.redeem(&code));
+        }
         assert_eq!(
             session(&c, "yoke_9999=other; yoke_4242=session"),
             Some("session")

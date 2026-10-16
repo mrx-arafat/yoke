@@ -225,7 +225,7 @@ mod tests {
         let out = execute_bounded(
             Command::new("sh").args(["-c", "cat; printf END; printf diagnostic >&2"]),
             &input,
-            Duration::from_secs(3),
+            Duration::from_secs(30),
             1024,
         )
         .unwrap();
@@ -249,6 +249,7 @@ mod tests {
         .unwrap();
         assert!(out.timed_out);
         assert!(!out.success);
-        assert!(start.elapsed() < Duration::from_secs(2));
+        // A kill takes milliseconds; the child sleeps 30 s, so this only tells a kill from a wait.
+        assert!(start.elapsed() < Duration::from_secs(15));
     }
 }

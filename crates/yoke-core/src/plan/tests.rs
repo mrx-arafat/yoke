@@ -548,7 +548,7 @@ fn interrupted_check_recovers_only_after_its_owner_is_gone() {
 /// flock descriptor until they exec, so a free lock can look owned for a moment.
 /// Single-threaded `yoke` processes never see this; a lock held past the deadline still fails.
 fn after_lock_release<T>(mut attempt: impl FnMut() -> anyhow::Result<T>) -> T {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         match attempt() {
             Err(error)
@@ -566,7 +566,9 @@ fn after_lock_release<T>(mut attempt: impl FnMut() -> anyhow::Result<T>) -> T {
 #[test]
 fn running_check_owns_its_plan_so_resume_cannot_take_it() {
     let f = Fixture::new();
-    f.building("title='Example'\n[[check]]\nname='slow'\nrun='sleep 2'\ntimeout=10");
+    // The check runs until the test releases it, so the refusal below never races a timer.
+    f.building("title='Example'\n[[check]]\nname='slow'\nrun='until [ -e ../release ]; do sleep 1; done'\ntimeout=60");
+    let release = f.root.parent().unwrap().join("release");
     let database = f.root.parent().unwrap().join("state.db");
     let root = f.root.clone();
     let runner = std::thread::spawn(move || {
@@ -580,6 +582,7 @@ fn running_check_owns_its_plan_so_resume_cannot_take_it() {
     }
     let refused = resume(&f.store, &f.root, "example").unwrap_err();
     assert!(refused.to_string().contains("live process"), "{refused:#}");
+    fs::write(&release, "").unwrap();
     assert!(runner.join().unwrap().passed);
     assert_eq!(get(&f.store, &f.root, "example").unwrap().state, "done");
 }

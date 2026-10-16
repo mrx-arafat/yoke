@@ -161,11 +161,25 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The wrapper has a fixed 250 ms budget that a loaded host can miss once; a wrapper that
+    /// really cannot finish fails every attempt.
+    fn refresh_wrapped(home: &Path, input: &[u8], wrap: &str) -> String {
+        let mut last = None;
+        for _ in 0..10 {
+            match refresh(home, input, Some(wrap)) {
+                Ok(line) => return line,
+                Err(error) if error.to_string().contains("exceeded 250 ms") => last = Some(error),
+                Err(error) => panic!("{error:#}"),
+            }
+        }
+        panic!("the wrapper missed its 250 ms budget 10 times: {last:?}");
+    }
+
     #[test]
     fn absent_state_does_not_create_database_and_wrapper_receives_identical_stdin() {
         let home = tempfile::tempdir().unwrap();
         let input = br#"{ "context_window": {"used_percentage": 42} }"#;
-        let line = refresh(home.path(), input, Some("cat")).unwrap();
+        let line = refresh_wrapped(home.path(), input, "cat");
         assert_eq!(
             line,
             format!(

@@ -956,6 +956,10 @@ mod tests {
     #[test]
     fn allows_shell_reads_and_unprotected_paths() {
         let (home, project) = homes();
+        // A sibling directory, never a fixed one: tests create their home under the system temp
+        // directory, and deleting an ancestor of ~/.yoke is denied by design.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let cd_elsewhere = format!("cd {} && rm -rf .", elsewhere.path().display());
         let rows = [
             ("rm -rf target/", false),
             ("rm -rf .yoke-other", false),
@@ -970,9 +974,7 @@ mod tests {
             ("git status", false),
             ("sqlite3 tests/fixtures/other.db .tables", false),
             ("rm -rf .", false),
-            // Not /tmp: tests create their home under it on Linux, and deleting an ancestor of
-            // ~/.yoke is denied by design.
-            ("cd /opt && rm -rf .", false),
+            (cd_elsewhere.as_str(), false),
             ("echo x 2>&1 | tee log.txt", false),
             ("cat list.txt | xargs rm -f", false),
             (r"find target -name '*.o' -exec rm {} ;", false),

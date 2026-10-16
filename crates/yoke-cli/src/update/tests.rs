@@ -163,14 +163,14 @@ fn bounded_process_rejects_excess_output_failure_and_deadline() {
     let mut output = Command::new("/bin/sh");
     output.args(["-c", "printf 12345"]);
     assert!(
-        transport::collect("update download", &mut output, 4, Duration::from_secs(2))
+        transport::collect("update download", &mut output, 4, Duration::from_secs(30))
             .unwrap_err()
             .to_string()
             .contains("size limit")
     );
     let mut failed = Command::new("/bin/sh");
     failed.args(["-c", "exit 7"]);
-    let message = transport::collect("release check", &mut failed, 4, Duration::from_secs(2))
+    let message = transport::collect("release check", &mut failed, 4, Duration::from_secs(30))
         .unwrap_err()
         .to_string();
     assert!(
@@ -179,7 +179,8 @@ fn bounded_process_rejects_excess_output_failure_and_deadline() {
     );
     assert!(!message.contains("download"), "{message}");
     let mut blocked = Command::new("/bin/sh");
-    blocked.args(["-c", "exec sleep 10"]);
+    // The 40 ms deadline must cut the 30 s sleep short; the bound only tells a kill from a wait.
+    blocked.args(["-c", "exec sleep 30"]);
     let start = Instant::now();
     assert!(transport::collect(
         "update download",
@@ -188,7 +189,7 @@ fn bounded_process_rejects_excess_output_failure_and_deadline() {
         Duration::from_millis(40)
     )
     .is_err());
-    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(start.elapsed() < Duration::from_secs(15));
 }
 
 #[test]
