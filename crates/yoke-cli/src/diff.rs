@@ -44,8 +44,9 @@ pub fn run(store: &Store, project: &Path, slug: &str, json: bool) -> Result<()> 
         return Ok(());
     }
     // Quoted lines keep terminal control sequences in reviewed files inert.
-    println!("lines[{}]:", diff.lines().count());
-    for line in diff.lines() {
+    let lines: Vec<&str> = diff.lines().filter(|line| !line.is_empty()).collect();
+    println!("lines[{}]:", lines.len());
+    for line in lines {
         println!("  {}", commands::quote(line));
     }
     println!("help: \"Run yoke plan diff {slug} --json for the exact unquoted review input.\"");

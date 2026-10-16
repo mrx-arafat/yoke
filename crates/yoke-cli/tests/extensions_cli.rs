@@ -209,8 +209,12 @@ fn extensions_redacts_file_origins_and_symlink_notes_in_text_and_json() {
 
     for args in [vec!["extensions"], vec!["extensions", "--json"]] {
         let output = yoke(&home, &project, &args, b"");
-        assert_eq!(output.status.code(), Some(1));
+        // Two `reviewer` agents are only shadowed, which is reported but does not fail the check.
+        assert_eq!(output.status.code(), Some(0));
         let shown = String::from_utf8(output.stdout).unwrap();
+        if args.len() == 1 {
+            assert!(shown.contains("(exit 0)"), "{shown}");
+        }
         for secret in [
             "ghp_filenamealpha",
             "ghp_filenamebeta",
@@ -225,6 +229,58 @@ fn extensions_redacts_file_origins_and_symlink_notes_in_text_and_json() {
             assert_eq!(report["drift"][0]["origins"].as_array().unwrap().len(), 2);
         }
     }
+}
+
+#[test]
+fn extensions_text_leads_with_summary_and_drift_counts_outside_links_and_shows_detail() {
+    let (temp, home, project) = dirs();
+    let skill = |dir: &Path, name: &str| {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
+    };
+    skill(&home.join(".claude/skills/demo"), "demo");
+    skill(&project.join(".claude/skills/demo"), "demo");
+    let outside = temp.path().join("manager/linked");
+    skill(&outside, "linked");
+    std::os::unix::fs::symlink(&outside, home.join(".claude/skills/linked")).unwrap();
+    fs::write(
+        project.join(".mcp.json"),
+        r#"{"mcpServers":{"ghost":{"command":"definitely-missing-program-xyz","args":["a"]}}}"#,
+    )
+    .unwrap();
+
+    let output = yoke(&home, &project, &["extensions"], b"");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a dangling command fails the check"
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    let first = text.lines().next().unwrap();
+    assert!(first.starts_with("summary: "), "{text}");
+    assert!(
+        first.contains("drift 2 (shadowed 1, dangling 1)"),
+        "{first}"
+    );
+    assert!(
+        first.contains("symlinks outside the scanned roots 1"),
+        "{first}"
+    );
+    assert!(text.find("drift[").unwrap() < text.find("extensions[").unwrap());
+    assert!(
+        !text.contains("notes["),
+        "outside links are counted, not listed: {text}"
+    );
+    assert!(!text.contains("symlink outside scanned roots"), "{text}");
+    assert!(
+        text.contains("{agent,kind,name,scope,managed,origin,detail}"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"definitely-missing-program-xyz (1 arg)\""),
+        "{text}"
+    );
 }
 
 #[test]

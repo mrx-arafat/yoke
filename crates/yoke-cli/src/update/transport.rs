@@ -5,23 +5,100 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context, Result};
 
-/// Fetch for `yoke update`; errors describe an update download.
+/// Fetch a release file for `yoke update`; errors describe an update download.
 pub(super) fn download(url: &str, limit: usize) -> Result<Vec<u8>> {
     fetch("update download", url, limit)
 }
 
-/// The same bounded request for `yoke update --check`, which installs nothing,
-/// so errors describe a release check rather than a download.
-pub(super) fn check(url: &str, limit: usize) -> Result<Vec<u8>> {
-    fetch("release check", url, limit)
+/// The release metadata request shared by `yoke update` and `yoke update --check`,
+/// which installs nothing, so its errors describe a lookup rather than a download.
+pub(super) fn lookup(url: &str, limit: usize) -> Result<Vec<u8>> {
+    fetch("release lookup", url, limit)
+}
+
+/// What curl prints after the body: a newline and the three-digit HTTP status.
+const STATUS_TRAILER: usize = 4;
+
+/// A GitHub answer that was not a success; `update.rs` treats 404 on the lookup as "no release".
+#[derive(Debug)]
+pub(super) struct HttpStatus {
+    what: String,
+    code: u16,
+}
+
+impl HttpStatus {
+    pub(super) fn new(what: &str, code: u16) -> Self {
+        Self {
+            what: what.into(),
+            code,
+        }
+    }
+
+    pub(super) fn code(&self) -> u16 {
+        self.code
+    }
+}
+
+impl std::fmt::Display for HttpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = &self.what;
+        match self.code {
+            404 => write!(f, "{what} failed: GitHub answered 404, the file was not found"),
+            403 | 429 => write!(
+                f,
+                "{what} failed: GitHub rate limit reached (HTTP {}); try again later, unauthenticated requests are limited per IP address",
+                self.code
+            ),
+            500..=599 => write!(
+                f,
+                "{what} failed: GitHub answered HTTP {}; try again later",
+                self.code
+            ),
+            code => write!(f, "{what} failed: GitHub answered HTTP {code}"),
+        }
+    }
+}
+
+impl std::error::Error for HttpStatus {}
+
+/// Split the trailing HTTP status off curl's output and keep the body only for a 2xx answer.
+pub(super) fn split_status(what: &str, mut bytes: Vec<u8>, limit: usize) -> Result<Vec<u8>> {
+    ensure!(
+        bytes.len() >= STATUS_TRAILER,
+        "{what} failed: no HTTP status in the response"
+    );
+    let body_len = bytes.len() - STATUS_TRAILER;
+    let code = std::str::from_utf8(&bytes[body_len..])
+        .ok()
+        .and_then(|trailer| trailer.strip_prefix('\n'))
+        .and_then(|digits| digits.parse::<u16>().ok())
+        .with_context(|| format!("{what} failed: no HTTP status in the response"))?;
+    if !(200..300).contains(&code) {
+        return Err(HttpStatus::new(what, code).into());
+    }
+    bytes.truncate(body_len);
+    ensure!(bytes.len() <= limit, "{what} exceeds size limit");
+    Ok(bytes)
+}
+
+/// Why curl itself failed, in words about the user's situation rather than curl's numbers.
+fn exit_message(what: &str, status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(6) => format!("{what} failed (curl exit 6): cannot resolve the GitHub host; check DNS and connectivity"),
+        Some(7) => format!("{what} failed (curl exit 7): cannot connect to GitHub; check connectivity"),
+        Some(28) => format!("{what} failed (curl exit 28): timed out; check connectivity"),
+        Some(35 | 60) => format!("{what} failed (curl exit {}): the TLS connection to GitHub failed; check the system clock and certificates", status.code().unwrap_or_default()),
+        Some(63) => format!("{what} exceeds size limit"),
+        _ => format!("{what} failed ({status}); check connectivity"),
+    }
 }
 
 fn fetch(what: &str, url: &str, limit: usize) -> Result<Vec<u8>> {
     ensure!(url.starts_with("https://"), "update requires HTTPS");
     let mut command = Command::new("curl");
+    // No `--fail`: its exit 22 hides the HTTP status. `--write-out` appends the status instead.
     command.args([
         "--disable",
-        "--fail",
         "--silent",
         "--location",
         "--proto",
@@ -40,10 +117,18 @@ fn fetch(what: &str, url: &str, limit: usize) -> Result<Vec<u8>> {
         "Accept: application/vnd.github+json",
         "--user-agent",
         concat!("yoke/", env!("CARGO_PKG_VERSION")),
+        "--write-out",
+        "\n%{http_code}",
         "--url",
         url,
     ]);
-    collect(what, &mut command, limit, Duration::from_secs(35))
+    let bytes = collect(
+        what,
+        &mut command,
+        limit + STATUS_TRAILER,
+        Duration::from_secs(35),
+    )?;
+    split_status(what, bytes, limit)
 }
 
 /// Run `command` with bounded output and time; `what` names the operation in errors.
@@ -80,10 +165,7 @@ pub(super) fn collect(
         ensure!(bytes.len() <= limit, "{what} exceeds size limit");
         loop {
             if let Some(status) = child.try_wait()? {
-                ensure!(
-                    status.success(),
-                    "{what} failed ({status}); check connectivity and release availability"
-                );
+                ensure!(status.success(), "{}", exit_message(what, status));
                 return Ok(bytes);
             }
             if start.elapsed() >= timeout {

@@ -98,12 +98,32 @@ pub struct Drift {
     pub origins: Vec<PathBuf>,
 }
 
+impl Drift {
+    /// Whether this finding makes `yoke extensions` exit 1. A shadowed name is often a
+    /// deliberate override, and the report already states which definition wins, so it is
+    /// shown without failing; a stale managed hook or a missing program is real breakage.
+    pub fn fails_check(&self) -> bool {
+        self.kind != DriftKind::Shadowed
+    }
+}
+
+/// Start of the note for a link that leaves every scanned root; the target follows.
+pub(crate) const OUTSIDE_LINK: &str = "symlink outside scanned roots: ";
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct Note {
     #[serde(serialize_with = "serialize_path")]
     pub path: PathBuf,
     #[serde(serialize_with = "serialize_text")]
     pub note: String,
+}
+
+impl Note {
+    /// Links to a skill manager's store are normal and cannot be acted on, so text output
+    /// counts them instead of listing each one.
+    pub fn is_outside_link(&self) -> bool {
+        self.note.starts_with(OUTSIDE_LINK)
+    }
 }
 
 // Redact only output: filesystem access and managed-hook ownership need the raw paths.

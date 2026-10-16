@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::Value;
 use yoke_core::config::{self, LoadedConfig};
-use yoke_core::store::{DecisionFilter, Store};
+use yoke_core::store::Store;
 use yoke_core::{guard, trust};
 
 use crate::{install, memory, presets, update, workflow, AgentArg, Cmd};
@@ -91,12 +91,12 @@ pub fn confirm(phrase: &str) -> Result<bool> {
 
 pub fn run(command: Option<Cmd>) -> Result<()> {
     match command {
-        Some(Cmd::Console { no_open }) => {
+        Some(Cmd::Console { no_open, port }) => {
             // The console can approve, resume and acknowledge, so only a human may start it.
             require_human("console")?;
             let home = home()?;
             let (_, loaded) = load_project()?;
-            crate::console::run(&home, &loaded.project_root, !no_open)
+            crate::console::run(&home, &loaded.project_root, !no_open, port)
         }
         Some(Cmd::Statusline { wrap }) => crate::statusline::run(wrap.as_deref()),
         Some(Cmd::Plan { command }) => workflow::run(command),
@@ -104,7 +104,8 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
             slug,
             session,
             agent,
-        }) => workflow::review(slug, session, agent),
+            json,
+        }) => workflow::review(slug, session, agent, json),
         Some(Cmd::Remember { text, pinned }) => memory::remember(&text, pinned),
         Some(Cmd::Recall {
             query,
@@ -141,31 +142,7 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
             tool,
             limit,
             json,
-        }) => {
-            let records = open_store(&home()?)?.decisions(&DecisionFilter {
-                project,
-                session,
-                outcome,
-                tool,
-                limit: usize::from(limit),
-            })?;
-            if json {
-                println!("{}", serde_json::to_string(&records)?);
-            } else {
-                println!("decisions[{}]{{ts,event,outcome,reason}}:", records.len());
-                for row in records {
-                    println!(
-                        "  {},{},{},{}",
-                        row.ts,
-                        quote(&row.event),
-                        quote(&row.outcome),
-                        quote(row.reason.as_deref().unwrap_or(""))
-                    );
-                }
-                println!("help: \"Run yoke log --json for complete stored records; --limit is bounded to 1000.\"");
-            }
-            Ok(())
-        }
+        }) => crate::log_cmd::run(project, session, outcome, tool, limit, json),
         Some(Cmd::RunHook { .. }) => unreachable!("hook dispatch precedes normal commands"),
         other => {
             let home = home()?;
@@ -187,7 +164,7 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
                         quote(&loaded.project_root.display().to_string())
                     );
                     gates(&loaded);
-                    println!("help: \"Run yoke config to inspect trust, yoke log for decisions, or yoke --help for commands.\"");
+                    println!("help: \"Run yoke health to check that your agents are protected, yoke config to inspect trust, yoke log for decisions, or yoke --help for commands.\"");
                 }
                 _ => unreachable!(),
             }
@@ -203,7 +180,13 @@ fn init() -> Result<()> {
         .open("yoke.toml")
     {
         Ok(mut file) => {
-            file.write_all(include_bytes!("../starter.toml"))?;
+            let directory = std::env::current_dir().ok();
+            let name = directory
+                .as_deref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("my-project");
+            file.write_all(crate::starter::render(name).as_bytes())?;
             println!("config: \"Created yoke.toml; it contributes no gates until a human runs yoke trust.\"");
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -232,6 +215,43 @@ fn gates(loaded: &LoadedConfig) {
                     .map(String::as_str)
                     .unwrap_or("default")
             )
+        );
+    }
+    trust_help(loaded);
+}
+
+/// Tables of ignored settings look the same as tables of nothing; say which one this is.
+fn trust_help(loaded: &LoadedConfig) {
+    let ignored: Vec<&yoke_core::trust::SnapshotStatus> = loaded
+        .snapshots
+        .iter()
+        .filter(|snapshot| snapshot.exists && !snapshot.trusted)
+        .collect();
+    if !ignored.is_empty() {
+        let files: Vec<String> = ignored
+            .iter()
+            .map(|snapshot| snapshot.file.display().to_string())
+            .collect();
+        let command = if ignored.iter().all(|snapshot| snapshot.scope == "global") {
+            "yoke trust --global"
+        } else {
+            "yoke trust (yoke trust --global for the global file)"
+        };
+        println!(
+            "help: {}",
+            quote(&format!(
+                "{} is not trusted, so its settings and gates are ignored; review it and run {command} in your own terminal.",
+                files.join(", ")
+            ))
+        );
+    }
+    for snapshot in loaded.snapshots.iter().filter(|snapshot| snapshot.stale) {
+        println!(
+            "help: {}",
+            quote(&format!(
+                "{} changed after it was trusted; Yoke keeps using the trusted bytes until you review it and run yoke trust.",
+                snapshot.file.display()
+            ))
         );
     }
 }
@@ -293,18 +313,20 @@ fn config(loaded: &LoadedConfig) -> Result<()> {
         );
     }
     println!(
-        "snapshots[{}]{{file,trusted,stale,error}}:",
+        "snapshots[{}]{{file,trusted,stale,exists,error}}:",
         loaded.snapshots.len()
     );
     for snapshot in &loaded.snapshots {
         println!(
-            "  {},{},{},{}",
+            "  {},{},{},{},{}",
             quote(&snapshot.file.display().to_string()),
             snapshot.trusted,
             snapshot.stale,
+            snapshot.exists,
             quote(snapshot.disk_error.as_deref().unwrap_or(""))
         );
     }
+    trust_help(loaded);
     println!(
         "help: \"Run yoke config --json for structured configuration and snapshot metadata.\""
     );
@@ -372,11 +394,12 @@ fn install(agents: Vec<AgentArg>, dry_run: bool, statusline: bool, remove: bool)
     for change in report.changes {
         println!("file: {}", quote(&change.path.display().to_string()));
         if dry_run {
-            println!(
-                "before: {}\nafter: {}",
-                quote(change.before.as_deref().unwrap_or("")),
-                quote(change.after.as_deref().unwrap_or(""))
-            );
+            // Changed lines with two lines of context; "-" is removed, "+" is added.
+            for line in
+                crate::preview::change_lines(change.before.as_deref(), change.after.as_deref())
+            {
+                println!("{line}");
+            }
         }
     }
     for warning in report.warnings {

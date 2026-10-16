@@ -16,6 +16,8 @@ pub struct SnapshotStatus {
     pub file: PathBuf,
     pub trusted: bool,
     pub stale: bool,
+    /// Whether the file is on disk. An absent, untrusted file is nothing to review.
+    pub exists: bool,
     pub disk_error: Option<String>,
 }
 
@@ -232,14 +234,19 @@ fn snapshot(store: &Store, scope: &str, root: &Path, file: &Path) -> Result<Opti
 }
 
 fn status(scope: &str, file: &Path, row: Option<&TrustRow>) -> SnapshotStatus {
-    let (stale, disk_error) = match read_regular_file(file) {
-        Ok(bytes) => (row.is_some_and(|row| sha256(&bytes) != row.sha256), None),
+    let (stale, exists, disk_error) = match read_regular_file(file) {
+        Ok(bytes) => (
+            row.is_some_and(|row| sha256(&bytes) != row.sha256),
+            true,
+            None,
+        ),
         Err(error) => {
             let missing = error
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|error| error.kind() == ErrorKind::NotFound);
             (
                 row.is_some(),
+                !missing,
                 if missing && row.is_none() {
                     None
                 } else {
@@ -253,6 +260,7 @@ fn status(scope: &str, file: &Path, row: Option<&TrustRow>) -> SnapshotStatus {
         file: file.into(),
         trusted: row.is_some(),
         stale,
+        exists,
         disk_error,
     }
 }

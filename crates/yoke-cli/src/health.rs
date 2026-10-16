@@ -10,7 +10,7 @@ use serde::Serialize;
 use yoke_core::config::{self, Mode};
 use yoke_core::store::Store;
 
-use crate::{commands, install};
+use crate::{commands, hook, install};
 
 #[derive(Serialize)]
 struct Report {
@@ -39,6 +39,8 @@ struct Policy {
     file: String,
     trusted: bool,
     stale: bool,
+    /// Whether the file is on disk; an absent file is not something to review.
+    exists: bool,
 }
 
 #[derive(Serialize)]
@@ -130,9 +132,12 @@ fn collect(inputs: Inputs) -> Result<Report> {
             schema => (store, true, path.exists().then_some(schema)),
         },
         Err(error) => {
+            let detail = format!("{error:#}");
             problems.push(format!(
-                "cannot read {}: {error:#}; check free disk space and file permissions",
-                path.display()
+                "cannot read {}: {detail}; {}",
+                path.display(),
+                hook::newer_state_hint(&detail)
+                    .unwrap_or("check free disk space and file permissions")
             ));
             (Store::open(":memory:")?, false, None)
         }
@@ -163,6 +168,7 @@ fn collect(inputs: Inputs) -> Result<Report> {
                 file: snapshot.file.display().to_string(),
                 trusted: snapshot.trusted,
                 stale: snapshot.stale,
+                exists: snapshot.exists,
             })
             .collect();
         if readable {
@@ -197,8 +203,16 @@ fn collect(inputs: Inputs) -> Result<Report> {
         }
         if agent.event_readable && agent.last_event.is_none() {
             guidance.push(format!(
-                "No {name} hook event is recorded yet; start {name} in a project to confirm its hooks run."
+                "No {name} hook event is recorded yet; start {name} in a project to confirm its hooks run.{}",
+                if name == "codex" {
+                    " Codex skips hooks you have not approved, with no warning, including in `codex exec`."
+                } else {
+                    ""
+                }
             ));
+        }
+        if name == "claude" && !agent.install.statusline {
+            guidance.push("Optional: Claude's statusline is not installed; `yoke install --agent claude --statusline` shows Yoke's mode, plan, alerts and your quota in Claude Code's prompt bar, and `yoke usage` prints the same quota without it.".into());
         }
         if name == "codex" {
             guidance.extend(agent.install.notes.iter().cloned());
@@ -228,8 +242,10 @@ fn collect(inputs: Inputs) -> Result<Report> {
                 })
                 .collect::<Vec<_>>()
         });
-    if plans.as_ref().is_some_and(Vec::is_empty) {
-        guidance.push("No unfinished plan in this project, so Stop is not held for plan checks; start one with `yoke plan new <slug>`.".into());
+    match &plans {
+        Some(plans) if plans.is_empty() => guidance.push("No unfinished plan in this project, so Stop is not held for plan checks; start one with `yoke plan new <slug>`.".into()),
+        Some(plans) => guidance.extend(plans.iter().filter_map(plan_step)),
+        None => {}
     }
     let status = if !problems.is_empty() {
         "failing"
@@ -258,8 +274,26 @@ fn collect(inputs: Inputs) -> Result<Report> {
 }
 
 fn policy_guidance(loaded: &config::LoadedConfig, guidance: &mut Vec<String>) {
-    if !loaded.snapshots.iter().any(|snapshot| snapshot.trusted) {
-        guidance.push("No trusted policy applies here; review yoke.toml (`yoke init` writes a starter) and run `yoke trust` in your own terminal.".into());
+    // Only files that exist are work for the user; the project and knowledge files usually do not.
+    let mut waiting = false;
+    for snapshot in loaded
+        .snapshots
+        .iter()
+        .filter(|snapshot| !snapshot.trusted && snapshot.exists)
+    {
+        waiting = true;
+        let trust = if snapshot.scope == "global" {
+            "yoke trust --global"
+        } else {
+            "yoke trust"
+        };
+        guidance.push(format!(
+            "{} is not trusted, so Yoke ignores it; review it and run `{trust}` in your own terminal.",
+            snapshot.file.display()
+        ));
+    }
+    if !waiting && !loaded.snapshots.iter().any(|snapshot| snapshot.trusted) {
+        guidance.push("No policy exists yet: run `yoke init` in a project to write a starter yoke.toml, then `yoke trust`; or run `yoke preset add git-safety --global`, then `yoke trust --global`, to cover every project.".into());
     }
     for snapshot in loaded.snapshots.iter().filter(|snapshot| snapshot.stale) {
         guidance.push(format!(
@@ -270,6 +304,19 @@ fn policy_guidance(loaded: &config::LoadedConfig, guidance: &mut Vec<String>) {
     if loaded.config.mode == Mode::Observe {
         guidance.push("Observe mode records what would be denied but blocks nothing; review `yoke log --outcome would_deny`, then set mode = \"enforce\" in yoke.toml and run `yoke trust` in your own terminal.".into());
     }
+}
+
+/// The next step for an unfinished plan, in the words of `yoke plan` itself.
+fn plan_step(plan: &PlanReport) -> Option<String> {
+    let slug = &plan.slug;
+    Some(match plan.state.as_str() {
+        "draft" => format!("Plan {slug} is a draft: a human approves it with `yoke plan approve {slug}` in their own terminal, then the builder runs `yoke plan start {slug} --session <session-id>`."),
+        "approved" => format!("Plan {slug} is approved: the builder runs `yoke plan start {slug} --session <session-id>`."),
+        "building" => format!("Plan {slug} is being built: the builder runs `yoke plan check {slug} --agent <claude|codex>` when the work is ready."),
+        "waiting" | "stalled" => format!("Plan {slug} is {}: a human resumes it with `yoke plan resume {slug}` in their own terminal.", plan.state),
+        "checking" => format!("Plan {slug} is being checked: if the check process is gone, a human runs `yoke plan resume {slug}`."),
+        _ => return None,
+    })
 }
 
 /// Installation state never depends on the database: a failed decision lookup (for example a
@@ -334,13 +381,17 @@ fn print_text(report: &Report) {
     );
     println!("mode: {}", report.mode.unwrap_or("unknown"));
     println!("project: {}", quote(&report.project));
-    println!("policy[{}]{{file,trusted,stale}}:", report.policy.len());
+    println!(
+        "policy[{}]{{file,trusted,stale,exists}}:",
+        report.policy.len()
+    );
     for policy in &report.policy {
         println!(
-            "  {},{},{}",
+            "  {},{},{},{}",
             quote(&policy.file),
             policy.trusted,
-            policy.stale
+            policy.stale,
+            policy.exists
         );
     }
     println!(
@@ -354,7 +405,10 @@ fn print_text(report: &Report) {
             agent.install.agent,
             agent.install.installed,
             quote(&agent.install.settings.display().to_string()),
-            last.map_or_else(|| "none".to_owned(), |last| last.ts.to_string()),
+            last.map_or_else(
+                || "none".to_owned(),
+                |last| quote(&yoke_core::timefmt::local_time(last.ts))
+            ),
             last.map_or("none", |last| last.mode.as_str()),
             last.map_or("none", |last| last.outcome.as_str())
         );

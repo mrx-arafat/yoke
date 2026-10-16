@@ -83,9 +83,12 @@ pub(super) fn requested(console: &Console, request: &Request) -> bool {
 /// Redeem the launch code for the session cookie, then send the browser to the console.
 pub(super) fn respond(console: &Console, launch: &mut Launch, request: Request) -> Result<()> {
     let (_, params) = query(request.url())?;
-    let host = request.header("host") == Some(console.host.as_str());
     let code = params.get("code").map(String::as_str).unwrap_or_default();
-    if !host || !launch.redeem(code) {
+    // A wrong address never spends the code, so the right address can still use the link.
+    if request.header("host") != Some(console.host.as_str()) {
+        return wrong_address(&console.host, request);
+    }
+    if !launch.redeem(code) {
         return expired(request);
     }
     eprintln!("Yoke console: launch link used; it no longer works.");
@@ -108,6 +111,25 @@ pub(super) fn respond(console: &Console, launch: &mut Launch, request: Request) 
 
 /// Static refusal page: no secret, no cookie, no project data.
 fn expired(request: Request) -> Result<()> {
+    refusal(
+        request,
+        "Launch link expired",
+        "<h1>This launch link no longer works</h1><p>Each console link opens once, within five minutes of starting the console.</p><p>Run <code>yoke console</code> again in your own terminal for a new link.</p>",
+    )
+}
+
+/// The link reached the console under a host name or port it does not answer to. `host` is the
+/// console's own loopback address, not anything the request supplied.
+fn wrong_address(host: &str, request: Request) -> Result<()> {
+    let port = host.rsplit(':').next().unwrap_or_default();
+    refusal(
+        request,
+        "Wrong address",
+        &format!("<h1>This is not the console's address</h1><p>Open the link exactly as the console printed it. It starts with <code>http://{host}/</code>; <code>localhost</code> and other host names are refused.</p><p>Over SSH, forward the same port number on both sides: <code>ssh -N -L {port}:127.0.0.1:{port} &lt;server&gt;</code>. This link has not been used up.</p>"),
+    )
+}
+
+fn refusal(request: Request, title: &str, content: &str) -> Result<()> {
     // A hash-allowed inline style keeps /assets/console.css behind the session cookie.
     let allowed = format!(
         "style-src 'sha256-{}'",
@@ -120,7 +142,7 @@ fn expired(request: Request) -> Result<()> {
         }
     }
     let body = format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Launch link expired &middot; Yoke</title><style>{EXPIRED_STYLE}</style></head><body><main role="alert"><h1>This launch link no longer works</h1><p>Each console link opens once, within five minutes of starting the console.</p><p>Run <code>yoke console</code> again in your own terminal for a new link.</p></main></body></html>"#
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>{title} &middot; Yoke</title><style>{EXPIRED_STYLE}</style></head><body><main role="alert">{content}</main></body></html>"#
     );
     request.respond(403, headers, body.as_bytes())?;
     Ok(())
@@ -220,6 +242,50 @@ mod tests {
             .write_all(format!("GET {target} HTTP/1.1\r\nHost: {host}\r\n{cookie}\r\n").as_bytes())
             .unwrap();
         (server.recv().unwrap(), client)
+    }
+
+    #[test]
+    fn a_launch_link_at_the_wrong_address_names_the_right_one_and_is_not_spent() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().canonicalize().unwrap();
+        let server = super::super::http::Server::bind_loopback().unwrap();
+        let host = server.local_addr().unwrap().to_string();
+        let c = Console {
+            home: project.clone(),
+            database: project.join("state.db"),
+            project,
+            token: random_token().unwrap(),
+            csrf: "csrf".into(),
+            host: host.clone(),
+        };
+        let mut launch = Launch::new().unwrap();
+        let target = launch.url(&c).replacen(&format!("http://{host}"), "", 1);
+        let port = host.rsplit(':').next().unwrap();
+
+        let mut client = std::net::TcpStream::connect(&host).unwrap();
+        let wrong = format!("localhost:{port}");
+        client
+            .write_all(format!("GET {target} HTTP/1.1\r\nHost: {wrong}\r\n\r\n").as_bytes())
+            .unwrap();
+        let request = server.recv().unwrap();
+        respond(&c, &mut launch, request).unwrap();
+        let response = read(client);
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+        assert!(response.contains(&format!("http://{host}/")), "{response}");
+        assert!(response.contains(&format!("ssh -N -L {port}:127.0.0.1:{port}")));
+        assert!(!response.contains("no longer works"), "{response}");
+        let code = target.rsplit('=').next().unwrap();
+        for secret in [c.token.as_str(), code, "Set-Cookie"] {
+            assert!(!response.contains(secret), "{secret} leaked: {response}");
+        }
+
+        let (request, client) = get(&server, &host, &target, "");
+        respond(&c, &mut launch, request).unwrap();
+        assert!(
+            read(client).starts_with("HTTP/1.1 303"),
+            "the code was spent"
+        );
     }
 
     fn read(mut client: std::net::TcpStream) -> String {

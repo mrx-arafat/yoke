@@ -252,10 +252,12 @@ fn verify(checks: &[CheckRun]) -> Vec<EvidenceReport> {
 /// Capture the exact header the caller will display for human confirmation.
 pub fn prepare_approval(store: &Store, project: &Path, slug: &str) -> Result<PreparedApproval> {
     let plan = get(store, project, slug)?;
-    ensure!(
-        !matches!(plan.state.as_str(), "checking" | "done" | "cancelled"),
-        "cannot approve a checking, completed, or cancelled plan"
-    );
+    if matches!(plan.state.as_str(), "checking" | "done" | "cancelled") {
+        return Err(wrong_state(
+            &plan,
+            "a checking, completed, or cancelled plan cannot be approved",
+        ));
+    }
     let content = files::read(&plan)?;
     let (header, _) = files::parse(&content)?;
     feedback::ensure_unblocked(store.connection(), &plan)?;
@@ -273,13 +275,15 @@ pub fn prepare_approval(store: &Store, project: &Path, slug: &str) -> Result<Pre
 
 /// Freeze the displayed header; the caller must authenticate and confirm the human action.
 pub fn approve(store: &Store, prepared: &PreparedApproval) -> Result<PlanRecord> {
-    ensure!(
-        !matches!(
-            prepared.plan.state.as_str(),
-            "checking" | "done" | "cancelled"
-        ),
-        "cannot approve a checking, completed, or cancelled plan"
-    );
+    if matches!(
+        prepared.plan.state.as_str(),
+        "checking" | "done" | "cancelled"
+    ) {
+        return Err(wrong_state(
+            &prepared.plan,
+            "a checking, completed, or cancelled plan cannot be approved",
+        ));
+    }
     ensure!(
         files::hash(prepared.header.as_bytes()) == prepared.digest,
         "approval digest mismatch"
@@ -294,10 +298,56 @@ pub fn approve(store: &Store, prepared: &PreparedApproval) -> Result<PlanRecord>
     })
 }
 
+/// Who moves a plan forward from its current state, in the words a user can act on.
+fn next_step(plan: &PlanRecord) -> String {
+    let slug = &plan.slug;
+    match plan.state.as_str() {
+        "draft" => format!("a human approves it with `yoke plan approve {slug}` in their own terminal, then the builder runs `yoke plan start {slug} --session <session-id>`"),
+        "approved" => format!("the builder runs `yoke plan start {slug} --session <session-id>`"),
+        "building" => format!("the builder runs `yoke plan check {slug} --agent <claude|codex>` when the work is ready"),
+        "waiting" | "stalled" => format!("a human resumes it with `yoke plan resume {slug}` in their own terminal"),
+        "checking" => format!("wait for the running check to finish; if its process is gone, a human runs `yoke plan resume {slug}`"),
+        "done" => "it is already complete".to_owned(),
+        "cancelled" => "it was cancelled; create a new plan with `yoke plan new <slug>`".to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// Refuse an action the plan's state does not allow, naming that state and the next step.
+fn wrong_state(plan: &PlanRecord, rule: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "plan '{}' is {}, but {rule}; {}",
+        plan.slug,
+        plan.state,
+        next_step(plan)
+    )
+}
+
+/// Plans compare against HEAD, so a repository without a first commit cannot review or start one.
+pub fn has_head(project: &Path) -> bool {
+    files::head(project).is_ok()
+}
+
+/// What to tell a user whose repository has no commit yet.
+pub const NO_HEAD_ADVICE: &str = "This repository has no commit yet and plans compare against HEAD; make an initial commit first (git needs user.name and user.email set to commit)";
+
+/// Standalone review evidence belongs to work in progress; an unstarted plan has none.
+pub fn ensure_started(plan: &PlanRecord) -> Result<()> {
+    if matches!(plan.state.as_str(), "draft" | "approved") {
+        return Err(wrong_state(
+            plan,
+            "review evidence attaches only to a plan that has started",
+        ));
+    }
+    Ok(())
+}
+
 pub fn start(store: &Store, project: &Path, slug: &str, session: &str) -> Result<PlanRecord> {
     ensure!(!session.trim().is_empty(), "session is required");
     let plan = get(store, project, slug)?;
-    ensure!(plan.state == "approved", "only an approved plan can start");
+    if plan.state != "approved" {
+        return Err(wrong_state(&plan, "only an approved plan can start"));
+    }
     files::approved(&plan)?;
     let base_ref = files::head(Path::new(&plan.project))?;
     storage::start(store, &plan, session, &base_ref)
@@ -306,7 +356,9 @@ pub fn start(store: &Store, project: &Path, slug: &str, session: &str) -> Result
 pub fn ask(store: &Store, project: &Path, slug: &str, question: &str) -> Result<PlanRecord> {
     ensure!(!question.trim().is_empty(), "question must not be empty");
     let plan = get(store, project, slug)?;
-    ensure!(plan.state == "building", "only a building plan can wait");
+    if plan.state != "building" {
+        return Err(wrong_state(&plan, "only a building plan can wait"));
+    }
     storage::transition(store, &plan, "waiting", "agent", Some(question), None, None)
 }
 
@@ -318,10 +370,12 @@ pub fn ask(store: &Store, project: &Path, slug: &str, question: &str) -> Result<
 /// `checking` plan can be neither approved nor reassigned.
 pub fn resume(store: &Store, project: &Path, slug: &str) -> Result<PlanRecord> {
     let plan = get(store, project, slug)?;
-    ensure!(
-        matches!(plan.state.as_str(), "waiting" | "stalled" | "checking"),
-        "only a waiting, stalled, or interrupted checking plan can resume"
-    );
+    if !matches!(plan.state.as_str(), "waiting" | "stalled" | "checking") {
+        return Err(wrong_state(
+            &plan,
+            "only a waiting, stalled, or interrupted checking plan can resume",
+        ));
+    }
     if plan.state == "checking" {
         let _owner = files::claim_check(&plan)?
             .context("a live process still owns this plan's check; wait for it to finish")?;
@@ -339,10 +393,12 @@ pub fn resume(store: &Store, project: &Path, slug: &str) -> Result<PlanRecord> {
 pub fn cancel(store: &Store, project: &Path, slug: &str, reason: &str) -> Result<PlanRecord> {
     ensure!(!reason.trim().is_empty(), "cancel reason must not be empty");
     let plan = get(store, project, slug)?;
-    ensure!(
-        !matches!(plan.state.as_str(), "done" | "cancelled"),
-        "only an unfinished plan can be cancelled"
-    );
+    if matches!(plan.state.as_str(), "done" | "cancelled") {
+        return Err(wrong_state(
+            &plan,
+            "only an unfinished plan can be cancelled",
+        ));
+    }
     storage::cancel(store, &plan, reason)
 }
 
@@ -351,10 +407,12 @@ pub fn cancel(store: &Store, project: &Path, slug: &str, reason: &str) -> Result
 pub fn reassign(store: &Store, project: &Path, slug: &str, session: &str) -> Result<PlanRecord> {
     ensure!(!session.trim().is_empty(), "session is required");
     let plan = get(store, project, slug)?;
-    ensure!(
-        matches!(plan.state.as_str(), "building" | "waiting" | "stalled"),
-        "only a building, waiting, or stalled plan can be reassigned; recover a checking plan first"
-    );
+    if !matches!(plan.state.as_str(), "building" | "waiting" | "stalled") {
+        return Err(wrong_state(
+            &plan,
+            "only a building, waiting, or stalled plan can be reassigned; recover a checking plan first",
+        ));
+    }
     storage::reassign(store, &plan, session)
 }
 

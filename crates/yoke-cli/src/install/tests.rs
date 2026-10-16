@@ -513,3 +513,73 @@ fn first_install_refuses_when_user_settings_disable_all_hooks() {
         r#"{"disableAllHooks": true}"#
     );
 }
+
+#[test]
+fn a_moved_executable_or_settings_directory_is_refused_with_the_fix() {
+    let (dir, options) = fixture();
+    install(&options).unwrap();
+
+    let moved = InstallOptions {
+        executable: dir.path().join("elsewhere/yoke"),
+        ..options.clone()
+    };
+    let error = format!("{:#}", install(&moved).unwrap_err());
+    assert!(
+        error.starts_with("executable changed; uninstall before reinstalling"),
+        "{error}"
+    );
+    for expected in [
+        "the claude hooks run",
+        &options.executable.display().to_string(),
+        &format!("not {}", moved.executable.display()),
+        &format!(
+            "\"{}\" uninstall --agent claude",
+            moved.executable.display()
+        ),
+    ] {
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+
+    let relocated = InstallOptions {
+        claude_settings: dir.path().join("other-claude/settings.json"),
+        ..options.clone()
+    };
+    let error = format!("{:#}", uninstall(&relocated).unwrap_err());
+    assert!(
+        error.starts_with("settings path differs from installation receipt"),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!(
+            "set CLAUDE_CONFIG_DIR to {}",
+            options.claude_settings.parent().unwrap().display()
+        )),
+        "{error}"
+    );
+}
+
+#[test]
+fn drift_advice_is_the_repair_that_actually_works() {
+    let (_dir, options) = fixture();
+    install(&options).unwrap();
+    let mut settings: Value =
+        serde_json::from_str(&fs::read_to_string(&options.claude_settings).unwrap()).unwrap();
+    settings["hooks"].as_object_mut().unwrap().remove("Stop");
+    put(&options.claude_settings, &settings.to_string());
+    let stale = drift::managed(&options, Agent::Claude)
+        .unwrap()
+        .unwrap()
+        .stale;
+    assert!(
+        stale[0]
+            .1
+            .ends_with("run yoke uninstall, then yoke install"),
+        "{stale:?}"
+    );
+    // The advice must not send anyone to a command that refuses the same state.
+    assert!(install(&InstallOptions {
+        dry_run: true,
+        ..options
+    })
+    .is_err());
+}

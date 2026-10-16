@@ -159,7 +159,7 @@ fn statusline_fresh_home_and_wrapper_are_read_only() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         format!(
-            "yoke unrecorded | ctx 42% | {}\n",
+            "yoke (no data yet) | ctx 42% | {}\n",
             String::from_utf8_lossy(input)
         )
     );
@@ -529,7 +529,7 @@ fn plan_cli_records_session_waits_for_human_and_completes_real_check() {
     let reviewed = run_with_path(
         &home,
         &project,
-        &["review", "fixture", "--agent", "codex"],
+        &["review", "fixture", "--agent", "codex", "--json"],
         b"",
         Some(&fake_path),
     );
@@ -550,6 +550,79 @@ fn plan_cli_records_session_waits_for_human_and_completes_real_check() {
         .checks
         .iter()
         .any(|check| check.result == "void" && check.name == "review"));
+}
+
+#[test]
+fn plan_commands_explain_a_missing_first_commit_and_observe_mode() {
+    use yoke_core::{plan, store::Store};
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    fs::create_dir_all(home.join(".yoke")).unwrap();
+    fs::create_dir(&project).unwrap();
+    assert!(project.starts_with(std::env::temp_dir()));
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(&project)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .args([
+                "-c",
+                "user.name=Yoke Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+
+    let created = run(&home, &project, &["plan", "new", "fixture"], b"");
+    let text = String::from_utf8_lossy(&created.stdout);
+    assert!(
+        created.status.success() && text.starts_with("plan: \"fixture\"\nstate: draft\n"),
+        "{text}"
+    );
+    assert!(text.contains("no commit yet"), "{text}");
+    let diffed = run(&home, &project, &["plan", "diff", "fixture"], b"");
+    assert!(!diffed.status.success());
+    assert!(String::from_utf8_lossy(&diffed.stdout).contains("no commit yet"));
+
+    fs::write(project.join("tracked"), "fixture\n").unwrap();
+    git(&["add", "tracked"]);
+    git(&["commit", "-qm", "fixture"]);
+    let store = Store::open(home.join(".yoke/state.db")).unwrap();
+    plan::approve(
+        &store,
+        &plan::prepare_approval(&store, &project, "fixture").unwrap(),
+    )
+    .unwrap();
+    let hook = run(
+        &home,
+        &project,
+        &["run-hook", "PostToolUse", "--agent", "codex"],
+        br#"{"session_id":"observed","tool_name":"Bash","tool_input":{"command":"true"}}"#,
+    );
+    assert!(hook.status.success());
+    let started = run(
+        &home,
+        &project,
+        &["plan", "start", "fixture", "--session", "observed"],
+        b"",
+    );
+    assert!(started.status.success());
+    assert!(
+        serde_json::from_slice::<Value>(&started.stdout).is_ok(),
+        "stdout stays one JSON value"
+    );
+    assert!(String::from_utf8_lossy(&started.stderr).contains("mode is observe"));
 }
 
 #[test]
@@ -612,7 +685,7 @@ fn plan_cli_validates_tracks_tasks_and_keeps_human_actions_human() {
     let validated = run_with_path(
         &home,
         &project,
-        &["plan", "validate", "fixture", "--agent", "claude"],
+        &["plan", "validate", "fixture", "--agent", "claude", "--json"],
         b"",
         Some(&fake_path),
     );
@@ -645,6 +718,7 @@ fn plan_cli_validates_tracks_tasks_and_keeps_human_actions_human() {
             "heading:rollout",
             "--text",
             "Stage first?",
+            "--json",
         ],
         b"",
     ));
@@ -726,6 +800,26 @@ fn plan_cli_validates_tracks_tasks_and_keeps_human_actions_human() {
             "missing {line:?} in\n{text}"
         );
     }
+    let comment_id = comment["id"].as_i64().unwrap().to_string();
+    let reply_row = format!(",agent,reply,reply_to_{comment_id},\"heading:rollout\",\"Yes\"");
+    assert!(run(
+        &home,
+        &project,
+        &["plan", "reply", "fixture", &comment_id, "--text", "Yes"],
+        b""
+    )
+    .status
+    .success());
+    let replied = run(&home, &project, &["plan", "status", "fixture"], b"");
+    let text = String::from_utf8_lossy(&replied.stdout);
+    assert!(
+        text.lines().any(|line| line.ends_with(&reply_row)),
+        "a reply must sit under the comment it answers in\n{text}"
+    );
+    assert!(
+        text.contains("  feedback: 1 open (0 blocking) of 2, 1 reply"),
+        "{text}"
+    );
     let detail = json(run(
         &home,
         &project,

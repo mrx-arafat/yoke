@@ -189,10 +189,9 @@ pub(super) fn parse(content: &str) -> Result<(String, PlanHeader)> {
 }
 
 pub(super) fn approved(plan: &PlanRecord) -> Result<PlanHeader> {
-    let frozen = plan
-        .approved_header
-        .as_ref()
-        .context("plan has not been approved")?;
+    let Some(frozen) = plan.approved_header.as_ref() else {
+        return Err(super::wrong_state(plan, "it has no approved header yet"));
+    };
     let (raw, header) = parse(&read(plan)?)?;
     ensure!(
         &raw == frozen,

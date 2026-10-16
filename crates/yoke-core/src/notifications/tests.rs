@@ -273,6 +273,7 @@ fn conditions_resolve_when_cleared_and_stale_trust_is_detected() {
         file: file.clone(),
         trusted,
         stale,
+        exists: true,
         disk_error: None,
     };
     sync(&store, &loaded(project, vec![status(false, false)]), 10).unwrap();

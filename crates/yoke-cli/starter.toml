@@ -12,6 +12,13 @@ mode = "observe"
 [meta]
 name = "my-project"
 
+# Memory (optional). `yoke recall --explain` shows what a new session would be given and
+# whether injection is active. Session digests stay off until you enable them here.
+# [memory]
+# digest = true             # let an agent CLI summarize each session into memory
+# digest_agent = "claude"   # or "codex"
+# inject_tokens = 1500      # budget for what a session start injects
+
 [[gate]]
 name = "no-force-push"
 on = "pre_tool_use"

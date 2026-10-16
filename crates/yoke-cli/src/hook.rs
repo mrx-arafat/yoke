@@ -251,9 +251,13 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
             let store = Store::open_read_only(home.join(".yoke/state.db")).with_context(|| {
                 format!("writable state unavailable ({error:#}); opening read-only state")
             })?;
+            let detail = format!("{error:#}");
             eprintln!(
-                "yoke: {}; retrying trusted policy using read-only state; audit and memory writes may be unavailable; check free disk space and filesystem permissions in your own terminal",
-                redact(&format!("writable state unavailable: {error:#}"))
+                "yoke: {}; retrying trusted policy using read-only state; audit and memory writes may be unavailable; {}",
+                redact(&format!("writable state unavailable: {detail}")),
+                newer_state_hint(&detail).unwrap_or(
+                    "check free disk space and filesystem permissions in your own terminal"
+                )
             );
             store
         }
@@ -436,7 +440,7 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
         for status in loaded
             .snapshots
             .iter()
-            .filter(|snapshot| snapshot.stale || !snapshot.trusted)
+            .filter(|snapshot| snapshot.stale || (!snapshot.trusted && snapshot.exists))
         {
             eprintln!(
                 "yoke: config snapshot {} is {}; inspect yoke config",
@@ -548,11 +552,24 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
     Ok(output)
 }
 
+/// What to tell a user whose state database a hook could not open or write. A database from a
+/// newer Yoke is not a disk problem, and the way out is different: use that Yoke or remove
+/// the hooks.
+pub(crate) fn newer_state_hint(detail: &str) -> Option<&'static str> {
+    detail.contains("is newer than supported").then_some(
+        "this yoke is older than the state database; run the yoke that wrote it, or remove the hooks with `yoke uninstall --agent claude,codex` in your own terminal (docs/upgrade-notes.md)",
+    )
+}
+
 fn fail(state: &mut HookState, agent: Agent, kind: Option<EventKind>, detail: &str) -> i32 {
     let unavailable = if state.mode.is_none() {
-        "trusted policy unavailable; unread gates cannot be bypassed automatically; check free disk space and filesystem permissions in your own terminal; "
+        format!(
+            "trusted policy unavailable; unread gates cannot be bypassed automatically; {}; ",
+            newer_state_hint(detail)
+                .unwrap_or("check free disk space and filesystem permissions in your own terminal")
+        )
     } else {
-        ""
+        String::new()
     };
     let reason = redact(&format!("yoke error: {detail}; {unavailable}for an explicit bypass, restart your coding agent from your own terminal with YOKE_OFF=1 in its environment; setting it inside a blocked tool command cannot bypass that tool's pre-hook"));
     eprintln!("{reason}");
@@ -607,7 +624,9 @@ fn warn_advisory(home: &Path, operation: &str, error: &anyhow::Error) {
     warn_logged(
         home,
         &format!(
-        "{operation}: {error:#}; trusted gate decision preserved; check free disk space and filesystem permissions in your own terminal"
+            "{operation}: {error:#}; trusted gate decision preserved; {}",
+            newer_state_hint(&format!("{error:#}"))
+                .unwrap_or("check free disk space and filesystem permissions in your own terminal")
         ),
     );
 }

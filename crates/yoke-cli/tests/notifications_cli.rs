@@ -219,7 +219,9 @@ fn statusline_refuses_a_relative_home() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("HOME must be an absolute path"));
+    // The agent paints stdout in its prompt bar, so the reason is on stderr only.
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("HOME must be an absolute path"));
 }
 
 #[test]

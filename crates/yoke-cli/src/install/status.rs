@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use super::{
     features, files, hook_path, json as settings_json, matches_owned, read_receipt, settings,
-    Agent, InstallOptions,
+    Agent, InstallOptions, Receipt,
 };
 
 const MAX_SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
@@ -21,6 +21,8 @@ pub struct AgentStatus {
     pub installed: bool,
     pub settings: PathBuf,
     pub executable: Option<PathBuf>,
+    /// Whether the installation owns Claude's statusline wrapper.
+    pub statusline: bool,
     /// Conditions under which installed hooks do not run as installed.
     pub problems: Vec<String>,
     /// What local files cannot show, such as agent-side hook approval.
@@ -41,6 +43,7 @@ fn agent_status(options: &InstallOptions, agent: Agent, project: &Path) -> Agent
         installed: false,
         settings: hook_path(options, agent).to_path_buf(),
         executable: None,
+        statusline: false,
         problems: Vec::new(),
         notes: Vec::new(),
     };
@@ -60,8 +63,10 @@ fn agent_status(options: &InstallOptions, agent: Agent, project: &Path) -> Agent
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0);
     if !runnable {
         status.problems.push(format!(
-            "hook executable {} is missing or not executable",
-            executable.display()
+            "hook executable {} is missing or not executable; run `yoke uninstall --agent {}` with a working yoke to remove the hooks, then `yoke install --agent {}` (the install script does both)",
+            executable.display(),
+            agent.name(),
+            agent.name()
         ));
     } else if *executable != options.executable {
         status.notes.push(format!(
@@ -71,6 +76,8 @@ fn agent_status(options: &InstallOptions, agent: Agent, project: &Path) -> Agent
         ));
     }
     status.executable = Some(executable.clone());
+    status.statusline = receipt.statusline.is_some();
+    let mut hooks_file = None;
     match files::read(&status.settings).and_then(|raw| settings(raw.as_deref())) {
         Ok(value) => {
             let missing: Vec<&str> = receipt
@@ -92,6 +99,7 @@ fn agent_status(options: &InstallOptions, agent: Agent, project: &Path) -> Agent
                     status.settings.display()
                 ));
             }
+            hooks_file = Some(value);
         }
         Err(error) => status.problems.push(format!(
             "cannot read {}: {error:#}",
@@ -121,13 +129,80 @@ fn agent_status(options: &InstallOptions, agent: Agent, project: &Path) -> Agent
                     options.codex_config.display()
                 )),
             }
-            status.notes.push(
-                "Codex runs new or changed hooks only after you trust them with /hooks; Yoke cannot read that approval or managed requirements."
-                    .into(),
-            );
+            status
+                .notes
+                .push(codex_approval_note(options, &receipt, hooks_file.as_ref()));
         }
     }
     status
+}
+
+/// Codex records each approved hook under `[hooks.state."<hooks.json>:<event>:<group>:<hook>"]`
+/// in its `config.toml`. Yoke can see that a record exists, never that its hash is current.
+fn codex_approval_note(
+    options: &InstallOptions,
+    receipt: &Receipt,
+    hooks: Option<&Value>,
+) -> String {
+    let caveat = "Yoke only sees that a record exists, not whether it is still current (a changed hook needs approval again) or what managed requirements say.";
+    let Some(doc) = files::read(&options.codex_config)
+        .ok()
+        .flatten()
+        .and_then(|raw| raw.parse::<toml_edit::DocumentMut>().ok())
+    else {
+        return format!(
+            "Codex runs new or changed hooks only after you approve them with /hooks; {caveat}"
+        );
+    };
+    let states = doc
+        .get("hooks")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|hooks| hooks.get("state"))
+        .and_then(toml_edit::Item::as_table_like);
+    let missing = receipt
+        .added
+        .iter()
+        .filter(|owned| {
+            let group = hooks
+                .and_then(|value| value["hooks"][&owned.event].as_array())
+                .and_then(|groups| groups.iter().position(|group| matches_owned(group, owned)))
+                .unwrap_or(0);
+            let key = format!(
+                "{}:{}:{group}:0",
+                receipt.hooks.path.display(),
+                snake_case(&owned.event)
+            );
+            !states.is_some_and(|states| states.contains_key(&key))
+        })
+        .count();
+    let total = receipt.added.len();
+    if missing == 0 {
+        format!(
+            "Codex approval records exist for all {total} Yoke hooks in {}; {caveat}",
+            options.codex_config.display()
+        )
+    } else {
+        format!(
+            "Codex has no approval record for {missing} of {total} Yoke hooks in {}; open codex, run /hooks and approve them. {caveat}",
+            options.codex_config.display()
+        )
+    }
+}
+
+/// `PreToolUse` becomes `pre_tool_use`, the spelling Codex uses in its approval keys.
+fn snake_case(event: &str) -> String {
+    let mut out = String::new();
+    for (index, character) in event.chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.push(character.to_ascii_lowercase());
+        } else {
+            out.push(character);
+        }
+    }
+    out
 }
 
 /// Claude settings that stop Yoke's user hooks, from the settings files Yoke can read.

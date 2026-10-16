@@ -73,7 +73,8 @@ pub(super) fn random_token() -> Result<String> {
 }
 
 /// Serve the explicit home's state on loopback until the process is stopped.
-pub fn run(home: &Path, project: &Path, open_browser: bool) -> Result<()> {
+/// `port` 0 picks a free port; a fixed port lets an SSH tunnel be set up before the console starts.
+pub fn run(home: &Path, project: &Path, open_browser: bool, port: u16) -> Result<()> {
     ensure!(
         home.is_absolute() && project.is_absolute(),
         "console paths must be absolute"
@@ -83,8 +84,11 @@ pub fn run(home: &Path, project: &Path, open_browser: bool) -> Result<()> {
     std::fs::create_dir_all(&state)?;
     let database = state.join("state.db");
     let store = Store::open(&database)?;
-    let server = Server::bind_loopback()?;
-    let host = server.local_addr()?.to_string();
+    let server = Server::bind_loopback_on(port).with_context(|| {
+        format!("listen on 127.0.0.1:{port}; another process may already use that port")
+    })?;
+    let address = server.local_addr()?;
+    let host = address.to_string();
     let console = Console {
         home: home.to_owned(),
         project,
@@ -97,22 +101,23 @@ pub fn run(home: &Path, project: &Path, open_browser: bool) -> Result<()> {
     let url = launch.url(&console);
     println!("Yoke console: {url}");
     eprintln!("This link works once, within five minutes, and signs that browser in.");
+    let env = |name: &str| std::env::var(name).ok();
     if open_browser {
-        let command = if cfg!(target_os = "macos") {
-            "open"
+        if headless_ssh(env) {
+            eprintln!("This SSH session has no display, so no browser was started; open the link yourself.");
         } else {
-            "xdg-open"
-        };
-        let status = std::process::Command::new(command)
-            .arg(&url)
-            .status()
-            .context(
-                "open console browser; use the printed URL if no desktop opener is installed",
-            )?;
-        ensure!(
-            status.success(),
-            "browser opener failed; rerun console --no-open and use its URL"
-        );
+            let command = if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            };
+            if let Some(note) = open_link(command, &url) {
+                eprintln!("Could not open a browser ({note}); the console is still running, so open the link above yourself.");
+            }
+        }
+    }
+    if env("SSH_CONNECTION").is_some() {
+        eprintln!("{}", tunnel_hint(address.port()));
     }
     let mut actions = actions::Actions::default();
     let connections = Arc::new(AtomicUsize::new(0));
@@ -130,6 +135,27 @@ pub fn run(home: &Path, project: &Path, open_browser: bool) -> Result<()> {
             );
         }
     }
+}
+
+/// An SSH login with no display cannot show a browser, and `xdg-open` may start a text browser
+/// inside the console's own terminal.
+fn headless_ssh(env: impl Fn(&str) -> Option<String>) -> bool {
+    let unset = |name: &str| env(name).is_none_or(|value| value.is_empty());
+    env("SSH_CONNECTION").is_some() && unset("DISPLAY") && unset("WAYLAND_DISPLAY")
+}
+
+/// Ask the desktop to open the link; the result is a note for the user, never a reason to stop.
+fn open_link(command: &str, url: &str) -> Option<String> {
+    match std::process::Command::new(command).arg(url).status() {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(format!("{command} exited with {status}")),
+        Err(error) => Some(format!("{command}: {error}")),
+    }
+}
+
+/// The browser's `Host` must equal the console's own address, so both ports must match.
+fn tunnel_hint(port: u16) -> String {
+    format!("Over SSH? On the computer with the browser run `ssh -N -L {port}:127.0.0.1:{port} <this server>`, then open the link above unchanged (keep 127.0.0.1, not localhost). `yoke console --port <n>` fixes the port so the tunnel can come first.")
 }
 
 fn header(request: &Request, name: &str) -> Option<String> {

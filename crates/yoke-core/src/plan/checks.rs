@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result};
 
 use super::{acceptance, files, get, now, storage, CheckRun, CheckSummary, PlanCheck, PlanRecord};
 use crate::engine::execute_bounded;
@@ -17,10 +17,12 @@ pub fn check(
     reviewer: Option<(Reviewer, Option<&str>)>,
 ) -> Result<CheckSummary> {
     let plan = get(store, project, slug)?;
-    ensure!(
-        plan.state == "building",
-        "only a building plan can run checks"
-    );
+    if plan.state != "building" {
+        return Err(super::wrong_state(
+            &plan,
+            "only a building plan can run checks",
+        ));
+    }
     let header = files::approved(&plan)?;
     // Held until this function returns so `plan resume` can tell a live check from a dead one.
     let _owner =

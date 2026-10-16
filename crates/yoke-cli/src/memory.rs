@@ -4,11 +4,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use clap::Subcommand;
 use serde::Deserialize;
-use yoke_core::config::LoadedConfig;
-use yoke_core::memory;
+use yoke_core::config::{LoadedConfig, Mode};
+use yoke_core::memory::{self, SharedCopy};
 use yoke_core::{config, jobs, review, store::Store};
 
 use crate::commands;
@@ -42,16 +42,17 @@ pub enum MemoryCommand {
     Import {
         /// Archive written by yoke memory export.
         file: PathBuf,
-        /// Explicit source=destination project mapping. Repeat for each project.
+        /// Required once for every project in the archive: source=destination, or source=source to
+        /// restore in place.
         #[arg(long = "map", value_name = "SOURCE=DESTINATION")]
         mappings: Vec<String>,
         /// Report additions and duplicates without writing imported records.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Pin a memory for context injection, or unpin it.
+    /// Pin a memory for context injection; add --unpin to remove the pin.
     Pin {
-        /// Memory id from yoke recall.
+        /// Memory id from yoke recall in this project.
         id: i64,
         /// Remove the pin instead of adding it.
         #[arg(long)]
@@ -73,19 +74,31 @@ pub fn timestamp() -> Result<i64> {
     )?)
 }
 
+/// Why session start injects nothing, when it does not; `None` once notes are injected.
+fn injection_notice(mode: Mode) -> Option<&'static str> {
+    (mode != Mode::Enforce).then_some(
+        "session start injects no notes while mode is observe; set mode = \"enforce\" in yoke.toml and run yoke trust in your own terminal",
+    )
+}
+
+fn project_of(loaded: &LoadedConfig) -> Result<&str> {
+    loaded
+        .project_root
+        .to_str()
+        .context("project path must be UTF-8")
+}
+
 pub fn remember(text: &str, pinned: bool) -> Result<()> {
     let (store, loaded) = commands::load_project()?;
-    let row = memory::remember(
-        &store,
-        loaded
-            .project_root
-            .to_str()
-            .context("project path must be UTF-8")?,
-        text,
-        pinned,
-        timestamp()?,
-    )?;
+    let project = project_of(&loaded)?;
+    let row = memory::remember(&store, project, text, pinned, timestamp()?)?;
     println!("{}", serde_json::to_string(&row)?);
+    // Said once, with the first note of a project, so a new user learns it without a nag per note.
+    if let Some(notice) = injection_notice(loaded.config.mode) {
+        if memory::recall(&store, project, "", 2)?.len() == 1 {
+            eprintln!("yoke: {notice} (see yoke recall --explain)");
+        }
+    }
     Ok(())
 }
 
@@ -102,7 +115,18 @@ pub fn recall(query: &str, limit: u16, json: bool, explain: bool) -> Result<()> 
     if json {
         println!("{}", serde_json::to_string(&rows)?);
     } else {
+        println!("project: {}", commands::quote(project));
         println!("memories[{}]{{id,ts,pinned,text}}:", rows.len());
+        if rows.is_empty() {
+            println!(
+                "help: \"{}\"",
+                if query.trim().is_empty() {
+                    "No memories in this project; yoke remember <text> adds one. Memory belongs to the project directory (the git root inside a repository)."
+                } else {
+                    "No memory in this project matches that query; yoke recall without words lists them all."
+                }
+            );
+        }
         for row in rows {
             println!(
                 "  {},{},{},{}",
@@ -114,6 +138,14 @@ pub fn recall(query: &str, limit: u16, json: bool, explain: bool) -> Result<()> 
         }
     }
     Ok(())
+}
+
+/// Three decimals, with no sign on a score that rounds to zero (a term in half the notes weighs 0).
+fn score_text(score: f64) -> String {
+    match format!("{score:.3}").as_str() {
+        "-0.000" => "0.000".into(),
+        text => text.into(),
+    }
 }
 
 /// Show what session start would inject for this query, and why; never part of the injection.
@@ -141,6 +173,14 @@ fn explain_context(
         .map(|item| item.text.chars().count())
         .sum::<usize>()
         + items.len().saturating_sub(1);
+    println!("mode: {}", loaded.config.mode.as_str());
+    match injection_notice(loaded.config.mode) {
+        Some(notice) => println!(
+            "injection: {}",
+            commands::quote(&format!("inactive - {notice}"))
+        ),
+        None => println!("injection: active"),
+    }
     println!(
         "budget: {{inject_tokens: {tokens}, chars: {}, used: {used}}}",
         tokens.saturating_mul(4).min(1_000_000)
@@ -157,34 +197,61 @@ fn explain_context(
             item.memory_id.map(|id| id.to_string()).unwrap_or_default(),
             item.source.as_deref().unwrap_or(""),
             item.rank.map(|rank| rank.to_string()).unwrap_or_default(),
-            item.score
-                .map(|score| format!("{score:.3}"))
-                .unwrap_or_default(),
+            item.score.map(score_text).unwrap_or_default(),
             join(item.matched.clone()),
             join(item.facts.iter().map(i64::to_string).collect()),
             item.truncated,
             commands::quote(&item.text.chars().take(80).collect::<String>())
         );
     }
-    println!("help: \"Session start injects this selection for an empty query: pinned, trusted knowledge, then recent memories within memory.inject_tokens. Lower BM25 scores are better matches. Explanations are never injected.\"");
+    println!(
+        "help: \"{} Lower BM25 scores are better matches. Explanations are never injected.\"",
+        if query.trim().is_empty() {
+            "Session start injects this selection in enforce mode: pinned, trusted knowledge, then recent memories within memory.inject_tokens."
+        } else {
+            "Session start injects the selection for an empty query (pinned, trusted knowledge, then recent memories) in enforce mode; this shows how your words would rank within memory.inject_tokens."
+        }
+    );
     Ok(())
 }
 
 pub fn forget(id: i64) -> Result<()> {
     ensure!(id > 0, "memory id must be positive");
-    println!(
-        "deleted: {}",
-        memory::forget(&commands::open_store(&commands::home()?)?, id)?
-    );
+    let (store, loaded) = commands::load_project()?;
+    let forgotten = memory::forget_in_project(&store, project_of(&loaded)?, id)?
+        .with_context(|| format!("memory {id} not found in this project"))?;
+    println!("deleted: true");
+    match forgotten.shared_copy {
+        SharedCopy::None => {}
+        SharedCopy::Removed(path) => println!(
+            "shared_copy: removed from {}\nhelp: \"Run yoke trust in your own terminal so trusted project knowledge drops this note.\"",
+            commands::quote(&path.display().to_string())
+        ),
+        SharedCopy::Failed(path, reason) => {
+            println!(
+                "shared_copy: still in {}",
+                commands::quote(&path.display().to_string())
+            );
+            bail!(
+                "memory {id} was deleted but its shared copy was not removed ({reason}); delete that entry by hand and run yoke trust"
+            );
+        }
+    }
     Ok(())
 }
 
 pub fn share(id: i64) -> Result<()> {
     ensure!(id > 0, "memory id must be positive");
-    let path = memory::share(&commands::open_store(&commands::home()?)?, id)?;
+    let (store, loaded) = commands::load_project()?;
+    let shared = memory::share_in_project(&store, project_of(&loaded)?, id)?;
     println!(
-        "file: {}\nhelp: \"Shared knowledge takes effect only after a human runs yoke trust.\"",
-        commands::quote(&path.display().to_string())
+        "file: {}\nhelp: \"{}\"",
+        commands::quote(&shared.path.display().to_string()),
+        if shared.added {
+            "Shared knowledge takes effect only after a human runs yoke trust.".to_owned()
+        } else {
+            format!("Memory {id} was already shared; nothing changed.")
+        }
     );
     Ok(())
 }
@@ -245,10 +312,17 @@ pub fn run(command: MemoryCommand) -> Result<()> {
             };
             let report = memory::import_archive(&store, &file, &projects, dry_run)?;
             println!("{}", serde_json::to_string(&report)?);
+            // The real import refuses on conflicts, so a dry run must fail the same way for scripts.
+            ensure!(
+                report.conflicts.is_empty(),
+                "the import would be refused because of {} conflict(s) listed above; no records changed",
+                report.conflicts.len()
+            );
         }
         MemoryCommand::Pin { id, unpin } => {
             ensure!(id > 0, "memory id must be positive");
-            memory::pin(&commands::open_store(&commands::home()?)?, id, !unpin)?;
+            let (store, loaded) = commands::load_project()?;
+            memory::pin_in_project(&store, project_of(&loaded)?, id, !unpin)?;
             println!("id: {id}\npinned: {}", !unpin);
         }
         MemoryCommand::Digest {
@@ -282,7 +356,7 @@ fn digest(
 ) -> Result<memory::DigestReport> {
     if !loaded.config.memory.digest {
         return Err(Permanent(
-            "memory.digest is disabled; a human must enable and trust it before model execution"
+            "memory.digest is disabled; a human enables it by adding digest = true under [memory] in ~/.yoke/config.toml or this project's yoke.toml, then running yoke trust in their own terminal"
                 .into(),
         )
         .into());

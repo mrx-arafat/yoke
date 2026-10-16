@@ -213,9 +213,23 @@ pub fn import_archive(
             .iter()
             .any(|project| !mappings.contains_key(project))
     {
+        let in_place = archive
+            .projects
+            .iter()
+            .map(|project| format!("--map {project}={project}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let unknown = mappings
+            .keys()
+            .filter(|source| !archive.projects.contains(source))
+            .collect::<Vec<_>>();
         bail!(
-            "provide exactly one explicit project mapping for each archive project: {:?}",
-            archive.projects
+            "give one --map SOURCE=DESTINATION for each project in the archive; to restore in place add: {in_place}{}",
+            if unknown.is_empty() {
+                String::new()
+            } else {
+                format!(" (not in the archive: {unknown:?})")
+            }
         );
     }
     for destination in mappings.values() {
@@ -256,14 +270,15 @@ pub fn import_archive(
             )
             .optional()?;
         match existing {
-            Some(row) if same_memory(&row, memory, &mappings[&memory.project]) => {
-                report.duplicates += 1;
-                memory_ids.insert(memory.identity.clone(), row.id);
-            }
-            Some(_) => report.conflicts.push(format!(
-                "memory {} differs from local record",
-                memory.identity
-            )),
+            Some(row) => match memory_difference(&row, memory, &mappings[&memory.project]) {
+                None => {
+                    report.duplicates += 1;
+                    memory_ids.insert(memory.identity.clone(), row.id);
+                }
+                Some(why) => report
+                    .conflicts
+                    .push(format!("memory {} {why}", memory.identity)),
+            },
             None => {
                 report.additions += 1;
             }
@@ -272,13 +287,15 @@ pub fn import_archive(
     for fact in &archive.facts {
         let existing = tx.query_row("SELECT id,identity,ts,session_id,project,kind,detail,digested FROM facts WHERE identity=?1", [&fact.identity], fact_row).optional()?;
         match existing {
-            Some(row) if same_fact(&row, fact, &mappings[&fact.project]) => {
-                report.duplicates += 1;
-                fact_ids.insert(fact.identity.clone(), row.id);
-            }
-            Some(_) => report
-                .conflicts
-                .push(format!("fact {} differs from local record", fact.identity)),
+            Some(row) => match fact_difference(&row, fact, &mappings[&fact.project]) {
+                None => {
+                    report.duplicates += 1;
+                    fact_ids.insert(fact.identity.clone(), row.id);
+                }
+                Some(why) => report
+                    .conflicts
+                    .push(format!("fact {} {why}", fact.identity)),
+            },
             None => {
                 report.additions += 1;
             }
@@ -373,21 +390,27 @@ fn insert_identity(tx: &Transaction<'_>, identity: &str, kind: &str, id: i64) ->
     Ok(())
 }
 
-fn same_memory(row: &Memory, incoming: &PortableMemory, project: &str) -> bool {
-    row.ts == incoming.ts
-        && row.project == project
-        && row.source == incoming.source
-        && row.text == incoming.text
-        && row.pinned == incoming.pinned
+/// Why a stored memory with the same identity is not the incoming one; `None` when it is.
+fn memory_difference(row: &Memory, incoming: &PortableMemory, project: &str) -> Option<String> {
+    if row.project != project {
+        return Some(format!("is already stored under project {}", row.project));
+    }
+    if row.ts != incoming.ts || row.source != incoming.source || row.text != incoming.text {
+        return Some("differs from the local record".into());
+    }
+    (row.pinned != incoming.pinned).then(|| "is pinned differently in the local record".into())
 }
 
-fn same_fact(row: &Fact, incoming: &PortableFact, project: &str) -> bool {
-    row.ts == incoming.ts
-        && row.project == project
-        && row.session_id == incoming.session_id
-        && row.kind == incoming.kind
-        && row.detail == incoming.detail
-        && row.digested == incoming.digested
+fn fact_difference(row: &Fact, incoming: &PortableFact, project: &str) -> Option<String> {
+    if row.project != project {
+        return Some(format!("is already stored under project {}", row.project));
+    }
+    (row.ts != incoming.ts
+        || row.session_id != incoming.session_id
+        || row.kind != incoming.kind
+        || row.detail != incoming.detail
+        || row.digested != incoming.digested)
+        .then(|| "differs from the local record".into())
 }
 
 fn validate(archive: &Archive) -> Result<()> {

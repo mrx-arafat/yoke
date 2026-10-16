@@ -560,3 +560,95 @@ fn orphaned_sessions_are_idle_sessions_of_the_project_with_pending_facts() -> Re
     assert!(!digest_due(&store, "ended", project, 10_000, 0)?);
     Ok(())
 }
+
+#[test]
+fn file_write_facts_stay_valid_json_while_secrets_are_masked() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let project = directory.path().to_str().unwrap();
+    let store = Store::open(directory.path().join("state.db"))?;
+    let row = DecisionRecord {
+        ts: 1,
+        session_id: "s".into(),
+        agent: "claude".into(),
+        project: project.into(),
+        event: "post_tool_use".into(),
+        tool: Some("Write".into()),
+        mode: "observe".into(),
+        outcome: "allow".into(),
+        reason: None,
+        gates: json!([]),
+        payload: String::new(),
+    };
+    let input = json!({"content":"DEMO_API_KEY=sk-ant-api03-FAKEFAKEFAKE0000\nDB_PASSWORD=hunter2hunter2\n","file_path":"/p/fake.env"});
+    record_hook_facts(&store, &row, &json!({ "tool_input": input }))?;
+    let detail: String = store
+        .connection()
+        .query_row("SELECT detail FROM facts", [], |row| row.get(0))?;
+    let body: Value = serde_json::from_str(detail.strip_prefix("Write: ").unwrap())?;
+    assert_eq!(body["file_path"], "/p/fake.env");
+    assert!(!detail.contains("FAKEFAKE") && !detail.contains("hunter2"));
+    Ok(())
+}
+
+#[test]
+fn import_errors_name_the_mapping_to_add_and_why_an_identity_conflicts() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let archive = directory.path().join("archive.json");
+    let source = Store::open(directory.path().join("source.db"))?;
+    remember(&source, "/source/project", "Portable note", false, 1)?;
+    export_archive(&source, &archive, Some("/source/project"), false)?;
+    let destination = Store::open(directory.path().join("destination.db"))?;
+    let missing = import_archive(&destination, &archive, &BTreeMap::new(), true)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        missing.contains("--map /source/project=/source/project"),
+        "{missing}"
+    );
+    let moved = BTreeMap::from([("/source/project".into(), "/elsewhere".into())]);
+    import_archive(&destination, &archive, &moved, false)?;
+    let in_place = BTreeMap::from([("/source/project".into(), "/source/project".into())]);
+    let report = import_archive(&destination, &archive, &in_place, true)?;
+    assert!(
+        report.conflicts[0].contains("already stored under project /elsewhere"),
+        "{:?}",
+        report.conflicts
+    );
+    Ok(())
+}
+
+#[test]
+fn id_commands_stay_inside_their_project_and_forget_removes_the_shared_copy() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (a, b) = (directory.path().join("a"), directory.path().join("b"));
+    fs::create_dir(&a)?;
+    fs::create_dir(&b)?;
+    let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
+    let store = Store::open(directory.path().join("state.db"))?;
+    let note = remember(&store, b, "line one\nline two", false, 1)?;
+    // Another project's id is "not found": nothing changes and nothing is written there.
+    assert!(pin_in_project(&store, a, note.id, true).is_err());
+    assert!(forget_in_project(&store, a, note.id)?.is_none());
+    assert!(share_in_project(&store, a, note.id).is_err());
+    assert!(!get(&store, note.id)?.unwrap().pinned);
+    assert!(!Path::new(b).join(".yoke").exists());
+
+    pin_in_project(&store, b, note.id, true)?;
+    let shared = share_in_project(&store, b, note.id)?;
+    assert!(shared.added && !share_in_project(&store, b, note.id)?.added);
+    assert!(fs::read_to_string(&shared.path)?.contains("line two"));
+    let forgotten = forget_in_project(&store, b, note.id)?.unwrap();
+    assert!(matches!(forgotten.shared_copy, SharedCopy::Removed(_)));
+    assert!(!fs::read_to_string(&shared.path)?.contains("line"));
+    assert!(get(&store, note.id)?.is_none());
+
+    // An entry edited since `share` is reported and left in place, never guessed at.
+    let kept = remember(&store, b, "kept note", false, 2)?;
+    share_in_project(&store, b, kept.id)?;
+    let edited = fs::read_to_string(&shared.path)?.replace("kept note", "kept note, edited");
+    fs::write(&shared.path, &edited)?;
+    let forgotten = forget_in_project(&store, b, kept.id)?.unwrap();
+    assert!(matches!(forgotten.shared_copy, SharedCopy::Failed(..)));
+    assert_eq!(fs::read_to_string(&shared.path)?, edited);
+    Ok(())
+}

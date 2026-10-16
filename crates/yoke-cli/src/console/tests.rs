@@ -834,3 +834,25 @@ fn approval_ticket_binds_to_the_displayed_header_and_current_revision() {
         "cancelled"
     );
 }
+
+#[test]
+fn remote_sessions_skip_the_browser_and_get_a_tunnel_command() {
+    let env = |pairs: &'static [(&str, &str)]| {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    };
+    assert!(headless_ssh(env(&[("SSH_CONNECTION", "1 2 3 4")])));
+    assert!(!headless_ssh(env(&[
+        ("SSH_CONNECTION", "1 2 3 4"),
+        ("DISPLAY", ":0")
+    ])));
+    assert!(!headless_ssh(env(&[])));
+    // A missing opener is a note for the user, never a reason to stop serving.
+    let note = open_link("yoke-no-such-opener", "http://127.0.0.1:1/").unwrap();
+    assert!(note.contains("yoke-no-such-opener"), "{note}");
+    assert!(tunnel_hint(4242).contains("ssh -N -L 4242:127.0.0.1:4242"));
+}

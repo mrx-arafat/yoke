@@ -28,8 +28,14 @@ pub(super) struct Server {
 }
 
 impl Server {
+    #[cfg(test)]
     pub(super) fn bind_loopback() -> io::Result<Self> {
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        Self::bind_loopback_on(0)
+    }
+
+    /// Port 0 asks the system for a free one. The address is always 127.0.0.1.
+    pub(super) fn bind_loopback_on(port: u16) -> io::Result<Self> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))?;
         let address = listener.local_addr()?;
         listener.set_nonblocking(true)?;
         let (sender, requests) = mpsc::sync_channel(CONNECTION_CAP);
@@ -491,6 +497,19 @@ mod tests {
         assert!(Slot::acquire(&active).is_none());
         drop(permits);
         assert!(Slot::acquire(&active).is_some());
+    }
+
+    #[test]
+    fn a_chosen_port_binds_loopback_only_and_a_taken_port_is_refused() {
+        let probe = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let server = Server::bind_loopback_on(port).unwrap();
+        assert_eq!(
+            server.local_addr().unwrap(),
+            SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))
+        );
+        assert!(Server::bind_loopback_on(port).is_err());
     }
 
     #[test]

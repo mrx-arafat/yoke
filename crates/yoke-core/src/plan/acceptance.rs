@@ -419,10 +419,12 @@ pub fn task(store: &Store, project: &Path, slug: &str, id: &str) -> Result<Task>
 }
 
 fn open_for_progress(plan: &PlanRecord) -> Result<PlanHeader> {
-    ensure!(
-        matches!(plan.state.as_str(), "building" | "waiting" | "stalled"),
-        "progress is recorded only while a plan is building, waiting, or stalled"
-    );
+    if !matches!(plan.state.as_str(), "building" | "waiting" | "stalled") {
+        return Err(super::wrong_state(
+            plan,
+            "progress is recorded only while a plan is building, waiting, or stalled",
+        ));
+    }
     files::approved(plan)
 }
 

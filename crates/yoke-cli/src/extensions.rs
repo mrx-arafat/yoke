@@ -1,5 +1,6 @@
 //! `yoke extensions`: read-only inventory of agent extensions and configuration drift.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
@@ -12,7 +13,8 @@ use yoke_core::trust;
 use crate::commands::{self, quote};
 use crate::install;
 
-/// Print the inventory; exit 1 when any drift is found so scripts can gate on it.
+/// Print the inventory; exit 1 when a stale or dangling definition is found so scripts can
+/// gate on it. Shadowed names are reported without failing (see `Drift::fails_check`).
 pub fn run(json: bool) -> Result<()> {
     let home = commands::home()?;
     let project = trust::project_root(&commands::inspect_store(&home)?, &std::env::current_dir()?)?;
@@ -23,7 +25,7 @@ pub fn run(json: bool) -> Result<()> {
     } else {
         print(&report);
     }
-    if !report.drift.is_empty() {
+    if report.drift.iter().any(Drift::fails_check) {
         std::io::stdout().flush()?;
         std::process::exit(1);
     }
@@ -83,22 +85,59 @@ fn tag(value: impl Serialize) -> String {
         .unwrap_or_default()
 }
 
-fn print(report: &Report) {
-    println!(
-        "extensions[{}]{{agent,kind,name,scope,managed,origin}}:",
-        report.items.len()
-    );
+/// One line of counts, so the reader knows the size and the verdict before the long list.
+fn summary(report: &Report) -> String {
+    let mut agents = BTreeMap::new();
     for item in &report.items {
-        println!(
-            "  {},{},{},{},{},{}",
-            tag(item.agent),
-            tag(item.kind),
-            quote(&item.name),
-            tag(item.scope),
-            item.managed,
-            quote(&redact(&item.origin.display().to_string()))
-        );
+        *agents.entry(item.agent).or_insert(0usize) += 1;
     }
+    let counted = |counts: Vec<String>| {
+        if counts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", counts.join(", "))
+        }
+    };
+    let by_agent = counted(
+        agents
+            .iter()
+            .map(|(agent, count)| format!("{} {count}", tag(*agent)))
+            .collect(),
+    );
+    let by_kind = counted(
+        [DriftKind::Shadowed, DriftKind::Stale, DriftKind::Dangling]
+            .into_iter()
+            .filter_map(|kind| {
+                let count = report
+                    .drift
+                    .iter()
+                    .filter(|drift| drift.kind == kind)
+                    .count();
+                (count > 0).then(|| format!("{} {count}", tag(kind)))
+            })
+            .collect(),
+    );
+    let mut line = format!(
+        "definitions {}{by_agent}, drift {}{by_kind}",
+        report.items.len(),
+        report.drift.len()
+    );
+    let links = report
+        .notes
+        .iter()
+        .filter(|note| note.is_outside_link())
+        .count();
+    if links > 0 {
+        line.push_str(&format!(", symlinks outside the scanned roots {links}"));
+    }
+    line
+}
+
+/// Text view: summary, then drift (the part to act on), then the inventory, then the notes
+/// that mean a file was not read. Links outside the scanned roots are only counted here;
+/// `--json` lists each target.
+fn print(report: &Report) {
+    println!("summary: {}", summary(report));
     println!("drift[{}]{{kind,agent,name,detail}}:", report.drift.len());
     for drift in &report.drift {
         println!(
@@ -109,9 +148,30 @@ fn print(report: &Report) {
             quote(&drift.detail)
         );
     }
-    if !report.notes.is_empty() {
-        println!("notes[{}]{{path,note}}:", report.notes.len());
-        for note in &report.notes {
+    println!(
+        "extensions[{}]{{agent,kind,name,scope,managed,origin,detail}}:",
+        report.items.len()
+    );
+    for item in &report.items {
+        println!(
+            "  {},{},{},{},{},{},{}",
+            tag(item.agent),
+            tag(item.kind),
+            quote(&item.name),
+            tag(item.scope),
+            item.managed,
+            quote(&redact(&item.origin.display().to_string())),
+            quote(&item.detail)
+        );
+    }
+    let notes: Vec<_> = report
+        .notes
+        .iter()
+        .filter(|note| !note.is_outside_link())
+        .collect();
+    if !notes.is_empty() {
+        println!("notes[{}]{{path,note}}:", notes.len());
+        for note in notes {
             println!(
                 "  {},{}",
                 quote(&redact(&note.path.display().to_string())),
@@ -120,9 +180,11 @@ fn print(report: &Report) {
         }
     }
     let help = if report.drift.is_empty() {
-        "No drift. Run yoke extensions --json for redacted details and environment key names."
-    } else {
+        "No drift. Run yoke extensions --json for redacted details, symlink targets and environment key names."
+    } else if report.drift.iter().any(Drift::fails_check) {
         "Drift found (exit 1). Run yoke extensions --json for every origin; nothing was changed."
+    } else {
+        "Only shadowed definitions found (exit 0); each row names the winner where the agent documents one. Run yoke extensions --json for every origin; nothing was changed."
     };
     println!("help: {}", quote(help));
 }

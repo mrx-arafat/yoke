@@ -105,7 +105,7 @@ pub fn run(command: Option<NotificationsCommand>, unread: bool, json: bool) -> R
             quote(&row.state),
             quote(&row.kind),
             row.count,
-            row.last_seen,
+            quote(&yoke_core::timefmt::local_time(row.last_seen)),
             quote(&row.title),
             quote(&next_command(row)),
             quote(notifications::help_for(&row.kind).doc)

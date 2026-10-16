@@ -80,7 +80,7 @@ fn list(all: bool, json: bool) -> Result<()> {
             commands::quote(&job.state),
             job.attempts,
             job.max_attempts,
-            job.run_after,
+            commands::quote(&yoke_core::timefmt::local_time(job.run_after)),
             commands::quote(&job.project),
             commands::quote(job.last_error.as_deref().unwrap_or(""))
         );

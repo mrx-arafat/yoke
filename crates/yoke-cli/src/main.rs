@@ -6,15 +6,21 @@ mod health;
 mod hook;
 mod install;
 mod jobs;
+mod log_cmd;
 mod memory;
 mod notifications;
 mod presets;
+mod preview;
+mod starter;
 mod statusline;
 mod trial;
 mod update;
+mod usage_cmd;
 mod workflow;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use std::io::IsTerminal;
+
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use yoke_core::event::Agent;
 
 #[derive(Parser)]
@@ -43,11 +49,14 @@ impl From<AgentArg> for Agent {
 enum Cmd {
     /// Human-only: serve the local console behind a one-time launch link; Ctrl-C stops it.
     Console {
-        /// Print the one-time launch link instead of opening a browser.
+        /// Print the one-time launch link instead of opening a browser; use it on a server.
         #[arg(long)]
         no_open: bool,
+        /// Listen on this 127.0.0.1 port instead of a random free one, so an SSH tunnel can be set up first.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
     },
-    /// Render local status without creating or migrating state.
+    /// Render local status without creating or migrating the state database.
     Statusline {
         /// Existing statusline command to run; its output follows Yoke's line.
         #[arg(long)]
@@ -68,6 +77,9 @@ enum Cmd {
         /// Agent that built the change; the other agent reviews it.
         #[arg(long, value_enum)]
         agent: AgentArg,
+        /// Print the full report as JSON, including the reviewer's raw output.
+        #[arg(long)]
+        json: bool,
     },
     /// Remember a local project note after redacting recognizable secrets.
     Remember {
@@ -88,18 +100,18 @@ enum Cmd {
         /// Print complete stored records as JSON.
         #[arg(long)]
         json: bool,
-        /// Show what session start would inject for this query and why, within memory.inject_tokens.
+        /// Show what session start injects in enforce mode for this query and why, within memory.inject_tokens; says when the current mode injects nothing.
         #[arg(long)]
         explain: bool,
     },
-    /// Delete one locally stored memory.
+    /// Delete one memory of this project, and its entry in project knowledge if it was shared.
     Forget {
-        /// Memory id from yoke recall.
+        /// Memory id from yoke recall in this project.
         id: i64,
     },
     /// Append a memory to project knowledge; does not trust that file.
     Share {
-        /// Memory id from yoke recall.
+        /// Memory id from yoke recall in this project.
         id: i64,
     },
     /// Pin, digest, or transfer memory as a local plaintext archive.
@@ -149,22 +161,22 @@ enum Cmd {
     },
     /// Show newest decisions with optional exact-match filters.
     Log {
-        /// Only decisions whose project root is exactly this path.
+        /// Only decisions for the project that contains this path; a path outside any project matches as written.
         #[arg(long)]
         project: Option<String>,
         /// Only decisions from this session id.
         #[arg(long)]
         session: Option<String>,
-        /// Only decisions with this outcome, for example would_deny.
+        /// Only decisions with this outcome: allow, deny, would_deny, rewrite or error.
         #[arg(long)]
         outcome: Option<String>,
-        /// Only decisions for this exact tool name.
+        /// Only decisions for this tool name; the match is exact and case-sensitive.
         #[arg(long)]
         tool: Option<String>,
         /// Newest decisions to show, 1 through 1000.
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
         limit: u16,
-        /// Print complete stored records as JSON.
+        /// Print stored records as JSON; payloads are cut at log.payload_cap and flagged by payload_truncated.
         #[arg(long)]
         json: bool,
     },
@@ -205,9 +217,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Inventory Claude Code and Codex extensions read-only; exits 1 when drift is found.
+    /// Inventory Claude Code and Codex extensions read-only; exits 1 when a stale or dangling definition is found.
     Extensions {
-        /// Print the inventory and drift as JSON, with redacted details.
+        /// Print the inventory, drift and every note as JSON, with redacted details.
         #[arg(long)]
         json: bool,
     },
@@ -233,6 +245,15 @@ enum Cmd {
         #[command(subcommand)]
         command: trial::TrialCommand,
     },
+    /// Show agent quota, recent token usage and cost estimates, and the newest sessions; read-only.
+    Usage {
+        /// Most sessions to list, 1 through 100.
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() {
@@ -254,21 +275,70 @@ fn main() {
     if std::env::var_os(hook::BACKGROUND).is_some() {
         std::panic::set_hook(Box::new(|info| hook::diagnostic(&format!("yoke: {info}"))));
     }
-    if let Err(error) = commands::run(cli.cmd) {
-        hook::diagnostic(&format!("yoke: {error:#}"));
+    // Rust ignores SIGPIPE, so `yoke log | head` would panic on the closed pipe. Restore the
+    // default so output ends quietly like any Unix tool; the console serves sockets, not a pipe.
+    #[cfg(unix)]
+    if !matches!(cli.cmd, Some(Cmd::Console { .. })) {
+        // SAFETY: resetting a signal disposition before any thread is started.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
+    let result = match cli.cmd {
+        // Reads recorded state only: no trusted project configuration is needed or loaded.
+        Some(Cmd::Usage { limit, json }) => usage_cmd::run(json, limit),
+        command => commands::run(command),
+    };
+    if let Err(error) = result {
+        // A person at a terminal reads stdout, so the stderr copy is only for logs and pipes.
+        if !std::io::stdout().is_terminal() {
+            hook::diagnostic(&format!("yoke: {error:#}"));
+        }
         println!(
             "error: {}",
             commands::quote(&yoke_core::redact::redact(&format!("{error:#}")))
         );
-        println!("help: \"Run yoke <command> --help for usage.\"");
+        println!(
+            "help: {}",
+            commands::quote(&format!("Run {} --help for usage.", command_path(&args)))
+        );
         std::process::exit(1);
     }
+}
+
+/// `yoke plan new` for `yoke plan new login --title x`: the deepest subcommand the arguments name.
+fn command_path(args: &[std::ffi::OsString]) -> String {
+    let mut command = Cli::command();
+    let mut path = vec!["yoke".to_owned()];
+    for arg in args.iter().skip(1) {
+        let Some(name) = arg.to_str() else { break };
+        if name.starts_with('-') {
+            continue;
+        }
+        let Some(sub) = command.find_subcommand(name).cloned() else {
+            break;
+        };
+        path.push(name.to_owned());
+        command = sub;
+    }
+    path.join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+
+    #[test]
+    fn the_error_help_line_names_the_subcommand_that_failed() {
+        let path = |args: &[&str]| {
+            let args: Vec<_> = args.iter().map(std::ffi::OsString::from).collect();
+            command_path(&args)
+        };
+        let new_plan = ["yoke", "plan", "new", "login", "--title", "x"];
+        assert_eq!(path(&new_plan), "yoke plan new");
+        assert_eq!(path(&["yoke", "log", "--outcome", "plan"]), "yoke log");
+        assert_eq!(path(&["yoke"]), "yoke");
+    }
 
     fn collect_missing_help(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
         for arg in command.get_arguments() {

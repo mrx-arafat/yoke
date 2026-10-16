@@ -644,7 +644,7 @@ fn lifecycle_logs_and_internal_gate_errors_deny_only_blocking_events() {
 }
 
 #[test]
-fn stop_with_transcript_over_a_usage_bound_warns_and_keeps_the_policy_decision() {
+fn stop_with_transcript_over_a_usage_bound_keeps_the_policy_decision() {
     let f = Fixture::new();
     const MIB: usize = 1024 * 1024;
     let transcripts = [
@@ -671,9 +671,10 @@ fn stop_with_transcript_over_a_usage_bound_warns_and_keeps_the_policy_decision()
                 json!({"session_id":"large","transcript_path":transcript}),
             );
             success(&stop);
-            assert_eq!(
-                String::from_utf8_lossy(&stop.stderr).contains("usage ingestion failed"),
-                *name == "total-size",
+            // Oversized transcripts are imported from their newest part instead of failing,
+            // so neither transcript warns; the size bound shows up as a partial-import record.
+            assert!(
+                !String::from_utf8_lossy(&stop.stderr).contains("usage ingestion failed"),
                 "{name}"
             );
             match expected {
@@ -699,9 +700,8 @@ fn stop_with_transcript_over_a_usage_bound_warns_and_keeps_the_policy_decision()
             );
             success(&output);
             assert!(output.stdout.is_empty(), "{event} {name}");
-            assert_eq!(
-                String::from_utf8_lossy(&output.stderr).contains("usage ingestion failed"),
-                *name == "total-size",
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains("usage ingestion failed"),
                 "{event} {name}"
             );
         }
@@ -776,7 +776,7 @@ fn daily_update_child_is_check_only_off_and_throttled() {
     fs::create_dir(&bin).unwrap();
     let curl = bin.join("curl");
     // Local transport fixture only: no network or executable replacement.
-    fs::write(&curl, "#!/bin/sh\nprintf '%s\\n' \"$YOKE_OFF\" >> \"$HOME/checks\"\nprintf '%s' '{\"tag_name\":\"v0.2.0\",\"draft\":false,\"prerelease\":false,\"assets\":[]}'\n").unwrap();
+    fs::write(&curl, "#!/bin/sh\nprintf '%s\\n' \"$YOKE_OFF\" >> \"$HOME/checks\"\nprintf '%s\\n200' '{\"tag_name\":\"v0.2.0\",\"draft\":false,\"prerelease\":false,\"assets\":[]}'\n").unwrap();
     fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
     for _ in 0..2 {
         let mut child = f
@@ -1120,7 +1120,7 @@ fn background_children_write_only_timestamped_error_log_lines() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let text = loop {
         let text = fs::read_to_string(&log).unwrap_or_default();
-        if text.contains("release check failed") && text.contains("unknown job kind") {
+        if text.contains("release lookup failed") && text.contains("unknown job kind") {
             break text;
         }
         assert!(Instant::now() < deadline, "children did not report: {text}");

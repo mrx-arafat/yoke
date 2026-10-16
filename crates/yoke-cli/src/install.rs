@@ -28,6 +28,7 @@ pub enum Agent {
     Codex,
 }
 
+#[derive(Clone)]
 pub struct InstallOptions {
     pub claude_settings: PathBuf,
     pub codex_hooks: PathBuf,
@@ -187,6 +188,27 @@ fn hook_path(options: &InstallOptions, agent: Agent) -> &Path {
     }
 }
 
+/// How to point this run at the directory a receipt was written for: `CLAUDE_CONFIG_DIR` and
+/// `CODEX_HOME` replace the defaults under the home directory.
+fn directory_hint(options: &InstallOptions, agent: Agent, recorded: &Path) -> String {
+    let (variable, default) = match agent {
+        Agent::Claude => ("CLAUDE_CONFIG_DIR", ".claude"),
+        Agent::Codex => ("CODEX_HOME", ".codex"),
+    };
+    let directory = recorded.parent();
+    let home_default = options.state_dir.parent().map(|home| home.join(default));
+    match directory {
+        Some(directory) if Some(directory) == home_default.as_deref() => {
+            format!("unset {variable} and run this again")
+        }
+        Some(directory) => format!(
+            "set {variable} to {} and run this again",
+            directory.display()
+        ),
+        None => format!("run this again with the {variable} you installed with"),
+    }
+}
+
 fn receipt_path(options: &InstallOptions, agent: Agent) -> PathBuf {
     options
         .state_dir
@@ -205,12 +227,17 @@ fn read_receipt(options: &InstallOptions, agent: Agent) -> Result<Option<Receipt
     );
     ensure!(
         receipt.hooks.path == hook_path(options, agent),
-        "settings path differs from installation receipt"
+        "settings path differs from installation receipt: the {} hooks were installed into {}; {}",
+        agent.name(),
+        receipt.hooks.path.display(),
+        directory_hint(options, agent, &receipt.hooks.path)
     );
     if let Some(config) = &receipt.config {
         ensure!(
             agent == Agent::Codex && config.path == options.codex_config,
-            "config path differs from installation receipt"
+            "config path differs from installation receipt: the Codex config was changed at {}; {}",
+            config.path.display(),
+            directory_hint(options, agent, &config.path)
         );
     }
     if let Some(owned) = &receipt.statusline {
@@ -416,7 +443,11 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         if let Some(mut receipt) = read_receipt(options, agent)? {
             ensure!(
                 receipt.executable == options.executable,
-                "executable changed; uninstall before reinstalling"
+                "executable changed; uninstall before reinstalling: the {name} hooks run {}, not {}; run \"{}\" uninstall --agent {name} first, then install again (install.sh does this for you)",
+                receipt.executable.display(),
+                options.executable.display(),
+                options.executable.display(),
+                name = agent.name()
             );
             if agent == Agent::Claude {
                 // Reinstalling never edits these user or administrator choices; it reports them.

@@ -1073,3 +1073,56 @@ fn starting_a_second_plan_names_the_unfinished_one_and_how_to_release_it() {
         "example"
     );
 }
+
+#[test]
+fn refused_transitions_name_the_state_and_the_next_command() {
+    let f = Fixture::new();
+    f.plan("title='x'\n[[check]]\nname='unit'\nrun='true'\n[[task]]\nid='build'\ntitle='Build'");
+    let refusals = |f: &Fixture| {
+        [
+            check(&f.store, &f.root, "example", None).unwrap_err(),
+            start(&f.store, &f.root, "example", "fixture-session").unwrap_err(),
+            ask(&f.store, &f.root, "example", "why?").unwrap_err(),
+            task(&f.store, &f.root, "example", "build").unwrap_err(),
+        ]
+        .map(|error| format!("{error:#}"))
+    };
+
+    for message in refusals(&f) {
+        assert!(message.contains("plan 'example' is draft"), "{message}");
+        assert!(message.contains("yoke plan approve example"), "{message}");
+    }
+
+    let prepared = prepare_approval(&f.store, &f.root, "example").unwrap();
+    approve(&f.store, &prepared).unwrap();
+    let message = format!(
+        "{:#}",
+        check(&f.store, &f.root, "example", None).unwrap_err()
+    );
+    assert!(message.contains("plan 'example' is approved"), "{message}");
+    assert!(
+        message.contains("yoke plan start example --session"),
+        "{message}"
+    );
+}
+
+#[test]
+fn plans_need_a_head_commit_and_standalone_review_needs_a_started_plan() {
+    let f = Fixture::new();
+    assert!(has_head(&f.root));
+    let bare = f.root.parent().unwrap().join("bare");
+    fs::create_dir(&bare).unwrap();
+    git(&bare, &["init", "-q"]);
+    assert!(!has_head(&bare));
+
+    let draft = f.plan("title='x'\n[[check]]\nname='unit'\nrun='true'");
+    let message = format!("{:#}", ensure_started(&draft).unwrap_err());
+    assert!(message.contains("plan 'example' is draft"), "{message}");
+    assert!(message.contains("yoke plan approve example"), "{message}");
+    let building = {
+        let prepared = prepare_approval(&f.store, &f.root, "example").unwrap();
+        approve(&f.store, &prepared).unwrap();
+        start(&f.store, &f.root, "example", "fixture-session").unwrap()
+    };
+    ensure_started(&building).unwrap();
+}

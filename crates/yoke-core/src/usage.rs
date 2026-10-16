@@ -1,7 +1,7 @@
 //! Bounded local transcript accounting. Costs are estimates, never subscription bills.
 use std::collections::BTreeMap;
 use std::fs::{Metadata, OpenOptions};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
@@ -10,8 +10,13 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{redact::redact, store::Store};
+use crate::{
+    quota::{self, Quota},
+    redact::redact,
+    store::Store,
+};
 
+/// The most transcript bytes one import counts: the newest ones.
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_ATTEMPTS: usize = 3;
 
@@ -278,9 +283,32 @@ fn fingerprint(meta: &Metadata) -> Fingerprint {
     )
 }
 
+/// The newest quota reading in a transcript, dated by its line's timestamp.
+struct QuotaSeen {
+    quota: Quota,
+    ts: String,
+}
+
+/// A transcript larger than the import bound is counted from its newest bytes only. The
+/// usage in the skipped older part is not counted, and this says how much was skipped.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialImport {
+    pub transcript_bytes: u64,
+    pub skipped_bytes: u64,
+    pub limit_bytes: u64,
+}
+
+fn partial_key(agent: &str, session: &str) -> String {
+    format!("{PARTIAL_PREFIX}{agent}.{session}")
+}
+
+const PARTIAL_PREFIX: &str = "usage.partial.";
+
 struct Snapshot {
     observed: Fingerprint,
     samples: BTreeMap<String, Sample>,
+    quota: Option<QuotaSeen>,
+    partial: Option<PartialImport>,
 }
 
 /// The accounting fields of one transcript line. Everything else, including tool results and
@@ -317,10 +345,13 @@ struct Payload {
     #[serde(rename = "type")]
     kind: Value,
     info: Value,
+    rate_limits: Value,
 }
 
 /// Import a complete bounded JSONL snapshot atomically. No message content is persisted.
-/// Valid snapshots without usage are no-ops, returning no newly imported summaries.
+/// A transcript over the bound is counted from its newest bytes, and the skipped part is
+/// recorded as a [`PartialImport`]. Valid snapshots without usage are no-ops, returning no
+/// newly imported summaries.
 /// A snapshot is only committed while the transcript is still the file it was read from,
 /// so an importer that lost a race can never overwrite a newer or replaced transcript.
 pub fn ingest(
@@ -330,6 +361,17 @@ pub fn ingest(
     project: &str,
     transcript: &Path,
 ) -> Result<Vec<UsageSummary>> {
+    ingest_bounded(store, agent, session, project, transcript, MAX_BYTES)
+}
+
+fn ingest_bounded(
+    store: &Store,
+    agent: &str,
+    session: &str,
+    project: &str,
+    transcript: &Path,
+    limit: u64,
+) -> Result<Vec<UsageSummary>> {
     ensure!(
         matches!(agent, "claude" | "codex"),
         "unsupported transcript agent"
@@ -337,10 +379,13 @@ pub fn ingest(
     let session = identifier(session)?;
     let project = identifier(project)?;
     for _ in 0..MAX_ATTEMPTS {
-        let snapshot = read_snapshot(agent, &session, transcript)?;
+        let snapshot = read_snapshot(agent, &session, transcript, limit)?;
         if snapshot.samples.is_empty() {
             // Early lifecycle events may precede token counters. Do not erase an
             // earlier import when the current snapshot contains no accounting data.
+            if let Some(seen) = &snapshot.quota {
+                store.transaction(|tx| record_quota(tx, seen))?;
+            }
             return Ok(Vec::new());
         }
         if commit_snapshot(store, agent, &session, &project, transcript, &snapshot)? {
@@ -350,8 +395,8 @@ pub fn ingest(
     bail!("usage transcript kept changing during import")
 }
 
-fn read_snapshot(agent: &str, session: &str, transcript: &Path) -> Result<Snapshot> {
-    let file = OpenOptions::new()
+fn read_snapshot(agent: &str, session: &str, transcript: &Path, limit: u64) -> Result<Snapshot> {
+    let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(transcript)
@@ -359,24 +404,31 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path) -> Result<Snapsh
     let metadata = file.metadata()?;
     ensure!(metadata.is_file(), "transcript must be a regular file");
     let observed = fingerprint(&metadata);
-    let mut reader = BufReader::new(file.take(MAX_BYTES + 1));
+    // Past the bound only the newest bytes are read, from the first line that starts inside
+    // them; `take` stops at the size seen now, so a growing file is caught by the commit check.
+    let size = metadata.len();
+    let start = size.saturating_sub(limit);
+    if start > 0 {
+        file.seek(SeekFrom::Start(start - 1))?;
+    }
+    let mut reader = BufReader::new(file.take(size - start.saturating_sub(1)));
     let mut bytes = Vec::new();
-    let mut total = 0u64;
+    let mut skipped = 0;
+    if start > 0 {
+        // The byte before `start` ends a line, or the line it belongs to is dropped.
+        skipped = start - 1 + reader.read_until(b'\n', &mut bytes)? as u64;
+    }
+    let mut baselined = skipped == 0;
     let mut samples = BTreeMap::<String, Sample>::new();
     let mut previous = [0i64; 4];
+    let mut quota = None;
     let mut model = "unknown".to_owned();
     let mut ordinal = 0u64;
     loop {
         bytes.clear();
-        let read = reader.read_until(b'\n', &mut bytes)?;
-        if read == 0 {
+        if reader.read_until(b'\n', &mut bytes)? == 0 {
             break;
         }
-        total += read as u64;
-        ensure!(
-            total <= MAX_BYTES,
-            "usage transcript exceeds bounded import limits"
-        );
         if bytes.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
@@ -434,6 +486,14 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path) -> Result<Snapsh
             if row.kind != "event_msg" || payload.kind != "token_count" {
                 continue;
             }
+            // Read before the counters are skipped: a repeated or counter-less event still
+            // carries the account's current limits.
+            if let (Some(found), Some(ts)) = (
+                Quota::from_codex(&payload.rate_limits, 0),
+                timestamp(&row.timestamp),
+            ) {
+                quota = Some(QuotaSeen { quota: found, ts });
+            }
             let usage = &payload.info["total_token_usage"];
             if usage.is_null() {
                 continue;
@@ -444,6 +504,13 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path) -> Result<Snapsh
                 count(usage, "cached_input_tokens", true)?,
                 count(usage, "cache_write_input_tokens", true)?,
             ];
+            // Counters are cumulative, so with the older part skipped the first count only sets
+            // the baseline; counting it would date everything before it to this moment.
+            if !baselined {
+                baselined = true;
+                previous = current;
+                continue;
+            }
             // Codex repeats a token count without new usage.
             if current == previous {
                 continue;
@@ -487,7 +554,16 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path) -> Result<Snapsh
             );
         }
     }
-    Ok(Snapshot { observed, samples })
+    Ok(Snapshot {
+        observed,
+        samples,
+        quota,
+        partial: (skipped > 0).then_some(PartialImport {
+            transcript_bytes: size,
+            skipped_bytes: skipped,
+            limit_bytes: limit,
+        }),
+    })
 }
 
 /// Returns false without writing when the transcript changed after it was read.
@@ -513,8 +589,34 @@ fn commit_snapshot(
             tx.execute("INSERT INTO usage_samples(agent,session_id,project,record_key,model,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_nano_usd,ts) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,unixepoch(?11))",
                 params![agent, session, project, key, sample.model, sample.counts[0], sample.counts[1], sample.counts[2], sample.counts[3], sample.cost, sample.ts])?;
         }
+        if let Some(seen) = &snapshot.quota {
+            record_quota(tx, seen)?;
+        }
+        // A complete import clears an earlier partial marker, as when a transcript is replaced.
+        let key = partial_key(agent, session);
+        match &snapshot.partial {
+            Some(partial) => tx.execute("INSERT INTO kv(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, serde_json::to_string(partial)?])?,
+            None => tx.execute("DELETE FROM kv WHERE key=?1", [key])?,
+        };
         Ok(true)
     })
+}
+
+/// Merge a transcript's newest quota reading into the state. SQLite dates it so the one
+/// RFC 3339 reader already used for samples decides what the timestamp means.
+fn record_quota(tx: &rusqlite::Connection, seen: &QuotaSeen) -> Result<()> {
+    let observed_at: Option<i64> =
+        tx.query_row("SELECT unixepoch(?1)", [&seen.ts], |row| row.get(0))?;
+    if let Some(observed_at) = observed_at {
+        quota::record_in(
+            tx,
+            &Quota {
+                observed_at,
+                ..seen.quota.clone()
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// Group by session and exact model; a partially priced group has unknown total cost.
@@ -663,6 +765,98 @@ pub fn report(
     })
 }
 
+/// Schema version that added `usage_samples.ts`, which time-bounded totals and session spans need.
+pub const TIME_SCHEMA: usize = 12;
+
+/// Totals for one agent.
+#[derive(Debug, Serialize)]
+pub struct AgentTotals {
+    pub agent: String,
+    #[serde(flatten)]
+    pub totals: UsageTotals,
+}
+
+/// Sessions whose transcript was only partly counted, by agent and session id.
+pub fn partial_imports(store: &Store) -> Result<BTreeMap<(String, String), PartialImport>> {
+    let mut query = store
+        .connection()
+        .prepare("SELECT key,value FROM kv WHERE key LIKE 'usage.partial.%' LIMIT 1000")?;
+    let rows = query.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut found = BTreeMap::new();
+    for row in rows {
+        let (key, value) = row?;
+        // A marker that does not parse is ignored: it can only hide a note, never usage.
+        if let (Some((agent, session)), Ok(partial)) = (
+            key[PARTIAL_PREFIX.len()..].split_once('.'),
+            serde_json::from_str(&value),
+        ) {
+            found.insert((agent.to_owned(), session.to_owned()), partial);
+        }
+    }
+    Ok(found)
+}
+
+/// One session across every model it used.
+#[derive(Debug, Serialize)]
+pub struct SessionUsage {
+    pub agent: String,
+    pub session_id: String,
+    pub project: String,
+    pub models: Vec<String>,
+    /// The earlier of the recorded session start and the first usage sample, because the
+    /// start is recorded late when Yoke was installed mid-session; None when nothing is dated.
+    pub started_at: Option<i64>,
+    /// Time of the newest dated usage sample.
+    pub last_at: Option<i64>,
+    /// Set when only the newest part of the transcript was counted.
+    pub partial: Option<PartialImport>,
+    #[serde(flatten)]
+    pub totals: UsageTotals,
+}
+
+/// Per-agent totals of samples at or after `since` (Unix seconds); undated samples are left out.
+pub fn totals_by_agent(store: &Store, since: i64) -> Result<Vec<AgentTotals>> {
+    let mut query = store.connection().prepare(&format!(
+        "SELECT agent,{TOTALS} FROM usage_samples WHERE ts>=?1 GROUP BY agent ORDER BY agent"
+    ))?;
+    let rows = query.query_map([since], |row| {
+        Ok(AgentTotals {
+            agent: row.get(0)?,
+            totals: read_totals(row, 1)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The sessions with the newest usage first; sessions without dated samples come last.
+pub fn recent_sessions(store: &Store, limit: usize) -> Result<Vec<SessionUsage>> {
+    let mut query = store.connection().prepare(&format!(
+        "SELECT u.agent,u.session_id,u.project,json_group_array(DISTINCT u.model),coalesce(min(s.started_at,min(u.ts)),s.started_at,min(u.ts)),max(u.ts),{TOTALS}
+         FROM usage_samples u LEFT JOIN sessions s ON s.id=u.session_id
+         GROUP BY u.agent,u.session_id ORDER BY max(u.ts) IS NULL,max(u.ts) DESC,u.session_id LIMIT ?1"
+    ))?;
+    let partial = partial_imports(store)?;
+    let rows = query.query_map([limit.min(1000) as i64], |row| {
+        let models: String = row.get(3)?;
+        let mut models: Vec<String> = serde_json::from_str(&models).unwrap_or_default();
+        models.sort();
+        let (agent, session_id): (String, String) = (row.get(0)?, row.get(1)?);
+        Ok(SessionUsage {
+            partial: partial.get(&(agent.clone(), session_id.clone())).cloned(),
+            agent,
+            session_id,
+            project: row.get(2)?,
+            models,
+            started_at: row.get(4)?,
+            last_at: row.get(5)?,
+            totals: read_totals(row, 6)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,13 +998,13 @@ mod tests {
             commit_snapshot(&store, "claude", "s", "/project", &path, snapshot).unwrap()
         };
         std::fs::write(&path, format!("{}\n", message("m1", 10))).unwrap();
-        let older = read_snapshot("claude", "s", &path).unwrap();
+        let older = read_snapshot("claude", "s", &path, MAX_BYTES).unwrap();
         std::fs::write(
             &path,
             format!("{}\n{}\n", message("m1", 10), message("m2", 20)),
         )
         .unwrap();
-        let newer = read_snapshot("claude", "s", &path).unwrap();
+        let newer = read_snapshot("claude", "s", &path, MAX_BYTES).unwrap();
         assert!(commit(&newer));
         assert!(!commit(&older), "the older snapshot must not be written");
         assert_eq!(
@@ -1030,5 +1224,219 @@ mod tests {
             .find(|s| s.model != "unknown")
             .unwrap();
         assert_eq!(priced.estimated_cost_usd.as_deref(), Some("0.000150000"));
+    }
+    fn codex_count(ts: &str, input: u64, used_percent: f64, info: bool) -> Value {
+        let mut row = json!({"timestamp":ts,"type":"event_msg","payload":{"type":"token_count","info":null,
+            "rate_limits":{"plan_type":"pro","primary":{"used_percent":used_percent,"window_minutes":10080,"resets_at":1_792_649_595},"secondary":null}}});
+        if info {
+            row["payload"]["info"] =
+                json!({"total_token_usage":{"input_tokens":input,"output_tokens":1}});
+        }
+        row
+    }
+
+    #[test]
+    fn codex_quota_is_recorded_by_the_import_and_an_older_session_never_regresses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        let ingest_rows = |session: &str, rows: &[Value]| {
+            let lines: String = rows.iter().map(|row| format!("{row}\n")).collect();
+            std::fs::write(&path, lines).unwrap();
+            ingest(&store, "codex", session, "/project", &path).unwrap()
+        };
+        assert!(crate::quota::load(&store, "codex").unwrap().is_none());
+
+        ingest_rows(
+            "new",
+            &[codex_count("2026-10-16T12:00:00Z", 10, 34.0, true)],
+        );
+        let stored = crate::quota::load(&store, "codex").unwrap().unwrap();
+        assert_eq!(stored.observed_at, 1_792_152_000);
+        assert_eq!(stored.plan.as_deref(), Some("pro"));
+        assert_eq!(
+            (
+                stored.windows[0].window_minutes,
+                stored.windows[0].used_percent
+            ),
+            (10_080, 34.0)
+        );
+
+        ingest_rows(
+            "old",
+            &[codex_count("2026-10-15T12:00:00Z", 10, 20.0, true)],
+        );
+        assert_eq!(
+            crate::quota::load(&store, "codex").unwrap().unwrap(),
+            stored
+        );
+
+        // A counter-less event still carries the quota, though it has no usage to import.
+        let quota_only = ingest_rows(
+            "quiet",
+            &[codex_count("2026-10-16T13:00:00Z", 0, 40.0, false)],
+        );
+        assert!(quota_only.is_empty());
+        let latest = crate::quota::load(&store, "codex").unwrap().unwrap();
+        assert_eq!(
+            (latest.windows[0].used_percent, latest.observed_at),
+            (40.0, 1_792_155_600)
+        );
+    }
+
+    #[test]
+    fn agent_totals_and_recent_sessions_follow_sample_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        let message = |session: &str, id: &str, model: &str, input: u64, ts: &str| json!({"timestamp":ts,"type":"assistant","sessionId":session,"message":{"id":id,"model":model,"usage":{"input_tokens":input,"output_tokens":100,"service_tier":"standard","inference_geo":"global","speed":"standard"}}});
+        let import = |agent: &str, session: &str, rows: Vec<Value>| {
+            let lines: String = rows.iter().map(|row| format!("{row}\n")).collect();
+            std::fs::write(&path, lines).unwrap();
+            ingest(&store, agent, session, "/work/app", &path).unwrap();
+        };
+        import(
+            "claude",
+            "recent",
+            vec![
+                message(
+                    "recent",
+                    "m1",
+                    "claude-haiku-5-5",
+                    1000,
+                    "2026-10-16T10:00:00Z",
+                ),
+                message(
+                    "recent",
+                    "m2",
+                    "claude-haiku-5-5",
+                    500,
+                    "2026-10-16T11:30:00Z",
+                ),
+            ],
+        );
+        import(
+            "claude",
+            "older",
+            vec![message(
+                "older",
+                "m3",
+                "unknown",
+                70,
+                "2026-10-10T08:00:00Z",
+            )],
+        );
+        import(
+            "codex",
+            "cx",
+            vec![codex_count("2026-10-16T09:00:00Z", 40, 33.0, true)],
+        );
+
+        // A session row written after its first sample (Yoke installed mid-session) must not
+        // push the start past the usage; one written before it keeps the earlier time.
+        for (id, started) in [("recent", 1_792_150_000), ("cx", 1_792_140_000)] {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO sessions(id,agent,project,started_at) VALUES (?1,'x','/work/app',?2)",
+                    params![id, started],
+                )
+                .unwrap();
+        }
+        let since = 1_792_108_800; // 2026-10-16T00:00:00Z
+        let totals = totals_by_agent(&store, since).unwrap();
+        let summary: Vec<_> = totals
+            .iter()
+            .map(|t| {
+                (
+                    t.agent.as_str(),
+                    t.totals.input_tokens,
+                    t.totals.output_tokens,
+                )
+            })
+            .collect();
+        assert_eq!(summary, [("claude", 1500, 200), ("codex", 40, 1)]);
+        assert_eq!(
+            totals[0].totals.estimated_cost_usd.as_deref(),
+            Some("0.000250000")
+        );
+
+        let sessions = recent_sessions(&store, 2).unwrap();
+        let ids: Vec<_> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, ["recent", "cx"]);
+        assert_eq!(
+            (
+                sessions[0].started_at,
+                sessions[0].last_at,
+                sessions[0].models.clone()
+            ),
+            (
+                Some(1_792_144_800),
+                Some(1_792_150_200),
+                vec!["claude-haiku-5-5".to_owned()]
+            )
+        );
+        assert_eq!(sessions[0].totals.input_tokens, 1500);
+        assert_eq!(sessions[1].started_at, Some(1_792_140_000));
+    }
+    #[test]
+    fn a_transcript_over_the_bound_counts_its_newest_part_and_records_what_was_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        let claude: Vec<String> = (1..=10)
+            .map(|i| {
+                json!({"type":"assistant","sessionId":"s","message":{"id":format!("m{i:02}"),"model":"unknown","usage":{"input_tokens":1000 + i,"output_tokens":1}}}).to_string()
+            })
+            .collect();
+        let line = claude[0].len() as u64 + 1;
+        let write = |lines: &[String]| {
+            std::fs::write(
+                &path,
+                lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
+            )
+            .unwrap();
+        };
+        // The bound ends inside the 7th line, so the newest three lines are counted.
+        let limit = 3 * line + 10;
+        write(&claude);
+        let counted = ingest_bounded(&store, "claude", "s", "/project", &path, limit).unwrap();
+        assert_eq!(
+            (counted[0].input_tokens, counted[0].output_tokens),
+            (1008 + 1009 + 1010, 3)
+        );
+        let marker = PartialImport {
+            transcript_bytes: 10 * line,
+            skipped_bytes: 7 * line,
+            limit_bytes: limit,
+        };
+        assert_eq!(
+            partial_imports(&store).unwrap()[&("claude".to_owned(), "s".to_owned())],
+            marker
+        );
+        assert_eq!(recent_sessions(&store, 5).unwrap()[0].partial, Some(marker));
+
+        // Once the transcript fits again the whole of it is counted and the marker is gone.
+        write(&claude[..2]);
+        let whole = ingest_bounded(&store, "claude", "s", "/project", &path, limit).unwrap();
+        assert_eq!(whole[0].input_tokens, 1001 + 1002);
+        assert!(partial_imports(&store).unwrap().is_empty());
+
+        // Codex counters are cumulative: the first counted event is only the baseline, so the
+        // skipped part is not dated to it.
+        let codex: Vec<String> = (1..=6)
+            .map(|i| {
+                codex_count(&format!("2026-10-16T09:0{i}:00Z"), 100 * i, 1.0, true).to_string()
+            })
+            .collect();
+        let line = codex[0].len() as u64 + 1;
+        write(&codex);
+        let counted =
+            ingest_bounded(&store, "codex", "c", "/project", &path, 3 * line + 10).unwrap();
+        assert_eq!(
+            (counted[0].input_tokens, counted[0].output_tokens),
+            (200, 0)
+        );
+        assert_eq!(partial_imports(&store).unwrap().len(), 1);
     }
 }

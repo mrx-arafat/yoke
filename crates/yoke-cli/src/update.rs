@@ -37,8 +37,9 @@ struct Asset {
 }
 
 /// Check GitHub in at most one bounded request, recording only validated metadata.
-pub fn check_latest(store: &Store) -> Result<String> {
-    check_with(store, &mut transport::check)
+/// `None` means GitHub has no stable release yet, which is a normal state and not a failure.
+pub fn check_latest(store: &Store) -> Result<Option<String>> {
+    check_with(store, &mut transport::lookup)
 }
 
 /// Check for a release or atomically install a newer release for this build target.
@@ -50,10 +51,24 @@ pub fn run(check_only: bool, store: &Store) -> Result<()> {
         std::hint::black_box(include_bytes!(env!("YOKE_RELEASE_NOTICES")));
     }
     if check_only {
-        println!("latest_version: {}", check_latest(store)?);
+        match check_latest(store)? {
+            Some(latest) => println!("latest_version: {latest}"),
+            None => {
+                println!("latest_version: none");
+                println!("current_version: {}", env!("CARGO_PKG_VERSION"));
+                println!("help: \"{NO_RELEASE}; there is nothing to update to.\"");
+            }
+        }
         return Ok(());
     }
-    let release = read_release(&mut transport::download)?;
+    let Some(release) = read_release(&mut transport::lookup)? else {
+        println!(
+            "update: {} (you are on {})",
+            NO_RELEASE,
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(());
+    };
     let current = version(env!("CARGO_PKG_VERSION"))?;
     if version(&release.tag_name)? <= current {
         println!("update: already current ({})", env!("CARGO_PKG_VERSION"));
@@ -70,14 +85,29 @@ pub fn run(check_only: bool, store: &Store) -> Result<()> {
 fn check_with(
     store: &Store,
     fetch: &mut impl FnMut(&str, usize) -> Result<Vec<u8>>,
-) -> Result<String> {
-    let release = read_release(fetch)?;
+) -> Result<Option<String>> {
+    let Some(release) = read_release(fetch)? else {
+        return Ok(None);
+    };
     store.set_kv(LATEST_VERSION_KEY, &release.tag_name)?;
-    Ok(release.tag_name)
+    Ok(Some(release.tag_name))
 }
 
-fn read_release(fetch: &mut impl FnMut(&str, usize) -> Result<Vec<u8>>) -> Result<Release> {
-    let bytes = fetch(LATEST_URL, METADATA_LIMIT)?;
+/// GitHub answers 404 for `releases/latest` until the first stable release is published.
+const NO_RELEASE: &str = "no stable release is published yet (GitHub answered 404)";
+
+fn read_release(fetch: &mut impl FnMut(&str, usize) -> Result<Vec<u8>>) -> Result<Option<Release>> {
+    let bytes = match fetch(LATEST_URL, METADATA_LIMIT) {
+        Ok(bytes) => bytes,
+        Err(error)
+            if error
+                .downcast_ref::<transport::HttpStatus>()
+                .is_some_and(|status| status.code() == 404) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     ensure!(
         bytes.len() <= METADATA_LIMIT,
         "release metadata exceeds size limit"
@@ -109,7 +139,7 @@ fn read_release(fetch: &mut impl FnMut(&str, usize) -> Result<Vec<u8>>) -> Resul
             "unexpected release asset URL"
         );
     }
-    Ok(release)
+    Ok(Some(release))
 }
 
 pub(crate) fn version(tag: &str) -> Result<(u64, u64, u64)> {

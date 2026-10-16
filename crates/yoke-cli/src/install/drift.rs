@@ -53,7 +53,8 @@ pub(crate) fn managed(options: &InstallOptions, agent: Agent) -> Result<Option<M
             missing.push(*event);
         }
     }
-    let advice = "run yoke install --dry-run to inspect, then yoke uninstall and yoke install";
+    // `yoke install` refuses while a managed hook is edited, with or without --dry-run.
+    let advice = "run yoke uninstall, then yoke install";
     if missing.len() == events.len() {
         stale.push(("hooks".into(), format!("no managed hooks remain; {advice}")));
     } else {

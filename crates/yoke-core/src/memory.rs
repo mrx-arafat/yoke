@@ -122,14 +122,35 @@ fn quote_term(term: &str) -> String {
 }
 
 pub fn pin(store: &Store, id: i64, pinned: bool) -> Result<()> {
+    pin_scoped(store, None, id, pinned)
+}
+
+/// `pin` for the commands of one project: another project's id is "not found" and untouched.
+pub fn pin_in_project(store: &Store, project: &str, id: i64, pinned: bool) -> Result<()> {
+    pin_scoped(store, Some(project), id, pinned)
+}
+
+fn pin_scoped(store: &Store, project: Option<&str>, id: i64, pinned: bool) -> Result<()> {
     if store.connection().execute(
-        "UPDATE memories SET pinned=?2 WHERE id=?1",
-        params![id, pinned],
+        "UPDATE memories SET pinned=?2 WHERE id=?1 AND (?3 IS NULL OR project=?3)",
+        params![id, pinned, project],
     )? == 0
     {
-        bail!("memory {id} not found");
+        bail!("{}", not_found(id, project));
     }
     Ok(())
+}
+
+fn not_found(id: i64, project: Option<&str>) -> String {
+    match project {
+        Some(_) => format!("memory {id} not found in this project"),
+        None => format!("memory {id} not found"),
+    }
+}
+
+/// Ids are shared by every project in the database, so project commands pass their own.
+fn in_scope(memory: Option<Memory>, project: Option<&str>) -> Option<Memory> {
+    memory.filter(|memory| project.is_none_or(|project| memory.project == project))
 }
 
 pub fn forget(store: &Store, id: i64) -> Result<bool> {
@@ -137,8 +158,53 @@ pub fn forget(store: &Store, id: i64) -> Result<bool> {
 }
 
 pub fn forget_with_snapshot(store: &Store, id: i64) -> Result<Option<MemorySnapshot>> {
+    forget_scoped(store, None, id)
+}
+
+/// What `forget_in_project` did about the copy `share` may have appended to project knowledge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SharedCopy {
+    /// The memory was never shared, or its entry is already gone.
+    None,
+    Removed(PathBuf),
+    /// The entry could not be removed safely; it is still in the file at this path.
+    Failed(PathBuf, String),
+}
+
+#[derive(Clone, Debug)]
+pub struct Forgotten {
+    pub memory: Memory,
+    pub shared_copy: SharedCopy,
+}
+
+/// Delete one memory of `project`, and the entry `share` appended to its knowledge file.
+/// `None` when the id is missing or belongs to another project.
+pub fn forget_in_project(store: &Store, project: &str, id: i64) -> Result<Option<Forgotten>> {
+    let Some(snapshot) = forget_scoped(store, Some(project), id)? else {
+        return Ok(None);
+    };
+    let memory = snapshot.memory;
+    let shared_copy = if memory.shared {
+        match remove_shared_entry(&memory) {
+            Ok(Some(path)) => SharedCopy::Removed(path),
+            Ok(None) => SharedCopy::None,
+            Err(error) => SharedCopy::Failed(
+                Path::new(&memory.project).join(KNOWLEDGE_FILE),
+                format!("{error:#}"),
+            ),
+        }
+    } else {
+        SharedCopy::None
+    };
+    Ok(Some(Forgotten {
+        memory,
+        shared_copy,
+    }))
+}
+
+fn forget_scoped(store: &Store, project: Option<&str>, id: i64) -> Result<Option<MemorySnapshot>> {
     store.transaction(|tx| {
-        let Some(memory) = get_on(tx, id)? else {
+        let Some(memory) = in_scope(get_on(tx, id)?, project) else {
             return Ok(None);
         };
         let fact_ids = tx
@@ -218,7 +284,7 @@ pub(crate) fn record_hook_facts_in(
     if matches!(row.outcome.as_str(), "deny" | "would_deny") {
         facts.push((
             "denial",
-            row.reason.clone().unwrap_or_else(|| "Action denied".into()),
+            redact(row.reason.as_deref().unwrap_or("Action denied")),
         ));
     }
     if row.event == "post_tool_use"
@@ -232,7 +298,7 @@ pub(crate) fn record_hook_facts_in(
             format!(
                 "{}: {}",
                 row.tool.as_deref().unwrap_or("edit"),
-                raw.get("tool_input").unwrap_or(&Value::Null)
+                masked_input(raw)
             ),
         ));
     }
@@ -246,22 +312,39 @@ pub(crate) fn record_hook_facts_in(
             facts.push((
                 "command_failure",
                 format!(
-                    "{}: {}\n{error}",
+                    "{}: {}\n{}",
                     row.tool.as_deref().unwrap_or("Bash"),
-                    raw.get("tool_input").unwrap_or(&Value::Null)
+                    masked_input(raw),
+                    redact(error)
                 ),
             ));
         }
     }
     validate_project(&row.project)?;
     for (kind, detail) in &facts {
-        let detail = crate::redact::redact_payload(detail, TEXT_LIMIT);
+        // Every part was masked on its own above. Masking the joined text again would treat the
+        // tool input's JSON as prose and cut its quotes and braces out.
+        let detail = cap_text(detail, TEXT_LIMIT);
         tx.execute(
             "INSERT INTO facts(ts,session_id,project,kind,detail) VALUES (?1,?2,?3,?4,?5)",
             params![row.ts, redact(&row.session_id), row.project, kind, detail],
         )?;
     }
     Ok(facts.len())
+}
+
+/// The hook's tool input as JSON, with secrets masked value by value so it stays parseable.
+fn masked_input(raw: &Value) -> String {
+    redact(&raw.get("tool_input").unwrap_or(&Value::Null).to_string())
+}
+
+/// At most `cap` bytes, cut at a character boundary.
+fn cap_text(text: &str, cap: usize) -> &str {
+    let mut end = cap.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// One block of injected context and why it was chosen; `text` is exactly what is injected.
@@ -420,61 +503,131 @@ impl Selection {
     }
 }
 
+const KNOWLEDGE_FILE: &str = ".yoke/knowledge.md";
+const KNOWLEDGE_LIMIT: u64 = 4 * 1024 * 1024;
+
+/// Where `share` put (or would put) a memory, and whether this call appended it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareOutcome {
+    pub path: PathBuf,
+    /// `false` when the entry was already in the file and nothing changed.
+    pub added: bool,
+}
+
 /// Append a dated entry to this memory's project knowledge; it still needs human trust.
 pub fn share(store: &Store, id: i64) -> Result<PathBuf> {
+    Ok(share_scoped(store, None, id)?.path)
+}
+
+/// `share` for the commands of one project; another project's id is "not found" and nothing is written.
+pub fn share_in_project(store: &Store, project: &str, id: i64) -> Result<ShareOutcome> {
+    share_scoped(store, Some(project), id)
+}
+
+fn share_scoped(store: &Store, project: Option<&str>, id: i64) -> Result<ShareOutcome> {
     store.transaction(|tx| {
-        let memory = get_on(tx, id)?.with_context(|| format!("memory {id} not found"))?;
-        validate_project(&memory.project)?;
-        let root = fs::canonicalize(&memory.project)?;
-        let directory = root.join(".yoke");
-        if directory
-            .symlink_metadata()
-            .is_ok_and(|meta| meta.file_type().is_symlink())
-        {
-            bail!("knowledge directory must not be a symlink");
-        }
+        let memory = in_scope(get_on(tx, id)?, project).with_context(|| not_found(id, project))?;
+        let (directory, path) = knowledge_paths(&memory.project)?;
         fs::create_dir_all(&directory)?;
-        let path = directory.join("knowledge.md");
-        if path
-            .symlink_metadata()
-            .is_ok_and(|meta| meta.file_type().is_symlink())
-        {
-            bail!("knowledge file must not be a symlink");
-        }
-        let existing = match fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&path)
-        {
-            Ok(file) => {
-                if !file.metadata()?.is_file() || file.metadata()?.len() > 4 * 1024 * 1024 {
-                    bail!("knowledge must be a regular file at most 4 MiB");
-                }
-                let mut text = String::new();
-                file.take(4 * 1024 * 1024 + 1).read_to_string(&mut text)?;
-                text
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(error.into()),
-        };
-        if existing.len() > 4 * 1024 * 1024 {
-            bail!("knowledge file exceeds 4 MiB");
-        }
-        let marker = format!("<!-- yoke-memory:{} -->", memory.identity);
-        if !existing.contains(&marker) {
-            let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
-            write!(
-                temporary,
-                "{existing}\n{marker}\n- [{}] {}\n",
-                memory.ts, memory.text
-            )?;
-            temporary.as_file().sync_all()?;
-            temporary.persist(&path).map_err(|error| error.error)?;
+        let existing = read_knowledge(&path)?.unwrap_or_default();
+        let marker = knowledge_marker(&memory);
+        let added = !existing.contains(&marker);
+        if added {
+            write_knowledge(&directory, &path, &(existing + &knowledge_entry(&memory)))?;
         }
         // The marker makes a retry idempotent if file persistence succeeds but SQLite commit fails.
         tx.execute("UPDATE memories SET shared=1 WHERE id=?1", [id])?;
-        Ok(path)
+        Ok(ShareOutcome { path, added })
     })
+}
+
+/// Remove exactly the entry `share` wrote. An entry that was edited since is never guessed at.
+fn remove_shared_entry(memory: &Memory) -> Result<Option<PathBuf>> {
+    let (directory, path) = match knowledge_paths(&memory.project) {
+        Ok(paths) => paths,
+        // A project directory that is gone has no knowledge file left to clean.
+        Err(_) if !Path::new(&memory.project).exists() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(mut text) = read_knowledge(&path)? else {
+        return Ok(None);
+    };
+    if !text.contains(&knowledge_marker(memory)) {
+        return Ok(None);
+    }
+    let entry = knowledge_entry(memory);
+    let start = text.find(&entry).with_context(|| {
+        format!(
+            "the entry after {} was edited; remove it by hand",
+            knowledge_marker(memory)
+        )
+    })?;
+    text.replace_range(start..start + entry.len(), "");
+    write_knowledge(&directory, &path, &text)?;
+    Ok(Some(path))
+}
+
+fn knowledge_marker(memory: &Memory) -> String {
+    format!("<!-- yoke-memory:{} -->", memory.identity)
+}
+
+fn knowledge_entry(memory: &Memory) -> String {
+    format!(
+        "\n{}\n- [{}] {}\n",
+        knowledge_marker(memory),
+        memory.ts,
+        memory.text
+    )
+}
+
+/// The `.yoke` directory and knowledge file of a project, refusing symlinks at either.
+fn knowledge_paths(project: &str) -> Result<(PathBuf, PathBuf)> {
+    validate_project(project)?;
+    let directory = fs::canonicalize(project)?.join(".yoke");
+    if directory
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        bail!("knowledge directory must not be a symlink");
+    }
+    let path = directory.join("knowledge.md");
+    if path
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        bail!("knowledge file must not be a symlink");
+    }
+    Ok((directory, path))
+}
+
+fn read_knowledge(path: &Path) -> Result<Option<String>> {
+    match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => {
+            if !file.metadata()?.is_file() || file.metadata()?.len() > KNOWLEDGE_LIMIT {
+                bail!("knowledge must be a regular file at most 4 MiB");
+            }
+            let mut text = String::new();
+            file.take(KNOWLEDGE_LIMIT + 1).read_to_string(&mut text)?;
+            if text.len() as u64 > KNOWLEDGE_LIMIT {
+                bail!("knowledge file exceeds 4 MiB");
+            }
+            Ok(Some(text))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_knowledge(directory: &Path, path: &Path, text: &str) -> Result<()> {
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    temporary.write_all(text.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 pub(crate) fn validate_project(project: &str) -> Result<()> {

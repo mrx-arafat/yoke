@@ -5,7 +5,7 @@ use std::io::{ErrorKind, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use super::Note;
+use super::{Note, OUTSIDE_LINK};
 
 pub(super) const CONFIG_CAP: u64 = 4 * 1024 * 1024;
 pub(super) const HEAD_CAP: u64 = 64 * 1024;
@@ -55,10 +55,7 @@ impl Reader {
         }
         match path.canonicalize() {
             Ok(target) if self.roots.iter().any(|root| target.starts_with(root)) => {}
-            Ok(target) => self.note(
-                path,
-                format!("symlink outside scanned roots: {}", target.display()),
-            ),
+            Ok(target) => self.note(path, format!("{OUTSIDE_LINK}{}", target.display())),
             Err(_) => self.note(path, "symlink target is missing"),
         }
         true

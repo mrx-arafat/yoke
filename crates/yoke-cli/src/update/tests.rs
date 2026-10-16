@@ -143,7 +143,7 @@ fn check_only_records_valid_version_and_keeps_previous_on_bad_metadata() {
         Ok(valid.to_vec())
     })
     .unwrap();
-    assert_eq!(latest, "v0.2.0");
+    assert_eq!(latest.as_deref(), Some("v0.2.0"));
     assert_eq!(calls, 1);
     for invalid in [
         b"{}".as_slice(),
@@ -169,12 +169,12 @@ fn bounded_process_rejects_excess_output_failure_and_deadline() {
             .contains("size limit")
     );
     let mut failed = Command::new("/bin/sh");
-    failed.args(["-c", "exit 7"]);
-    let message = transport::collect("release check", &mut failed, 4, Duration::from_secs(30))
+    failed.args(["-c", "exit 9"]);
+    let message = transport::collect("release lookup", &mut failed, 4, Duration::from_secs(30))
         .unwrap_err()
         .to_string();
     assert!(
-        message.starts_with("release check failed (exit status: 7)"),
+        message.starts_with("release lookup failed (exit status: 9)"),
         "{message}"
     );
     assert!(!message.contains("download"), "{message}");
@@ -209,4 +209,59 @@ fn refuses_non_regular_destinations_without_touching_their_contents() {
     assert!(replace(&directory, NEW).is_err());
     assert!(directory.is_dir());
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 3);
+}
+
+#[test]
+fn no_published_release_is_a_quiet_outcome_and_other_http_failures_stay_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("state.db")).unwrap();
+    let mut missing = |_: &str, _: usize| -> Result<Vec<u8>> {
+        Err(transport::HttpStatus::new("release lookup", 404).into())
+    };
+    assert_eq!(check_with(&store, &mut missing).unwrap(), None);
+    assert_eq!(store.get_kv(LATEST_VERSION_KEY).unwrap(), None);
+    let mut limited = |_: &str, _: usize| -> Result<Vec<u8>> {
+        Err(transport::HttpStatus::new("release lookup", 429).into())
+    };
+    assert!(check_with(&store, &mut limited).is_err());
+}
+
+#[test]
+fn curl_results_become_specific_messages_without_leaking_curl_exit_codes() {
+    let split =
+        |bytes: &[u8], limit| transport::split_status("release lookup", bytes.to_vec(), limit);
+    assert_eq!(split(b"{}\n200", 8).unwrap(), b"{}");
+    let missing = split(b"{\"message\":\"Not Found\"}\n404", 64).unwrap_err();
+    assert_eq!(
+        missing
+            .downcast_ref::<transport::HttpStatus>()
+            .unwrap()
+            .code(),
+        404
+    );
+    for (status, expected) in [
+        (403, "rate limit"),
+        (429, "rate limit"),
+        (503, "try again later"),
+    ] {
+        let message = split(format!("x\n{status}").as_bytes(), 8)
+            .unwrap_err()
+            .to_string();
+        assert!(message.starts_with("release lookup failed"), "{message}");
+        assert!(message.contains(expected), "{message}");
+        assert!(!message.contains("exit status"), "{message}");
+    }
+    assert!(split(b"junk", 8).is_err());
+    assert!(split(b"123456789\n200", 8)
+        .unwrap_err()
+        .to_string()
+        .contains("size limit"));
+    for (code, expected) in [(6, "resolve"), (7, "connect"), (28, "timed out")] {
+        let mut curl = Command::new("/bin/sh");
+        curl.args(["-c", &format!("exit {code}")]);
+        let message = transport::collect("release lookup", &mut curl, 4, Duration::from_secs(30))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains(expected), "{message}");
+    }
 }

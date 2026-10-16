@@ -1,4 +1,5 @@
-//! Read-only status refresh; external wrapping is explicit and bounded.
+//! Read-only status refresh; external wrapping is explicit and bounded. The one write is the
+//! agent's reported quota, merged into a small file beside the state when that directory exists.
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 use std::process::Command;
@@ -7,7 +8,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{ensure, Context, Result};
 use serde_json::Value;
 use yoke_core::engine::execute_bounded;
+use yoke_core::quota;
 use yoke_core::store::{StatusSnapshot, Store};
+use yoke_core::timefmt;
 
 const INPUT_CAP: usize = 64 * 1024;
 
@@ -36,10 +39,10 @@ fn context_percentage(payload: &Value) -> Option<f64> {
 }
 
 fn render(snapshot: Option<&StatusSnapshot>, payload: &Value) -> String {
-    let mode = snapshot
-        .and_then(|s| s.mode.as_deref())
-        .unwrap_or("unrecorded");
-    let mut fields = vec![format!("yoke {}", clean(mode, 24))];
+    let mut fields = vec![match snapshot.and_then(|s| s.mode.as_deref()) {
+        Some(mode) => format!("yoke {}", clean(mode, 24)),
+        None => "yoke (no data yet)".into(),
+    }];
     if let Some(snapshot) = snapshot {
         if let Some(plan) = snapshot.plan_slug.as_deref() {
             fields.push(format!(
@@ -70,12 +73,43 @@ fn render(snapshot: Option<&StatusSnapshot>, payload: &Value) -> String {
     fields.join(" | ")
 }
 
-fn refresh(home: &Path, input: &[u8], wrap: Option<&str>) -> Result<String> {
+/// The line to paint, and a diagnostic for stderr when part of the input could not be used.
+struct Rendered {
+    line: String,
+    warning: Option<String>,
+}
+
+fn refresh(home: &Path, input: &[u8], wrap: Option<&str>) -> Result<Rendered> {
+    let now: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_secs()
+        .try_into()?;
+    refresh_at(home, input, wrap, now, timefmt::utc_offset_secs(now))
+}
+
+/// `refresh` with the clock and time zone given, so the time-dependent fields are testable.
+fn refresh_at(
+    home: &Path,
+    input: &[u8],
+    wrap: Option<&str>,
+    now: i64,
+    offset_secs: i64,
+) -> Result<Rendered> {
     ensure!(input.len() <= INPUT_CAP, "statusline input exceeds 64 KiB");
-    let payload: Value = if input.iter().all(u8::is_ascii_whitespace) {
-        Value::Null
+    // The agent repaints this line constantly, so input Yoke cannot read still gets the line
+    // from recorded state, and the reason goes to stderr instead of into the prompt bar.
+    let (payload, warning) = if input.iter().all(u8::is_ascii_whitespace) {
+        (Value::Null, None)
     } else {
-        serde_json::from_slice(input).context("invalid statusline JSON")?
+        match serde_json::from_slice(input) {
+            Ok(payload) => (payload, None),
+            Err(error) => (
+                Value::Null,
+                Some(format!(
+                    "invalid statusline JSON: {error}; showing recorded state only"
+                )),
+            ),
+        }
     };
     let db = home.join(".yoke/state.db");
     let store = match std::fs::metadata(&db) {
@@ -98,15 +132,20 @@ fn refresh(home: &Path, input: &[u8], wrap: Option<&str>) -> Result<String> {
             .or_else(|| payload["cwd"].as_str())
             .or_else(|| cwd.to_str())
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_secs()
-        .try_into()?;
     let snapshot = store
         .as_ref()
         .map(|store| store.status_snapshot(session, project, now))
         .transpose()?;
     let mut line = render(snapshot.as_ref(), &payload);
+    if let Some(reading) = quota::Quota::from_claude(&payload, now) {
+        // The line shows what this callback carries. The record feeds `yoke usage`, which has no
+        // callback of its own, so a failed write only leaves it showing an older observed time.
+        let _ = quota::record_file(&quota::claude_file(home), &reading, now);
+        if let Some(field) = reading.status_field(now, offset_secs) {
+            line.push_str(" | ");
+            line.push_str(&field);
+        }
+    }
     if let Some(wrap) = wrap {
         ensure!(
             std::env::var_os("YOKE_STATUSLINE_WRAPPED").is_none(),
@@ -140,20 +179,36 @@ fn refresh(home: &Path, input: &[u8], wrap: Option<&str>) -> Result<String> {
             line.push_str(wrapped.trim());
         }
     }
-    Ok(line)
+    Ok(Rendered { line, warning })
 }
 
-/// Consume the callback's EOF-terminated input, read existing state, print one line.
-pub fn run(wrap: Option<&str>) -> Result<()> {
+fn render_stdin(wrap: Option<&str>) -> Result<Rendered> {
     let mut input = Vec::new();
     if !std::io::stdin().is_terminal() {
         std::io::stdin()
             .take((INPUT_CAP + 1) as u64)
             .read_to_end(&mut input)?;
     }
-    let home = crate::commands::home()?;
-    println!("{}", refresh(&home, &input, wrap)?);
-    Ok(())
+    refresh(&crate::commands::home()?, &input, wrap)
+}
+
+/// Consume the callback's EOF-terminated input, read existing state, print one line.
+/// The agent paints stdout in its prompt bar, so diagnostics go to stderr only, and a failure
+/// prints nothing there rather than the usual `error:` and `help:` block.
+pub fn run(wrap: Option<&str>) -> Result<()> {
+    match render_stdin(wrap) {
+        Ok(rendered) => {
+            println!("{}", rendered.line);
+            if let Some(warning) = rendered.warning {
+                eprintln!("yoke: {warning}");
+            }
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("yoke: {error:#}");
+            std::process::exit(1)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -167,7 +222,7 @@ mod tests {
         let mut last = None;
         for _ in 0..10 {
             match refresh(home, input, Some(wrap)) {
-                Ok(line) => return line,
+                Ok(rendered) => return rendered.line,
                 Err(error) if error.to_string().contains("exceeded 250 ms") => last = Some(error),
                 Err(error) => panic!("{error:#}"),
             }
@@ -183,13 +238,26 @@ mod tests {
         assert_eq!(
             line,
             format!(
-                "yoke unrecorded | ctx 42% | {}",
+                "yoke (no data yet) | ctx 42% | {}",
                 String::from_utf8_lossy(input)
             )
         );
         assert!(!home.path().join(".yoke").exists());
-        assert!(refresh(home.path(), b"{", None).is_err());
         assert!(refresh(home.path(), b"{}", Some("sleep 2")).is_err());
+        assert!(refresh(home.path(), &[b' '; INPUT_CAP + 1], None).is_err());
+    }
+
+    #[test]
+    fn unreadable_json_still_paints_the_recorded_state_line_and_warns_separately() {
+        let home = tempfile::tempdir().unwrap();
+        let rendered = refresh(home.path(), b"not json", None).unwrap();
+        assert_eq!(rendered.line, "yoke (no data yet)");
+        let warning = rendered.warning.unwrap();
+        assert!(
+            warning.starts_with("invalid statusline JSON: "),
+            "{warning}"
+        );
+        assert!(!home.path().join(".yoke").exists());
     }
 
     #[test]
@@ -229,8 +297,8 @@ mod tests {
         assert!(before.contains_key(std::ffi::OsStr::new("state.db-shm")));
         assert!(!before[std::ffi::OsStr::new("state.db-wal")].is_empty());
         assert_eq!(
-            refresh(home.path(), b"{}", None).unwrap(),
-            "yoke unrecorded | update v999.0.0"
+            refresh(home.path(), b"{}", None).unwrap().line,
+            "yoke (no data yet) | update v999.0.0"
         );
         assert_eq!(files(&directory), before);
 
@@ -240,6 +308,50 @@ mod tests {
         let before = files(&directory);
         assert!(refresh(home.path(), b"{}", None).is_err());
         assert_eq!(files(&directory), before);
+    }
+
+    #[test]
+    fn quota_renders_from_the_payload_and_is_recorded_only_inside_existing_state() {
+        // 2026-10-16 10:00 UTC, a Friday; the weekly window resets the following Monday.
+        const NOW: i64 = 1_792_144_800;
+        let input = json!({
+            "context_window": {"used_percentage": 6},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 8, "resets_at": NOW + 3_600},
+                "seven_day": {"used_percentage": 63, "resets_at": NOW + 3 * 86_400}
+            }
+        })
+        .to_string();
+        let line = "yoke (no data yet) | ctx 6% | 5h 8% · 7d 63% (resets Mon 10:00)";
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            refresh_at(home.path(), input.as_bytes(), None, NOW, 0)
+                .unwrap()
+                .line,
+            line
+        );
+        assert!(!home.path().join(".yoke").exists());
+
+        std::fs::create_dir(home.path().join(".yoke")).unwrap();
+        assert_eq!(
+            refresh_at(home.path(), input.as_bytes(), None, NOW, 0)
+                .unwrap()
+                .line,
+            line
+        );
+        let saved = quota::read_file(&quota::claude_file(home.path()), "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!((saved.observed_at, saved.windows.len()), (NOW, 2));
+        assert!(!home.path().join(".yoke/state.db").exists());
+
+        // A payload without limits renders nothing extra and leaves the record alone.
+        assert_eq!(
+            refresh_at(home.path(), b"{}", None, NOW + 1, 0)
+                .unwrap()
+                .line,
+            "yoke (no data yet)"
+        );
     }
 
     #[test]
