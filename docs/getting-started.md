@@ -42,8 +42,12 @@ It installs into `/usr/local/bin` as root and into `~/.local/bin` otherwise, rep
 An executable in `/usr/local/bin` serves every user, but hooks and state are per user, so each user who runs an agent runs the installer once.
 It runs `yoke install` for the agents it finds, creates or migrates the state database with `yoke log` once the hooks run the new executable, and reports `yoke health`.
 With `YOKE_AGENTS=none`, or when it finds no agent, it leaves the database alone, so hooks that still run an older executable keep working; rerun it after installing an agent to connect that agent's hooks.
-If your hooks run a Yoke executable from another location, it runs `yoke uninstall` with the new executable and then installs again.
+Before it replaces the executable it checks that the state database is not newer than the new executable, because hooks running an older `yoke` would deny every tool call; if it is, the script stops with nothing changed and says how to recover.
+If your hooks run a Yoke executable from another location, it runs `yoke uninstall` with the new executable and then installs again, and tells you where the earlier copy is still on disk so you can remove it.
+Once the hooks are connected, Yoke records hook events from every Claude Code and Codex session of that user, in every project, including unrelated ones; observe mode, the default, never blocks anything, and no gate runs until you trust a policy (step 2).
 When the install directory is not on your `PATH`, it asks to add one line marked `# added by yoke install.sh` to `~/.bashrc`, and to `~/.zshrc` when your shell is zsh; open a new login shell or run `exec $SHELL -l` afterwards.
+Shells that skip that file do not find `yoke`: cron, scripts and, on Ubuntu, `ssh host command`, where `~/.bashrc` returns early for non-interactive shells.
+Use the full path there, for example `ssh host '~/.local/bin/yoke health'`; the hooks always use the absolute path.
 When no trusted global policy exists and you are at a terminal, it offers to add the `git-safety` preset to `~/.yoke/config.toml` in observe mode and runs `yoke trust --global`, which shows the exact bytes and waits for you to type the confirmation phrase.
 `YOKE_YES=1` never answers that confirmation; without a terminal the script prints `yoke preset add git-safety --global` and `yoke trust --global` for you to run.
 These environment variables change what it does:
@@ -80,7 +84,8 @@ yoke init
 ```
 
 This creates `yoke.toml` without overwriting an existing file.
-The starter uses observe mode and contains a sample `no-force-push` gate matching the `Bash` tool and the literal text `push --force`.
+The starter uses observe mode, names the project after the current directory, and contains a sample `no-force-push` gate matching the `Bash` tool and the literal text `push --force`.
+A commented `[memory]` block shows where to turn on session digests.
 It is an example matcher, not comprehensive protection against every force-push spelling or tool name.
 Inspect and edit the file for your agent's actual payloads before enabling enforcement.
 
@@ -120,12 +125,13 @@ Installation preserves unrelated hooks and creates backups and ownership receipt
 It is idempotent, and every hook it installs carries a label such as `Yoke: PreToolUse` in both agents.
 After updating Yoke, rerun `yoke install --agent claude,codex` to label existing Yoke-owned hooks without adding duplicates.
 Hooks you registered manually or changed yourself remain untouched.
-For Codex, review new hooks using `/hooks` in Codex itself.
+For Codex, open Codex itself, run `/hooks` and approve the Yoke hooks: Codex skips hooks you have not approved without any warning, including in `codex exec`, and `yoke health` reports how many of the seven Yoke hooks have no approval record.
 If you run Claude Code with `CLAUDE_CONFIG_DIR` or Codex with `CODEX_HOME`, keep the same variable set when you run `yoke install`, so the hooks land in the files the agent reads.
 Restart or reload your agent's hook configuration as appropriate, perform a normal tool action, and inspect `yoke log` for the resulting decision.
 Run `yoke health` to confirm that each agent reports installed, enabled hooks and a recorded event; it exits 1 when a check fails.
 
-For Claude's optional statusline:
+Claude's optional statusline is the way to see Yoke inside the agent: it puts the mode, plan state, alerts and your 5-hour and weekly quota in Claude Code's prompt bar.
+Hook installation alone does not add it:
 
 ```sh
 yoke install --agent claude --statusline
@@ -133,6 +139,7 @@ yoke install --agent claude --statusline
 
 This wraps an existing statusline command while preserving its input and settings.
 Uninstall restores the prior statusline when Yoke still owns it and preserves your subsequent changes.
+With the statusline installed, Claude's quota is also recorded for `yoke usage`, which prints quota, usage and recent sessions without the console.
 
 ### Register hooks manually
 
@@ -167,4 +174,19 @@ yoke uninstall --agent claude,codex
 
 Uninstall removes Yoke-owned integration entries rather than erasing project policy or memory.
 For the full sequence, including the executable, the PATH line and `~/.yoke`, see [uninstalling](uninstalling.md).
+On a remote server, open the console through an SSH tunnel as [workflows](workflows.md#console-on-a-remote-server) describes.
 Continue with the [configuration reference](configuration.md) to define your own gates.
+
+## 6. Add project memory (optional)
+
+```sh
+yoke remember --pinned 'Run the focused tests before asking for review'
+yoke recall
+yoke recall --explain
+```
+
+Notes belong to the current project, and `yoke recall` prints the project it searched.
+Session start injects them only in enforce mode, so finish step 5 first; in observe mode `yoke recall --explain` prints `injection: inactive`.
+Automatic digests stay off until you add `digest = true` under `[memory]` in `~/.yoke/config.toml` or `yoke.toml` and run `yoke trust` in your own terminal.
+See [workflows](workflows.md#project-memory) for sharing, forgetting and transferring notes.
+

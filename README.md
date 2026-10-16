@@ -168,8 +168,8 @@ $ echo '{"tool_name":"Bash","tool_input":{"command":"git push --force origin mai
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Force push is blocked by Yoke. Push without --force."}}
 
 $ yoke log --outcome deny --limit 1
-decisions[1]{ts,event,outcome,reason}:
-  1791968156,"pre_tool_use","deny","Force push is blocked by Yoke. Push without --force."
+decisions[1]{time,agent,event,tool,outcome,gate,detail}:
+  "2026-10-14 08:55:56","claude","pre_tool_use","Bash","deny","no-force-push","git push --force origin main - Force push is blocked by Yoke. Push without --force."
 ```
 
 Only `pre_tool_use`, `user_prompt_submit` and `stop` can block; failures on other events are recorded and the agent continues.
@@ -275,16 +275,17 @@ yoke recall rate
 yoke recall --explain
 ```
 
-Notes belong to the current project, and recognizable secrets are redacted before they are stored.
+Notes belong to the current project, and recognizable secrets are redacted before they are stored: known token prefixes, `key=value`, `--key value` and `key: value` pairs for names like `password` and `api_key`, bearer headers and the password in a URL such as `postgres://user:password@host`.
 In enforce mode, session start injects pinned notes, trusted shared knowledge and recent notes within `memory.inject_tokens` (default 1500), and `--explain` shows exactly what would be injected and why.
 `yoke memory export` and `yoke memory import` move memory between machines with explicit project-path mapping, and optional session digests are off by default.
 
 ### Usage, trials and extensions
 
-- `yoke install --agent claude --statusline` adds Yoke's mode, plan and alert line to Claude Code, wrapping an existing statusline command if you have one.
-- The statusline and the console Usage page estimate API token prices from agent transcripts; an unpriced model shows as unknown rather than a guessed amount, and the figures are not invoices.
+- `yoke install --agent claude --statusline` adds Yoke's mode, plan, alert and quota line to Claude Code (the 5-hour and weekly percent used and the reset time, when Claude reports them), wrapping an existing statusline command if you have one. Without it, none of this shows inside the agent.
+- `yoke usage` prints each agent's quota (percent used and left, reset times), token and estimated-cost totals for today and the last 7 days, and the newest sessions, read-only.
+- The console Usage page and `yoke usage` estimate API token prices from agent transcripts; an unpriced model shows as unknown rather than a guessed amount, and the figures are not invoices.
 - `yoke trial report --since <date>` summarizes recorded decisions into release-trial evidence, read-only.
-- `yoke extensions` inventories Claude Code and Codex skills, agents, plugins, MCP servers, hooks and memory files read-only, and exits 1 when it finds shadowed, stale or dangling definitions.
+- `yoke extensions` inventories Claude Code and Codex skills, agents, plugins, MCP servers, hooks and memory files read-only, and exits 1 when it finds stale or dangling definitions (shadowed names are reported without failing).
 
 ## Security model and limits
 

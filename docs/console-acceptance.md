@@ -33,7 +33,7 @@ Five memories cover a pinned note, Markdown, an unbroken token and plain text.
 Seven plans exist as drafts, one per console state, and the draft carries requirements, tasks, a comment and a reply.
 The Notifications page already shows `config_untrusted` and `observe_would_deny`.
 The script prints the review home, the launch project, the hook and decision counts, and the single human step.
-Expect one `release check failed` line in `<review-home>/.yoke/error.log` when offline, because the first `SessionStart` runs the daily release check.
+Expect one `release lookup failed` line in `<review-home>/.yoke/error.log` when offline, because the first `SessionStart` runs the daily release check.
 Pass `--copy-live-db` to seed the review home from a read-only SQLite backup of the live database first, exactly as described under [Safe console review with a database copy](next-steps.md#safe-console-review-with-a-database-copy); the copy is migrated, the live file is not touched.
 
 ## Step 2: finish the fixtures as a human

@@ -27,7 +27,7 @@ yoke gates
 | `mode` | string | `"observe"` | `observe` records potential effects; `enforce` applies policy |
 | `meta.name` | string | `""` | Project label |
 | `log.retention_days` | integer (days) | `90` | Retention in days for decisions, facts, check runs of done or cancelled plans, and succeeded or dead background jobs; cleanup runs at most hourly at session start in bounded batches, so a large backlog drains over several sessions. Memories, trusted snapshots, and the check runs and evidence of unfinished plans are never removed by retention. Notifications use the same window when they are listed, except unresolved conditions |
-| `log.payload_cap` | integer (bytes) | `4096` | Bytes of each redacted hook payload stored, cut at a UTF-8 character boundary |
+| `log.payload_cap` | integer (bytes) | `4096` | Bytes of each redacted hook payload stored, cut at a UTF-8 character boundary; `yoke log --json` flags a cut payload with `payload_truncated` |
 | `stop.max_blocks` | integer | `5` | Stop attempts without progress that Yoke blocks before an active plan becomes `stalled` |
 | `plans.dir` | string | `".yoke/plans"` | Plan directory relative to the project root; empty, absolute and parent-traversal paths are rejected |
 | `memory.digest` | boolean | `false` | Enable optional agent-generated session digests |

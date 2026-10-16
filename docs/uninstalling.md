@@ -14,7 +14,7 @@ The order matters: remove the hooks first and the executable second, because the
 | Ownership receipts | `~/.yoke/install-claude.json` and `~/.yoke/install-codex.json` | [Step 1](#1-remove-the-hooks) |
 | The executable | `~/.local/bin/yoke`, `/usr/local/bin/yoke` when the installer ran as root, `$YOKE_INSTALL_DIR/yoke`, or `~/.cargo/bin/yoke` for a Cargo install | [Step 2](#2-remove-the-executable) |
 | A `PATH` line | `~/.bashrc`, and `~/.zshrc` when your `SHELL` was zsh, only if you let the installer add it | [Step 3](#3-remove-the-path-line) |
-| State | `~/.yoke`: the state database `state.db` (decision log, memory, trust approvals), `backups/`, and `config.toml` when you accepted the starter global policy | [Step 4](#4-delete-the-state-optional) |
+| State | `~/.yoke`: the state database `state.db` (decision log, memory, trust approvals), `quota-claude.json` (the last Claude quota reading), `backups/`, and `config.toml` when you accepted the starter global policy | [Step 4](#4-delete-the-state-optional) |
 | Project files | `yoke.toml` and `.yoke/` in each project where you used Yoke | [Step 4](#4-delete-the-state-optional) |
 
 ## Before you start: keep your data (optional)
@@ -24,12 +24,14 @@ To keep them, export first, while `yoke` still works:
 
 ```sh
 yoke memory export ~/yoke-memory.json --all
-yoke log --limit 1000 --json > ~/yoke-decisions.json
+(umask 077; yoke log --limit 1000 --json > ~/yoke-decisions.json)
 ```
 
 `yoke memory export` writes a JSON file with your memories and the facts waiting to become memories, for every project with `--all`.
 It refuses to replace an existing file unless you add `--overwrite`.
 `yoke log` saves only the newest 1000 decisions, which is the largest `--limit` it accepts.
+Both files are plain text, and the decision log includes what your agents ran, so the `umask 077` keeps the second one readable by you alone (the memory export already is).
+Delete both when you no longer need them.
 Plans are files under `.yoke/plans` in each project, so they are not part of either export.
 
 ## 1. Remove the hooks
@@ -71,7 +73,7 @@ It now exits 1 with `Yoke hooks are not installed for any agent.`, which is the 
 Yoke installs into Claude settings under `CLAUDE_CONFIG_DIR` and Codex files under `CODEX_HOME` when those variables are set, which must then be absolute paths.
 Otherwise it uses `~/.claude` and `~/.codex`.
 Run `yoke uninstall` with the same values you installed with.
-With different values it stops with `settings path differs from installation receipt` and changes nothing.
+With different values it stops with `settings path differs from installation receipt` and changes nothing; the message names the directory the hooks were installed into and says which variable to set or unset.
 
 ### If you already deleted the executable
 
@@ -107,8 +109,18 @@ rm -f ~/.local/bin/yoke
   The package is `yoke-cli` and its executable is `yoke`.
   The installer's source build installs into a temporary directory and copies the executable out, so it never leaves a Cargo copy.
 
+- When you reran the installer with a different `YOKE_INSTALL_DIR`, it moved the hooks but left the earlier copy on disk, so remove that one as well.
+
 Leave `~/.local/bin` itself in place, because other tools may use it.
-If `command -v yoke` still prints a path, another copy is on your `PATH`; remove that one too.
+Your shell remembers where it found `yoke`, so right after `rm` the check below can still print the path you just deleted.
+Make the shell forget it first, with `hash -r` in bash or `rehash` in zsh, then check again:
+
+```sh
+hash -r 2>/dev/null || rehash
+command -v yoke
+```
+
+If `command -v yoke` still prints a path after that, another copy is on your `PATH`; remove that one too.
 
 ## 3. Remove the PATH line
 
@@ -132,6 +144,8 @@ done
 - A line that merely mentions the marker in the middle is kept.
 - The blank line the installer wrote above its line stays, and a file that had no final newline gains one.
   Both are harmless.
+- A startup file the installer created, such as `~/.zshrc` for a zsh user who had none, is left behind holding only blank lines.
+  Delete it yourself if you never wrote anything in it; `cat ~/.zshrc` shows whether it is empty.
 - `perl -i` replaces a symlink with a regular file and leaves the file it pointed to unchanged.
   If `ls -l ~/.zshrc` or `ls -l ~/.bashrc` shows `->`, run the `perl` command on the file the link points to instead.
 - A `PATH` line you wrote yourself has no marker and stays.

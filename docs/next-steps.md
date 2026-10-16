@@ -66,12 +66,12 @@ Stop the console with Ctrl-C after review.
 
 ## Known limits to carry forward
 
-- Transcript import retains a 32 MiB total bound; a Codex cumulative counter restart starts a new accounting segment, and a restart that lands exactly on the previous total is indistinguishable from no progress.
+- Transcript import counts at most the newest 32 MiB of a transcript; a larger session shows as partly counted in `yoke usage`, and the usage in its older part is not counted. A Codex cumulative counter restart starts a new accounting segment, and a restart that lands exactly on the previous total is indistinguishable from no progress.
 - A session silent for 30 minutes with pending facts is digested at the next session start in its project; a live session that silent is digested early, without its transcript.
 - Ambiguous legacy notification ownership cannot always be recovered; hidden history must not be silently reassigned.
 - Stop-cap stalls still need real interruption-trial evidence.
 - Binary artifact review has intentional limits; neither successful checks nor this handoff guarantee zero defects.
-- Read-only commands such as `yoke health`, `yoke trial report` and `yoke statusline` fail with SQLite error 14 on a database copy that lacks its `-wal` and `-shm` sidecars until a writer creates them; the live database has them.
+- Read-only commands such as `yoke health`, `yoke trial report`, `yoke usage` and `yoke statusline` fail with SQLite error 14 on a database copy that lacks its `-wal` and `-shm` sidecars until a writer creates them; the live database has them.
 - A restored `state.db` beside newer `-wal` and `-shm` files silently replays their frames; restore or remove all three together.
 
 Next session starts with isolated live console acceptance, then the coordinated hook upgrade.

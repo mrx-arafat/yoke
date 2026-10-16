@@ -32,7 +32,8 @@ cargo install --path crates/yoke-cli --locked
 - Independent review and persisted check evidence bound to working-tree fingerprints, including untracked nonignored files and concurrent-change detection.
 - Local facts and remembered notes, full-text recall, optional session digests, explicitly trusted shared knowledge, and portable memory import/export with project mapping and duplicate protection.
 - A token-authenticated loopback console for sessions, plans, decisions, memory, trust configuration, and usage, with light/dark themes, keyboard navigation, approval confirmation, and memory deletion Undo.
-- Statusline mode, plan state, alerts, optional existing-command wrapping, and usage estimates that leave unsupported costs unknown.
+- Statusline mode, plan state, alerts, Claude quota (5-hour and weekly percent used and reset time) and optional existing-command wrapping.
+- `yoke usage` for each agent's quota, usage estimates that leave unsupported costs unknown, and the newest sessions.
 - Readable git-safety, web-redirect, token-saver, and UI presets that require explicit configuration trust before activation.
 - Checksum-verified self-update with atomic binary replacement.
 

@@ -10,8 +10,10 @@ Issue #17 asks for that inventory and a read-only drift report before any team d
 
 ## Decision
 
-`yoke extensions [--json]` reads the documented locations below, prints one row per definition with agent, kind, name, scope, Yoke ownership and origin path, then a drift table.
-It exits 0 when no drift is found and 1 when any drift is found, after printing the full report.
+`yoke extensions [--json]` reads the documented locations below, prints a summary line, a drift table, then one row per definition with agent, kind, name, scope, Yoke ownership, origin path and detail.
+It exits 0 when no drift is found and 1 when a `stale` or `dangling` finding exists, after printing the full report.
+`shadowed` findings are printed but do not change the exit code (amended 2026-10-16 after a devbox journey: an override of a user skill by a project skill is often deliberate, and failing `set -e` scripts on it was alarming; the report still says which definition wins).
+Symlinks that leave every scanned root are counted in the summary in text output and listed in full in `--json`.
 It never writes extension files, never executes extension code, and never starts MCP servers.
 It reads existing `~/.yoke/state.db` state without creating or migrating it to resolve the project root.
 

@@ -51,6 +51,8 @@ A `yoke.toml`, `~/.yoke/config.toml` or `.yoke/knowledge.md` without a trusted s
 `yoke init` creates a starter file but does not trust it.
 Review the file, then run `yoke trust` (or `yoke trust --global`) in your own terminal.
 Project knowledge is trusted together with the project `yoke.toml`, which must exist.
+`yoke health` names each untrusted file that exists with the command that trusts it (`yoke trust` or `yoke trust --global`), and `yoke gates` and `yoke config` add a `help:` line saying the file is ignored.
+Files that do not exist are listed with `exists` false and are not work to do: most projects have no `.yoke/knowledge.md`.
 Agents cannot trust configuration.
 
 ## Hooks are disabled or missing
@@ -69,9 +71,35 @@ If that file sets it to `true`, Yoke's hooks do not run; remove the key or set i
 Managed policy delivered by MDM or the claude.ai console is not visible to Yoke.
 
 For Codex, `hooks = false` or `codex_hooks = false` under `[features]` in `config.toml` turns hooks off, and `yoke health` reports Yoke hooks missing from `hooks.json`.
-Codex runs new or changed hooks only after you trust them with `/hooks`; Yoke cannot read that approval or managed requirements.
-Preview a reinstall with `yoke install --dry-run`, then run `yoke install`.
+Codex runs new or changed hooks only after you approve them with `/hooks`, and it skips unapproved hooks without any warning, including in `codex exec`.
+Codex keeps one `[hooks.state."<hooks.json path>:<event>:<group>:<hook>"]` table in `config.toml` per approved hook.
+`yoke health` counts those tables and reports `no approval record for N of 7 Yoke hooks`; it can see that a record exists, not whether it is still current or what managed requirements say.
+Open Codex, run `/hooks` and approve the Yoke hooks, then start a session and check that `yoke health` shows a Codex event.
+To repair hooks that are missing or edited, run `yoke uninstall`, then `yoke install`.
+`yoke install` refuses while a managed hook is edited, with or without `--dry-run`, so there is nothing to preview first.
 `yoke extensions` reports each Yoke-managed hook that is missing, edited, unlabeled, or installed for a different `yoke` executable as `stale`.
+
+## `yoke install` says `executable changed`
+
+The installation receipt records the `yoke` executable the hooks run.
+Installing from a different path is refused with `executable changed; uninstall before reinstalling`, and the message names both paths and the command to run: `<new yoke> uninstall --agent <agent>`, then install again.
+The install script does this for you when you rerun it with the new `YOKE_INSTALL_DIR`; it leaves the old copy on disk and tells you where it is, so remove it if it is still on your `PATH`.
+A receipt written for another `CLAUDE_CONFIG_DIR` or `CODEX_HOME` is refused with `settings path differs from installation receipt`, and the message says which variable to set or unset.
+
+## `yoke` is not found outside an interactive shell
+
+The install script adds one line to `~/.bashrc` (and `~/.zshrc` when your `SHELL` is zsh) only if you let it.
+Interactive shells read it; cron, scripts and, on Ubuntu, `ssh host command` do not, because Ubuntu's `~/.bashrc` returns early for non-interactive shells above where the line sits.
+Use the full path in those places, for example `ssh host '~/.local/bin/yoke health'`, or set `PATH` yourself in the script.
+Hooks are not affected: they always run the executable by its absolute path.
+
+## Codex says commands were blocked by the sandbox
+
+If Codex reports that commands or edits "were blocked by the sandbox", run `yoke log --json` and read the `tool_response` inside the stored `payload` of the Codex `post_tool_use` row.
+A message such as `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` comes from Codex's own sandbox, not from Yoke: Yoke's decisions for those events are `allow`.
+It was seen on Ubuntu 24.04 with `kernel.apparmor_restrict_unprivileged_userns = 1` and no `bubblewrap` package, together with Codex's warning that it could not find bubblewrap on `PATH`.
+Installing the distribution's `bubblewrap` package or relaxing that sysctl needs root; the package route is the likely fix but was not verified.
+Sandbox prerequisites are described in the [Codex documentation](https://developers.openai.com/codex/concepts/sandboxing#prerequisites).
 
 ## A hook error blocked work
 
@@ -94,7 +122,9 @@ Resolve it with `yoke plan resolve <slug> <id>` after fixing the plan, or accept
 
 Inspect `yoke plan status <slug>`.
 Confirm that its contract was approved, its session exists, and its frozen commands pass in the governed project.
-The Git repository must have a HEAD commit.
+The Git repository must have a HEAD commit; a new repository needs an initial commit, which in turn needs `user.name` and `user.email` set in Git.
+A refused plan command names the plan's state and the next command, for example `plan 'x' is draft, but only a building plan can run checks; a human approves it with ...`.
+Plans hold a Stop only in enforce mode; in observe mode the Stop is recorded as `would_deny` and nothing is blocked.
 Changes during checks invalidate the fingerprint; rerun on a stable final tree.
 For required review, verify the selected agent CLI is installed and authenticated and inspect its recorded findings.
 A plan waits after the agent runs `yoke plan ask`, and stalls after `stop.max_blocks` Stop attempts without progress (default 5).
@@ -106,15 +136,25 @@ Use `yoke plan cancel <slug> --reason '<why>'` to abandon a plan, or `yoke plan 
 
 ## Memory import fails or recall looks empty
 
-Recall is project-scoped; inspect the resolved project using `yoke config`.
+Recall is project-scoped, and `yoke recall` prints the `project:` path it searched; compare it with the directory where you saved the note.
+Inside a directory without git a subdirectory is a separate project; inside a repository the git root is used.
+`yoke forget`, `yoke share` and `yoke memory pin` fail with `memory <id> not found in this project` for an ID that belongs to another project.
 Run `yoke recall '<query>' --explain` to see which notes match, with their rank and matched words, and what session start would inject.
-Imports require explicit absolute-path mappings for all source projects, even unchanged paths.
+Imports require explicit absolute-path mappings for all source projects, even unchanged paths; the error prints the `--map '<source>=<source>'` line that restores in place.
 Run `yoke memory import <file> --map '<source>=<destination>' --dry-run` before applying it.
-Conflicting records fail atomically; repeat imports of identical records are skipped.
+Conflicting records fail atomically and a dry run exits 1 when it finds any; repeat imports of identical records are skipped.
+A conflict that says `already stored under project <path>` means the archive was imported under that path before, so map it there or import it into a fresh state.
 Export refuses to overwrite an existing archive unless `--overwrite` is supplied.
+
+## Saved notes do not reach the agent
+
+Session start injects notes only in enforce mode.
+`yoke recall --explain` prints `injection: inactive` while the mode is observe; set `mode = "enforce"` in `yoke.toml` and run `yoke trust` in your own terminal.
+Shared knowledge in `.yoke/knowledge.md` is injected only after `yoke trust` has approved the file, and `yoke forget` of a shared note asks for another `yoke trust` once the entry is removed.
 
 ## Memory digests do not appear
 
+Digests need `digest = true` under `[memory]` in `~/.yoke/config.toml` or the project's `yoke.toml`, trusted with `yoke trust` in your own terminal; while it is off no job is queued and `yoke memory digest` says how to enable it.
 Run `yoke jobs` to see queued, running, failed and dead background jobs with their last error.
 A `failed` job retries at the next session start after its `run_after` time; a `dead` job used all 3 attempts or hit a problem that retrying cannot fix, such as `memory.digest` being disabled.
 Fix the cause shown in `last_error`, for example an unauthenticated digest CLI, then run `yoke jobs retry <id>` in your own terminal.
@@ -127,7 +167,9 @@ Until then it is treated as still working.
 
 Usage is imported from the agent's transcript on Stop, SessionEnd and PreCompact, and an import never decides a hook event.
 A failed import prints `yoke: usage ingestion failed: <reason>` on the hook's stderr and appends it to `~/.yoke/error.log`; the session's usage stays at its last successful import until a later import succeeds.
-A transcript over 32 MiB or containing malformed JSON fails every import, so that session's usage stays incomplete.
+A transcript containing malformed JSON fails every import, so that session's usage stays incomplete.
+A transcript over 32 MiB does not fail: only its newest 32 MiB is counted, the usage in the older part is not, and `yoke usage` marks the session in its coverage column (for example `counted 31.8 MiB of 64.7 MiB`) and adds a note.
+Totals for such a session under-report, most for a session that has run for days.
 A Codex rollout whose cumulative token total restarts when Codex begins a new conversation segment, for example after a thread settings change, starts a new accounting segment instead of failing, and the next import catches up.
 A restart that neither decreases the total nor is reported as the last turn's usage counts only the difference from the previous total.
 A replaced or truncated transcript replaces the stored usage for that session on its next import.
@@ -140,6 +182,12 @@ If a read-only command reports that the state database is empty or incomplete (f
 Free disk space or repair filesystem permissions from your own terminal.
 Preserve the database and WAL files: they contain trusted snapshots, memory, decisions, and plan state.
 Do not delete them as a troubleshooting shortcut.
+
+If a hook or `yoke health` says `state database schema N is newer than supported M`, the database was written by a newer Yoke than the one the hooks run, for example after installing an older release over it.
+This is not a disk problem.
+Every hook of the older `yoke` fails closed and denies tool calls until you act: run the newer `yoke` again (rerun the install script without `YOKE_VERSION`), or remove the hooks with `yoke uninstall --agent claude,codex` in your own terminal.
+To go back to an older Yoke, restore an older copy of `state.db` together with its `-wal` and `-shm` files; see [Upgrade notes](upgrade-notes.md).
+The install script checks this before it replaces the executable and stops with nothing changed.
 
 If writable storage fails, Yoke tries to evaluate existing trusted policy read-only.
 Audit, memory-fact, retention, and update-check failures produce warnings rather than replacing the policy decision.
@@ -163,11 +211,18 @@ Putting `YOKE_OFF=1` inside an already-blocked tool command cannot bypass the ho
 Start `yoke console` yourself in an interactive terminal; it refuses to run inside an agent tool process.
 Open the link it prints within five minutes; each link works only once and signs one browser in with a session cookie.
 A page saying the launch link expired or was already used means the link was spent or too old: restart `yoke console` for a new one.
+A page saying "This is not the console's address" means the browser reached the console under another host name or port, such as `localhost` instead of `127.0.0.1`, or a different local port in an SSH tunnel; the link is still unused, so open it again at exactly the printed address.
+On a server the console is reachable only through an SSH tunnel; see [Console on a remote server](workflows.md#console-on-a-remote-server).
+A browser that reports a refused connection has no tunnel to the console's port, or the console is no longer running.
+`yoke console` says the port is in use when `--port` names a port another process holds; pick another number or omit `--port`.
 If you did not open the link yourself, something else used it; stop the console and check what else can read your terminal.
 A link from a previous console process never works for a new instance.
 
 `yoke update --check` depends on a published stable GitHub release.
 Draft releases and local development changes are not distributed updates.
+Until the first release exists, GitHub answers 404 and Yoke says `no stable release is published yet (GitHub answered 404)`; that is a normal state, exits 0 and is not written to `~/.yoke/error.log`.
+A rate limit (`GitHub rate limit reached (HTTP 403 or 429)`) clears by itself; unauthenticated requests are limited per IP address, so many machines behind one address share the limit.
+`cannot resolve the GitHub host`, `cannot connect to GitHub` and `timed out` mean the network, not the release.
 Continue using a source build when no eligible release exists.
 
 ## Report a problem

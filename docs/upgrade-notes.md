@@ -13,7 +13,7 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 2. Do not trust a configuration that uses the new `[review.models]` or `[memory.digest_models]` keys until step 1 is done.
 3. After replacing, rerun `yoke install --agent claude,codex` with the same `CLAUDE_CONFIG_DIR` and `CODEX_HOME` you start the agents with, then run `yoke health`.
 4. Reinstall from the same executable path the installation receipt names, or run `yoke uninstall --agent <agent>` with the new binary first.
-   A reinstall from another path is refused with `executable changed; uninstall before reinstalling`.
+   A reinstall from another path is refused with `executable changed; uninstall before reinstalling`, followed by both paths and the exact `uninstall` command to run; the install script does this for you.
 
 ## Storage and upgrade
 
@@ -35,7 +35,7 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 - Who is affected: everyone with an existing `~/.yoke/state.db`.
   An older binary that meets the upgraded database fails with `state database schema 12 is newer than supported`.
   Because it can then read neither state nor mode, it fails closed: it denies PreToolUse and blocks Stop and UserPromptSubmit even when the recorded mode is observe, and appends one `error.log` line per event.
-  `yoke health`, `yoke statusline`, `yoke trial report` and `yoke extensions` read the database without migrating it.
+  `yoke health`, `yoke statusline`, `yoke trial report`, `yoke usage` and `yoke extensions` read the database without migrating it.
 - What to do: replace all hook binaries together, and keep a copy of `~/.yoke/state.db` with its `-wal` and `-shm` files if you may need to go back.
   There is no downgrade command.
   To go back, stop every agent, restore the old binary, and restore `state.db`, `state.db-wal` and `state.db-shm` together.
@@ -264,6 +264,6 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 ### New pages and commands
 
 - What changed: the console adds Projects, Notifications and Workflow settings pages, and an unknown `project` parameter now returns HTTP 400.
-  New commands are `yoke extensions` (read-only inventory that exits 1 on drift), `yoke notifications`, `yoke jobs`, `yoke trial report`, `yoke health`, `yoke plan diff`, `yoke plan validate` and the plan task, comment and feedback commands.
+  New commands are `yoke extensions` (read-only inventory that exits 1 on stale or dangling definitions), `yoke notifications`, `yoke jobs`, `yoke trial report`, `yoke health`, `yoke plan diff`, `yoke plan validate` and the plan task, comment and feedback commands.
 - Who is affected: everyone.
 - What to do: run `yoke --help` for the list; [CLI reference](cli.md) has details.

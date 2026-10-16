@@ -6,7 +6,9 @@
 
 Plans keep the editable task description in Git while SQLite owns workflow state and evidence.
 Changing Markdown alone cannot approve a plan or declare it done.
-The repository needs an existing HEAD commit for working-tree fingerprints.
+The repository needs an existing HEAD commit for working-tree fingerprints, so make an initial commit first (`git commit` needs `user.name` and `user.email` set).
+Plans hold a Stop only in enforce mode: set `mode = "enforce"` in `yoke.toml` and run `yoke trust` in your own terminal once per project.
+In observe mode every plan command still works, but a Stop only records a `would_deny` decision (`yoke log --outcome would_deny`), and `yoke plan start` prints a note saying so.
 
 Create a plan:
 
@@ -14,7 +16,7 @@ Create a plan:
 yoke plan new format-policy --title 'Validate formatting policy'
 ```
 
-Edit the file path returned by the command.
+Edit the file whose path the command prints; `--json` prints the full plan record instead.
 A plan uses TOML frontmatter delimited by `+++`:
 
 ```toml
@@ -80,7 +82,8 @@ The plan reaches `done` only when every requirement is satisfied by checks that 
 `yoke plan status <slug>` shows each task as `done`, `ready`, or `blocked`, and each requirement as satisfied by `check`, satisfied by `human`, or `unsatisfied`.
 
 1. A human runs `yoke plan approve format-policy` in their own interactive terminal and reviews the exact contract.
-2. Obtain a real recorded session ID from `yoke log --json` or the console.
+2. Obtain a real recorded session ID from `yoke log --project "$PWD" --json --limit 1` or the console.
+   `yoke log` covers every project, so the `--project` filter matters, and the newest row is yours only while no other session is active in that project.
 3. Run `yoke plan start format-policy --session <session-id>` with that ID.
 4. After making the intended changes, run `yoke plan check format-policy --agent codex` when Codex built them, or use `--agent claude` for Claude.
 5. Inspect `yoke plan status format-policy` for transitions, check output, and evidence.
@@ -147,19 +150,31 @@ yoke recall 'formatting' --json
 ```
 
 Use the returned ID with `yoke memory pin <id>`, `yoke memory pin <id> --unpin`, or `yoke forget <id>`.
-Recall is scoped to the current project.
+Recall is scoped to the current project: the directory you run it in, or the git root when it is inside a repository.
+Inside a directory without git, a subdirectory is a separate project, and `yoke recall` prints the `project:` path it searched.
+`yoke forget`, `yoke share` and `yoke memory pin` take the same project-scoped IDs: an ID from another project fails with `memory <id> not found in this project` and changes nothing.
 A query matches any of its words, including plural and verb forms of English words, and the best matches come first.
 Without a query, recall lists pinned entries first, then the newest.
-Run `yoke recall --explain` to see exactly what session start injects and why: pinned notes, trusted knowledge, then recent notes, cut off at `memory.inject_tokens`.
+Session start injects notes only in enforce mode, so set `mode = "enforce"` in `yoke.toml` and run `yoke trust` in your own terminal.
+In the default observe mode nothing is injected: `yoke recall --explain` prints `injection: inactive`, and `yoke remember` says so with the first note of a project.
+Run `yoke recall --explain` to see exactly what session start injects in enforce mode and why: pinned notes, trusted knowledge, then recent notes, cut off at `memory.inject_tokens`.
 Add a query to `--explain` to see the BM25 rank, score and matched words for each selected note.
 Secret redaction recognizes patterns; it does not make arbitrary sensitive notes safe to publish.
+It masks private key blocks, token prefixes such as `ghp_` and `sk-` at the start of a word, bearer and basic credentials, the password in `scheme://user:password@host`, and the value of `key=value` and `--key value` for names that contain `token`, `secret`, `password`, `passwd`, `api_key` or `authorization`.
+It masks the value of `key: value` only when the name ends in one of those words (or its plural), so `Tokenizer:` and `sshSecrets.ts:` are kept.
+In `key: value` the value is the rest of the line, up to a quote, a backtick or one of `,`, `;`, `}` and `]`.
+Ordinary prose such as `token is required` is kept, and a secret with no recognizable name or prefix is not masked.
+Notes stored by an earlier version keep their original text until you forget and save them again.
 
-`yoke share <id>` appends the selected note to `.yoke/knowledge.md`.
+`yoke share <id>` appends the selected note to `.yoke/knowledge.md`; sharing it again changes nothing and says so.
 Review that file before committing it or running `yoke trust` to enable trusted knowledge injection.
+`yoke forget <id>` also removes the entry `yoke share` wrote for that note, then reminds you to run `yoke trust` so trusted knowledge drops it.
+An entry you edited by hand is left in place and reported, and the command exits 1 so a stray copy is never silent.
 Local notes and shared knowledge have separate approval and distribution steps.
 
 Automatic session digests are disabled by default.
-Enable `memory.digest` and choose `memory.digest_agent` in trusted configuration to use them.
+Enable `memory.digest` and choose `memory.digest_agent` in trusted configuration to use them: put `digest = true` under `[memory]` in `~/.yoke/config.toml` or the project's `yoke.toml`, then run `yoke trust` in your own terminal.
+Until then no digest job is queued, `yoke memory digest` fails with that instruction, and facts keep being recorded for a later digest.
 A manual digest uses `yoke memory digest <session-id>`, optionally with `--transcript <path>`.
 Each run digests at most 10 batches of up to 100 facts, so run it again when it prints `facts_pending: true`.
 Automatic digests run as durable background jobs, so one session never has two digests queued or running at once.
@@ -188,7 +203,9 @@ yoke memory import ./yoke-memory.json \
   --map '<absolute-source-project>=<absolute-destination-project>'
 ```
 
-Dry runs report additions and duplicates without creating the destination database.
+To restore in place, map each project to itself (`--map '/path/to/project=/path/to/project'`); the error for a missing `--map` prints that line for every project in the archive.
+Dry runs report additions and duplicates without creating the destination database, and exit 1 when they find conflicts, as the real import would.
+A conflict names the reason: an archive already imported under another project path is refused rather than imported a second time.
 Imports preserve identities and fact relationships, skip identical imports, and reject conflicts atomically.
 Archives are versioned and bounded to 16 MiB and 20,000 records.
 Trust, approvals, credentials, and installer state do not transfer.
@@ -212,8 +229,9 @@ The UI pack supplies commented plan-check templates; replace them with real brow
 It then reports drift: one name defined at several scopes (with the winner each agent documents), Yoke-managed definitions that no longer match what this executable would install, and hook or MCP commands whose program is missing.
 The command reads files only and never executes or starts anything.
 It never prints values that could hold a secret: commands appear as the program name and an argument count, URLs as scheme and host, and environment variables and headers as names only.
-It exits 1 when drift is found so a script can stop on it.
-It does not distribute or repair configuration; resolve shadowed names by renaming or removing one definition, and repair managed hooks with `yoke install`.
+Text output starts with a summary line and the drift table, then the inventory; `--json` carries every note and symlink target.
+It exits 1 when a Yoke-managed hook is stale or a command is missing, so a script can stop on it; shadowed names are reported with exit 0, since an override is often deliberate.
+It does not distribute or repair configuration; resolve shadowed names by renaming or removing one definition, and repair managed hooks with `yoke uninstall`, then `yoke install`; `yoke install` refuses while a managed hook is edited, with or without `--dry-run`.
 
 ## Console and statusline
 
@@ -232,14 +250,80 @@ Cmd+K or Ctrl+K opens the command palette; `?` shows shortcuts.
 Memory deletion offers a 30-second Undo, and plan approval displays the frozen contract before confirmation.
 Configuration trust remains a terminal operation.
 
+### Console on a remote server
+
+The console listens on 127.0.0.1 of the machine it runs on, so a browser on another computer cannot reach it directly.
+Start it from the project in an interactive SSH session (`ssh -t`), with `--no-open`, and fix the port so the tunnel can be set up first:
+
+```sh
+ssh -t me@server
+cd ~/my-project
+yoke console --no-open --port 41234
+```
+
+On the computer with the browser, within five minutes, forward the same port number on both sides:
+
+```sh
+ssh -N -L 41234:127.0.0.1:41234 me@server
+```
+
+Then open the printed link unchanged, for example `http://127.0.0.1:41234/c/<id>/launch?code=<code>`.
+Without `--port` the console picks a random free port; read it from the printed link and use it on both sides of the forward.
+Over SSH the console prints this tunnel command with the actual port.
+The browser must use `127.0.0.1` and the forwarded port number, because the console refuses any other `Host` as a defense against DNS rebinding.
+`localhost` or a different local port shows a "This is not the console's address" page and leaves the link unused.
+Without the forward the browser reports a refused connection.
+`--no-open` is the clean choice on a server; without it, a missing browser opener or an SSH session with no display only prints a note and the console keeps serving.
+
 `yoke statusline` reads callback JSON from stdin and renders recorded state without creating or migrating a database.
-A missing state file, or one with no committed schema such as a zero-byte file, renders the line without recorded state instead of an error.
+A missing state file, or one with no committed schema such as a zero-byte file, renders the line without recorded state instead of an error, and the mode reads `yoke (no data yet)` until a hook event has recorded one.
+Callback input that is not valid JSON still prints that line, and the reason goes to stderr.
+Because the agent paints stdout in its prompt bar, any failure prints nothing there; the reason goes to stderr and the exit status is 1.
+When the callback JSON carries Claude rate limits, the line ends with a quota segment such as `5h 8% · 7d 63% (resets Mon 10:00)`, and the figures are recorded for `yoke usage` (see [Usage and quota](#usage-and-quota)).
 `--wrap '<existing-command>'` forwards that input to an existing bounded status command and appends its output.
 The 15 ms target applies to Yoke's own rendering, excluding the optional wrapper and waiting for stdin to close.
 Usage amounts are API token-price estimates based on supported transcript fields and a compiled pricing table, not subscription invoices.
 Unsupported models or missing billing dimensions display unknown cost, and a total that includes them shows the priced part plus the unknown samples.
 Concurrent imports of one session keep the newest transcript snapshot, and a replaced or truncated transcript replaces the stored usage on its next import.
 The Usage page filters by inclusive date range and groups by day or month in the UTC offset shown on the page.
+
+## Usage and quota
+
+`yoke usage` shows how much of each agent's quota is used and left, and what recent sessions cost, without opening the console.
+It reads local records only and never creates, migrates or writes state, so it is safe to run while hooks are active.
+`--limit <n>` sets how many recent sessions to list (default 10, range 1 through 100), and `--json` prints the whole report for scripts.
+
+The report has these parts:
+
+- **Quota** lists each agent's rate-limit windows with percent used, percent remaining, the reset time, the time until reset, and how long ago the agent reported the figures.
+- **Usage** totals input, output, cache-read and cache-write tokens and the estimated cost per agent, since local midnight and over the 7 x 24 hours before now.
+- **Sessions** lists the newest sessions with their models, start, duration, tokens, estimated cost and coverage.
+  Duration runs from the earlier of the recorded session start and the first usage sample to the session's last usage sample, so it includes any idle time.
+  Coverage is `full`, or says how much of an oversize transcript was counted (see below).
+- **Notes** say what is missing and what produces it, for example no state yet, a state schema older than usage times need, or an agent that has not reported its quota.
+
+Quota percentages are what each agent reported; Yoke does not compute, predict or enforce a quota.
+Costs are the API-price estimates described above, so an unpriced model shows as unknown rather than a guessed amount.
+
+Where quota comes from:
+
+- **Claude Code** reports `rate_limits.five_hour` and `rate_limits.seven_day` (percent used and reset time) in the statusline callback JSON.
+  The Yoke statusline, installed with `yoke install --agent claude --statusline`, shows them and merges them into `~/.yoke/quota-claude.json`, which `yoke usage` reads.
+  The statusline still never creates or migrates the state database: it writes only that one file, atomically, only when `~/.yoke` already exists, and it skips the write while the figures are unchanged and under a minute old.
+  The segment shows the reset time of the window closest to its limit, because that window blocks work first; `yoke usage` lists every window's reset time.
+- **Codex** records `rate_limits` in each `token_count` event of its session files.
+  Yoke keeps the newest one while it imports a session's usage, when the session stops, ends or compacts, so Codex quota is only as fresh as the last import.
+  Each window carries its own length, so a Codex plan that reports only a weekly window shows only `7d`.
+
+Several sessions report the same account limits, so Yoke keeps, per window, the reading with the later reset time and, for one reset time, the higher percent.
+An idle session replaying old figures therefore cannot lower them.
+A window whose reset time has passed is marked `reset` and keeps its last figure until the agent reports the next one.
+Without a recorded reading, the report says so and names what produces it; it never shows a guessed figure.
+
+Each import reads at most the newest 32 MiB of a transcript, so a long session can be larger than that.
+The usage in the older part is not counted: Claude messages and Codex counts before the cut are skipped, and the first Codex count in the counted part only sets the baseline, so skipped usage is never dated to it.
+Such a session is marked `counted X MiB of Y MiB` in `yoke usage` and in its `partial` field with `--json`, and a note gives how many sessions are affected, because their totals under-report.
+The marker clears when a later import of that session counts the whole transcript.
 
 ## Security model and limits
 

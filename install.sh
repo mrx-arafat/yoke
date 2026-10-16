@@ -235,7 +235,7 @@ ensure_cargo() {
     case $status in
         0) ;;
         1) die "Cargo is required. Install Rust with: $rustup_cmd" ;;
-        *) die "Cargo is required. Install Rust with: $rustup_cmd (or rerun with YOKE_YES=1)" ;;
+        *) die "Cargo is required. Install Rust with: $rustup_cmd (or rerun with YOKE_INSTALL_RUST=1 to let this script do it; building takes a few minutes)" ;;
     esac
     say "installing Rust with rustup into ${CARGO_HOME:-$HOME/.cargo}; this takes a minute"
     fetch https://sh.rustup.rs "$tmp/rustup.sh" || die "could not download https://sh.rustup.rs"
@@ -262,6 +262,17 @@ build_from_source() {
     candidate=$tmp/root/bin/yoke
 }
 
+# Refuse, before anything is replaced or connected, when the state database was written by a
+# newer Yoke: hooks that run this older executable would deny every tool call.
+check_state() {
+    report=$("$1" health 2>&1) || true
+    line=$(printf '%s\n' "$report" | grep 'is newer than supported' | head -n 1 || true)
+    if [ -n "$line" ]; then
+        err "the state database was written by a newer Yoke than this one:$line"
+        die "nothing was changed; rerun without YOKE_VERSION to install the newest release, or restore an older backup of ~/.yoke/state.db with its -wal and -shm files (docs/upgrade-notes.md)"
+    fi
+}
+
 # Replace $bin atomically from $candidate: live agent hooks may execute it at any moment.
 install_binary() {
     if [ -d "$bin" ]; then die "$bin is a directory"; fi
@@ -271,6 +282,7 @@ install_binary() {
     if ! "$staged" --version >/dev/null 2>&1; then
         die "the new executable does not run on this system; rerun with YOKE_FROM_SOURCE=1 to build it"
     fi
+    check_state "$staged"
     mv -f "$staged" "$bin" || die "cannot replace $bin"
     staged=
 }
@@ -306,6 +318,11 @@ connect_agents() {
             say "connecting them again: yoke install --agent $agents"
             "$bin" install --agent "$agents" || die "yoke install --agent $agents failed"
             connected=1
+            # The refusal names the executable the hooks used to run; that copy stays on disk.
+            old=$(printf '%s\n' "$output" | sed -n 's/^.*hooks run \(.*\), not .*$/\1/p' | head -n 1)
+            if [ -n "$old" ] && [ "$old" != "$bin" ] && [ -f "$old" ]; then
+                say "your previous Yoke executable is still at $old; once nothing else uses it, remove it so it cannot shadow $bin: rm -f '$old'"
+            fi
             ;;
         *)
             printf '%s\n' "$output" >&2
@@ -331,9 +348,9 @@ add_path_line() {
 # Sets $yoke_cmd to how the user runs Yoke, adding $dir to PATH for new shells when asked.
 setup_path() {
     yoke_cmd=yoke
+    found=$(command -v yoke || true)
     case ":$PATH:" in
         *":$dir:"*)
-            found=$(command -v yoke || true)
             if [ "$found" != "$bin" ]; then
                 say "warning: yoke on your PATH is $found, which shadows $bin"
                 say "remove it (cargo uninstall yoke-cli if Cargo installed it) or put $dir first on PATH"
@@ -358,7 +375,11 @@ setup_path() {
     fi
     add_path_line "$HOME/.bashrc"
     case ${SHELL:-} in */zsh) add_path_line "$HOME/.zshrc" ;; esac
-    say "new login shells find yoke; in this shell, run: exec \$SHELL -l"
+    say "new interactive shells find yoke; in this shell, run: exec \$SHELL -l"
+    say "shells that skip that file (cron, scripts, and on Ubuntu 'ssh host command') need the full path: $bin"
+    if [ -n "$found" ] && [ "$found" != "$bin" ]; then
+        say "warning: another yoke is already on your PATH at $found; remove it so it cannot shadow $bin"
+    fi
 }
 
 # Offer a starter global policy when none is trusted. Only a human at the terminal can
@@ -460,11 +481,14 @@ main() {
         *) die "yoke health failed with exit status $status" ;;
     esac
 
-    say "next steps:"
     if [ "$connected" = 1 ]; then
-        case ,$agents, in *,codex,*) say "  - in Codex, approve the Yoke hooks with /hooks" ;; esac
+        say "Yoke now records hook events from every session of the agents it connected, in every project, for this user; observe mode, the default, never blocks anything"
     fi
+    say "no gate runs until a policy is trusted. next steps:"
     say "  - in each project to govern, run $yoke_cmd init, review yoke.toml, then $yoke_cmd trust from your own terminal"
+    if [ "$connected" = 1 ]; then
+        case ,$agents, in *,codex,*) say "  - in Codex, approve the Yoke hooks with /hooks; Codex skips unapproved hooks without any warning" ;; esac
+    fi
 }
 
 main "$@"

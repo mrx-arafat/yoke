@@ -29,6 +29,28 @@ install) echo "changes: 0" ;;
 health) echo '  "/h/.yoke/config.toml",false,false' ;;
 esac
 """
+# Reports a database from a newer Yoke the way `yoke health` does, and logs every call.
+NEWER_STATE_YOKE = b"""#!/bin/sh
+echo "$*" >> "$YOKE_TEST_LOG"
+case $1 in
+--version) echo 9.9.9 ;;
+health) echo '  "cannot read /h/.yoke/state.db: state database schema 99 is newer than supported 12"' ;;
+esac
+"""
+# Refuses the first install the way a moved executable does, then accepts it after `uninstall`.
+MOVED_YOKE = b"""#!/bin/sh
+echo "$*" >> "$YOKE_TEST_LOG"
+case $1 in
+--version) echo 9.9.9 ;;
+install)
+    if [ -f "$YOKE_TEST_MOVED" ]; then echo "changes: 3"; else
+        echo "yoke: executable changed; uninstall before reinstalling: the claude hooks run $YOKE_TEST_OLD, not $0; run it" >&2
+        exit 1
+    fi ;;
+uninstall) : > "$YOKE_TEST_MOVED"; echo "changes: 3" ;;
+health) echo '  "/h/.yoke/config.toml",false,false' ;;
+esac
+"""
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -123,6 +145,44 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("install --agent claude", calls)
         self.assertEqual([c for c in calls if c.startswith(("trust", "preset"))], [])
         self.assertIn("yoke trust --global", result.stdout)
+
+    def test_refuses_a_newer_state_database_before_replacing_anything(self) -> None:
+        self.bin.mkdir()
+        existing = self.bin / "yoke"
+        existing.write_bytes(b"previous release")
+        log = self.home / "yoke-calls.log"
+        (self.mirror / self.name).write_bytes(NEWER_STATE_YOKE)
+
+        result = self.install(
+            hashlib.sha256(NEWER_STATE_YOKE).hexdigest(),
+            YOKE_AGENTS="claude",
+            YOKE_TEST_LOG=str(log),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("newer than supported", result.stderr)
+        self.assertIn("nothing was changed", result.stderr)
+        self.assertEqual(existing.read_bytes(), b"previous release")
+        self.assertNotIn("install --agent claude", log.read_text())
+
+    def test_moving_the_hooks_names_the_old_executable_left_behind(self) -> None:
+        old = self.home / "old-yoke"
+        old.write_bytes(b"old")
+        log = self.home / "yoke-calls.log"
+        (self.mirror / self.name).write_bytes(MOVED_YOKE)
+
+        result = self.install(
+            hashlib.sha256(MOVED_YOKE).hexdigest(),
+            YOKE_AGENTS="claude",
+            YOKE_TEST_LOG=str(log),
+            YOKE_TEST_MOVED=str(self.home / "moved"),
+            YOKE_TEST_OLD=str(old),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"still at {old}", result.stdout)
+        self.assertIn(f"rm -f '{old}'", result.stdout)
+        self.assertIn("records hook events", result.stdout)
 
 
 if __name__ == "__main__":
