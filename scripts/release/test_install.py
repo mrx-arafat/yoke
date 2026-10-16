@@ -20,6 +20,15 @@ TARGETS = {
     ("Linux", "aarch64"): "aarch64-unknown-linux-gnu",
 }
 FAKE_YOKE = b"#!/bin/sh\necho 9.9.9\n"
+# Logs every call to $YOKE_TEST_LOG, so a test can see what the installer ran.
+RECORDING_YOKE = b"""#!/bin/sh
+echo "$*" >> "$YOKE_TEST_LOG"
+case $1 in
+--version) echo 9.9.9 ;;
+install) echo "changes: 0" ;;
+health) echo '  "/h/.yoke/config.toml",false,false' ;;
+esac
+"""
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -51,7 +60,7 @@ class InstallScriptTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         self.url = f"http://127.0.0.1:{server.server_address[1]}"
 
-    def install(self, digest: str) -> subprocess.CompletedProcess[str]:
+    def install(self, digest: str, **extra: str) -> subprocess.CompletedProcess[str]:
         (self.mirror / f"{self.name}.sha256").write_text(f"{digest}  {self.name}\n")
         env = {
             "PATH": os.environ["PATH"],
@@ -60,6 +69,7 @@ class InstallScriptTests(unittest.TestCase):
             "YOKE_DOWNLOAD_URL": self.url,
             "YOKE_INSTALL_DIR": str(self.bin),
             "YOKE_AGENTS": "none",
+            **extra,
         }
         # A new session has no controlling terminal, so no question can wait for input.
         return subprocess.run(
@@ -96,6 +106,23 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(list(self.bin.iterdir()), [existing])
         self.assertEqual(existing.read_bytes(), b"previous release")
         self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_yes_never_trusts_a_policy_without_a_terminal(self) -> None:
+        log = self.home / "yoke-calls.log"
+        (self.mirror / self.name).write_bytes(RECORDING_YOKE)
+
+        result = self.install(
+            hashlib.sha256(RECORDING_YOKE).hexdigest(),
+            YOKE_AGENTS="claude",
+            YOKE_YES="1",
+            YOKE_TEST_LOG=str(log),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = log.read_text().splitlines()
+        self.assertIn("install --agent claude", calls)
+        self.assertEqual([c for c in calls if c.startswith(("trust", "preset"))], [])
+        self.assertIn("yoke trust --global", result.stdout)
 
 
 if __name__ == "__main__":

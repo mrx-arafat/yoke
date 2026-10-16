@@ -83,3 +83,143 @@ jobs:
           schema=${schema%% *}
           supported=${line##* supported=}
           test -n "$schema" && test "$schema" = "$supported"
+
+  linux-user:
+    name: ubuntu:24.04 as a user with sudo
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # A server login that is not root: passwordless sudo, no compiler, no Rust, no terminal.
+    container: ubuntu:24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Test scaffolding only: the image has no curl, no sudo and no user to log in as.
+      - name: Create a user with passwordless sudo and a fake Claude Code directory
+        run: |
+          apt-get update -qq && apt-get install -y -qq curl ca-certificates sudo
+          useradd -m -s /bin/bash dev
+          echo 'dev ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/dev
+          chmod 440 /etc/sudoers.d/dev
+          install -d -o dev -g dev /home/dev/.claude
+          # Without a compiler, the installer has to ask sudo for one.
+          if command -v cc; then echo "the image already has a C compiler"; exit 1; fi
+      - name: Fetch this commit's install.sh
+        env:
+          REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: curl -fsSL "https://raw.githubusercontent.com/$REPOSITORY/$COMMIT/install.sh" -o /tmp/install.sh
+      # YOKE_FROM_SOURCE keeps the compiler path under test once a release is published.
+      - name: Install Yoke as that user with every question answered yes
+        run: su - dev -c 'YOKE_YES=1 YOKE_FROM_SOURCE=1 bash </tmp/install.sh' 2>&1 | tee /tmp/install-user.log
+      - name: Check the sudo compiler install, the user binary, PATH, hooks and schema
+        run: |
+          grep -F 'installing a C compiler with sudo' /tmp/install-user.log
+          command -v cc
+          test -x /home/dev/.local/bin/yoke
+          test ! -e /usr/local/bin/yoke
+          # shellcheck disable=SC2016 # the line is written with a literal $PATH
+          marked='export PATH="/home/dev/.local/bin:$PATH"  # added by yoke install.sh'
+          grep -Fx "$marked" /home/dev/.bashrc
+          grep -F "/home/dev/.local/bin/yoke' run-hook --agent claude PreToolUse" /home/dev/.claude/settings.json
+          su - dev -c '/home/dev/.local/bin/yoke health' >/tmp/health.txt || true
+          cat /tmp/health.txt
+          # The installer migrates the database to the schema this executable supports.
+          line=$(grep '^state:' /tmp/health.txt)
+          schema=${line##* schema=}
+          schema=${schema%% *}
+          supported=${line##* supported=}
+          test -n "$schema" && test "$schema" = "$supported"
+          # YOKE_YES answers the installer's questions but never trusts a policy.
+          grep -F '/.yoke/config.toml",false,false' /tmp/health.txt
+      - name: Rerun with the install directory off PATH to check the PATH line stays single
+        run: |
+          su - dev -c 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin YOKE_YES=1 YOKE_FROM_SOURCE=1 bash </tmp/install.sh' 2>&1 | tee /tmp/install-user2.log
+          grep -F 'already adds /home/dev/.local/bin to PATH' /tmp/install-user2.log
+          grep -F 'changes: 0' /tmp/install-user2.log
+          test "$(grep -c 'added by yoke install.sh' /home/dev/.bashrc)" = 1
+
+  linux-interactive:
+    name: ubuntu:24.04 in a terminal
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # Runs only here, on a throwaway container, with expect typing as the human. The product
+    # refuses yoke trust without a terminal and inside agents, and this keeps both guards.
+    container: ubuntu:24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Test scaffolding only: curl fetches the installer, expect plays the person at the terminal.
+      - name: Install curl and expect, and make a fake Claude Code directory
+        run: |
+          apt-get update -qq && apt-get install -y -qq curl ca-certificates expect
+          mkdir -p "$HOME/.claude"
+      - name: Fetch this commit's install.sh
+        env:
+          REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: curl -fsSL "https://raw.githubusercontent.com/$REPOSITORY/$COMMIT/install.sh" -o /tmp/install.sh
+      - name: Write the terminal driver
+        run: |
+          cat >/tmp/drive.exp <<'EOF'
+          # Runs $DRIVE_CMD in a pseudo-terminal the way a person would: Enter for every
+          # [Y/n] question, and the exact phrase that yoke trust asks for.
+          set timeout 2400
+          set asked {}
+          set typed_phrase 0
+          spawn bash -c $env(DRIVE_CMD)
+          expect {
+              -re {yoke-install: ([^\r\n]*)\[Y/n\] $} {
+                  lappend asked $expect_out(1,string)
+                  send "\r"
+                  exp_continue
+              }
+              -re {Type (\S+) to confirm: $} {
+                  set typed_phrase 1
+                  send "$expect_out(1,string)\r"
+                  exp_continue
+              }
+              timeout {
+                  puts "\nFAIL: timed out waiting for the installer"
+                  exit 2
+              }
+              eof
+          }
+          lassign [wait] pid spawned os_error status
+          puts "\nINSTALLER EXIT STATUS: $status"
+          puts "QUESTIONS ANSWERED: [llength $asked]"
+          foreach question $asked { puts "  - $question" }
+          if {$status != 0} { exit $status }
+          foreach want $env(DRIVE_EXPECT) {
+              set found 0
+              foreach question $asked {
+                  if {[string first $want $question] >= 0} { set found 1 }
+              }
+              if {!$found} {
+                  puts "FAIL: the installer never asked about: $want"
+                  exit 3
+              }
+          }
+          if {!$typed_phrase} {
+              puts "FAIL: yoke trust never asked for its confirmation phrase"
+              exit 4
+          }
+          EOF
+      - name: Install Yoke in a terminal, pressing Enter at every question
+        env:
+          # A directory off PATH, so the PATH question is asked as well.
+          YOKE_INSTALL_DIR: /opt/yoke/bin
+          YOKE_FROM_SOURCE: "1"
+          DRIVE_CMD: cat /tmp/install.sh | bash
+          DRIVE_EXPECT: "{C compiler} Cargo PATH {global policy}"
+        run: expect /tmp/drive.exp
+      - name: Check that the typed confirmation trusted the starter global policy
+        run: |
+          test -x /opt/yoke/bin/yoke
+          grep -F '# Yoke preset: git-safety' "$HOME/.yoke/config.toml"
+          # shellcheck disable=SC2016 # the line is written with a literal $PATH
+          grep -Fx 'export PATH="/opt/yoke/bin:$PATH"  # added by yoke install.sh' "$HOME/.bashrc"
+          /opt/yoke/bin/yoke health >/tmp/health.txt || true
+          cat /tmp/health.txt
+          grep -F '/.yoke/config.toml",true,false' /tmp/health.txt
