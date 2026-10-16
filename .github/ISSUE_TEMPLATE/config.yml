@@ -1,0 +1,7 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/mrx-arafat/yoke/security/advisories/new
+    about: >-
+      Please report security vulnerabilities privately through GitHub's
+      advisory form instead of opening a public issue. Read SECURITY.md first.

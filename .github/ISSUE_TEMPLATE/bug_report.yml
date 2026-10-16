@@ -1,0 +1,97 @@
+name: Bug report
+description: Report a bug in Yoke so we can reproduce and fix it
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Yoke version
+      description: Run `yoke --version` and paste the exact output.
+      placeholder: "yoke 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and architecture
+      description: Run `uname -s -m` (macOS or Linux) and paste the output, plus the OS version if you know it.
+      placeholder: "Darwin arm64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      description: Which agent is Yoke integrated with when the bug happens?
+      options:
+        - Claude Code
+        - Codex
+        - Both
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: agent-version
+    attributes:
+      label: Agent version
+      description: Paste the version of the agent named above, for example `claude --version` or `codex --version`.
+      placeholder: "1.0.23"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      description: How did you install Yoke?
+      options:
+        - install.sh
+        - cargo install
+        - Built from source
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: health
+    attributes:
+      label: yoke health output
+      description: >-
+        Run `yoke health` in your project and paste the output.
+        Redact any absolute paths, usernames, and project names before pasting;
+        use `~` for your home directory instead.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps that start from a clean state and end with the bug.
+      placeholder: |-
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected Yoke to do, including any command output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened, including the full error or unexpected output.
+    validations:
+      required: true

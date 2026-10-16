@@ -17,7 +17,7 @@ Angle-bracket values below are placeholders to replace, not literal arguments.
 | `yoke gates` | List trusted gates |
 | `yoke run-hook <event> [--agent claude\|codex]` | Read one JSON event from stdin; agent defaults to Claude |
 | `yoke install [--agent claude,codex] [--dry-run] [--statusline]` | Install managed agent integrations; statusline is for Claude |
-| `yoke uninstall [--agent claude,codex] [--dry-run]` | Remove owned integration entries |
+| `yoke uninstall [--agent claude,codex] [--dry-run]` | Remove owned integration entries; it does not remove the executable, the PATH line or `~/.yoke` (see [uninstalling](uninstalling.md)) |
 | `yoke health [--json]` | Read-only report of the executable, state schema, mode, policy trust and staleness, each agent's hook installation, enablement and last recorded event, unfinished plans, problems and guidance; exits 1 when a check fails |
 | `yoke update [--check]` | Check releases or verify and replace the current executable |
 | `yoke extensions [--json]` | Read-only inventory of Claude Code and Codex skills, commands, agents, plugins, MCP servers, hooks, memory and rule files, and of Yoke preset blocks, with a drift report |

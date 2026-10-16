@@ -1,6 +1,9 @@
 # Release acceptance
 
-This page is the checklist a human completes before publishing a Yoke release.
+[Documentation index](README.md) · [Releasing](releasing.md)
+
+This page is the checklist a human completes before publishing a Yoke release, and the record of what has been verified.
+The commands that take a release from ready to published are in [Releasing](releasing.md).
 Local focused checks are not release acceptance, and nothing on this page is complete until its evidence is recorded here.
 
 A Git push never publishes a binary.
@@ -8,9 +11,34 @@ Pushing a tag runs the release workflow, which builds every target on its own na
 A draft is invisible to `yoke update` until a human reviews it against [COMPLIANCE.md](../COMPLIANCE.md) and publishes it.
 A manual `workflow_dispatch` run produces Actions artifacts only and creates no release.
 
+## Gate status
+
+Checked on 2026-10-16 at commit `e2745ce`.
+A row reads `done` only when its evidence exists today, `pending` when a command or a change is still needed, and `human` when only a person can complete it.
+No row reads `done` on a claim alone, and the release preflight in [Releasing](releasing.md#step-4-run-the-preflight) checks the machine-checkable rows again for the release commit.
+
+| Gate | Status | Evidence | Owner |
+| --- | --- | --- | --- |
+| CI green | done | [CI run 38921922828](https://github.com/mrx-arafat/yoke/actions/runs/38921922828) passed for `e2745ce`: formatting, clippy, the full test suite on Ubuntu and macOS, `cargo deny check`, and the docs and scripts checks | CI |
+| Installer matrix, root | done | [Installer run 38921922813](https://github.com/mrx-arafat/yoke/actions/runs/38921922813) passed the nine Linux images for `e2745ce`; [run 38729099812](https://github.com/mrx-arafat/yoke/actions/runs/38729099812) passed the same nine for `808aca8` | CI |
+| Non-root installer and interactive trust | done | The same run passed `ubuntu:24.04 as a user with sudo` and `ubuntu:24.04 in a terminal`, where a terminal driver answers the questions and types the trust phrase; Linux only, because no workflow runs the installer on macOS | CI |
+| Release workflow on all four targets | pending | No `release.yml` run exists: `gh run list --workflow release.yml` printed `[]` on 2026-10-16; start one with `gh workflow run release.yml --ref main` | maintainer |
+| Packaging and license notices | done | The host target was packaged and verified at `ff20d07` ([dry run](#local-packaging-dry-run)), `cargo deny check licenses sources` passed ([license check](#local-license-check)), and the notices generate for all four targets; the three other builds belong to the row above | maintainer |
+| Crates packageable | done | `yoke-core` packages without warnings and `yoke-cli` lists its licenses and readme; `yoke-cli` can be packaged only after `yoke-core` is on crates.io ([packaging evidence](#packaging)) | maintainer |
+| Compliance ticks | human | 0 of 21 boxes in [COMPLIANCE.md](../COMPLIANCE.md) are ticked; [Compliance evidence](#compliance-evidence) is what the person ticking can rely on | maintainer |
+| Trademark search | human | Not done: USPTO and EUIPO, classes 9 and 42, as COMPLIANCE.md section 3 requires | maintainer |
+| Observe-day trial, Codex | human | Partial: 0.8 of one working day, recorded for 2026-10-13 to 2026-10-14 in [trials](trials.md#evidence-record) | maintainer |
+| Observe-day trial, Claude Code | human | Not started: [trials](trials.md#evidence-record) records no Claude Code decision | maintainer |
+| Enforce-week trial, Codex | human | Not started | maintainer |
+| Enforce-week trial, Claude Code | human | Not started | maintainer |
+| Console acceptance | human | The [procedure and fixtures](console-acceptance.md) exist and record no result | maintainer |
+| Install acceptance | human | Steps 1, 2, 3, 5 part A and 6 passed for a packaged executable at `ff20d07`; steps 4 and 5 part B need `yoke trust` in a human terminal ([details](#install-acceptance)) | maintainer |
+| Update acceptance | pending | No release is published: `gh release list` printed nothing on 2026-10-16; the replacement path needs a second release to update from ([details](#update-acceptance)) | maintainer |
+
 ## Supported targets
 
-The evidence on this page is for commit `ff20d07` on `main`, whose CI run [38690301997](https://github.com/mrx-arafat/yoke/actions/runs/38690301997) passed on 2026-10-15.
+The packaging dry run and the install acceptance below were run at commit `ff20d07` on `main`, whose CI run [38690301997](https://github.com/mrx-arafat/yoke/actions/runs/38690301997) passed on 2026-10-15.
+The release review repeats the checks for the release commit.
 
 | Target | Release workflow runner | Status for `ff20d07` on 2026-10-15 |
 | --- | --- | --- |
@@ -81,6 +109,56 @@ Never edit a generated notice file by hand.
 On 2026-10-15, `cargo deny check licenses sources` with cargo-deny 0.20.2, installed as [COMPLIANCE.md](../COMPLIANCE.md) describes, reported `licenses ok, sources ok` from the `ff20d07` worktree used for the packaging dry run.
 Its only warnings named three allowed licenses that no current dependency uses: `BSD-3-Clause`, `ISC` and `Zlib`.
 
+## Compliance evidence
+
+Collected on 2026-10-16 at commit `e2745ce`.
+Every check only reads, and nothing was published.
+Ticking [COMPLIANCE.md](../COMPLIANCE.md) stays a human act, and this is the evidence the person ticking can rely on.
+
+### crates.io names
+
+| Name | crates.io API | Result |
+| --- | --- | --- |
+| `yoke-cli` | HTTP 404 | Free |
+| `yoke-core` | HTTP 404 | Free |
+| `yoke` | HTTP 200 | Taken by an unrelated crate, version 0.8.3 from `unicode-org/icu4x`, as COMPLIANCE.md says |
+
+`cargo search yoke-cli` and `cargo search yoke-core` print no result.
+A name can be taken at any time, so repeat the check immediately before the first publish.
+
+### Other products' names
+
+This search runs over the tracked files with the names of other agent tools and editors, written with one letter in brackets so that this page does not match itself:
+
+```sh
+git grep -n -i -I -E 'p[i]lot|w[i]ndsurf|c[u]rsor|a[i]der|c[l]ine|o[p]encode|r[o]o ?code|k[i]ro|g[e]mini|a[n]tigravity|m[o]mentic' -- . ':!Cargo.lock' ':!docs/assets'
+```
+
+At `e2745ce` it matches 32 lines in 10 files.
+Three lines are in COMPLIANCE.md, which names another product on purpose in its clean-room rules.
+The other 29 are ordinary words that merely contain one of the names, in stylesheets, pagination and error text.
+No tracked path contains another product's name.
+Commit `689821a` replaced the one test fixture that used another product's name as a rejected key with a neutral placeholder, so the search no longer finds a product name outside COMPLIANCE.md.
+
+### Packaging
+
+`[workspace.package]` in `Cargo.toml` carries `repository`, `homepage`, `readme`, `keywords`, `categories` and `rust-version = "1.95"`, and both crates inherit them.
+Each crate directory holds `LICENSE-MIT` and `LICENSE-APACHE` as symlinks to the files at the repository root, and the root `README.md` is the packaged readme.
+The following ran from `git archive` output of `e2745ce` into a scratch target directory:
+
+```sh
+cargo package -p yoke-core --no-verify
+cargo package -p yoke-cli --no-verify
+cargo package -p yoke-core --no-verify --list
+cargo package -p yoke-cli --no-verify --list
+```
+
+- `yoke-core` printed `Packaged 72 files, 707.6KiB (178.1KiB compressed)` with no metadata warning, and its listing includes `LICENSE-APACHE`, `LICENSE-MIT` and `README.md`.
+- The `yoke-cli` listing has 94 files and includes the same three.
+- Packaging `yoke-cli` fails with `no matching package named yoke-core found`, searched in the crates.io index, because `yoke-cli` depends on `yoke-core` by path and version and `yoke-core` is not published.
+  That is the order of publication, not a defect, so the first publish of `yoke-core` is also the first full check of `yoke-cli`.
+- At `808aca8`, before the change, the same command failed with `all dependencies must have a version requirement specified when packaging`, and neither listing contained a license or readme file.
+
 ## Checklist for each release
 
 Record the date, the tag, the workflow run URL and the person who checked each item.
@@ -138,7 +216,11 @@ These fixtures do not establish native execution on another platform, hosted upd
 `yoke update` reads GitHub's latest-release endpoint, which never returns drafts.
 On 2026-10-15 the repository still had no published release: `/releases/latest` returned HTTP 404.
 `yoke update --check` from the `ff20d07` dry-run executable in a temporary home exited 1 with `release check failed (exit status: 56); check connectivity and release availability`, where 56 is the status curl 8.7.1 on the host returns for that 404 over HTTP/2, so update acceptance is not yet possible.
-After the first publication:
+On 2026-10-16 `gh release list` still printed nothing.
+
+The first release cannot complete update acceptance, because replacing an executable needs an older release to update from.
+After the first publication, [Releasing](releasing.md#step-8-check-the-published-release) checks that `yoke update --check` prints `latest_version: v0.1.0` and that `yoke update` prints `update: already current (0.1.0)`.
+After the second publication, update acceptance is:
 
 1. Install the previous release in a temporary home and run `yoke update --check`; it names the new version.
 2. Run `yoke update`; it downloads the executable and its `.sha256`, refuses a mismatch, and replaces the executable atomically.

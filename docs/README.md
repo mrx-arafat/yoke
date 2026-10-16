@@ -13,12 +13,15 @@ It runs as a command rather than a background daemon; the optional console runs 
 | [CLI reference](cli.md) | Find commands, arguments, and machine-readable output |
 | [Workflows](workflows.md) | Use plans, independent review, memory, presets, and the console |
 | [Troubleshooting](troubleshooting.md) | Diagnose inactive gates, failed checks, and storage problems |
-| [Release acceptance](release-acceptance.md) | Check builds, checksums, notices, install and update before publishing |
+| [Uninstalling](uninstalling.md) | Remove the hooks, the executable, and Yoke's files in the right order |
+| [Releasing](releasing.md) | Take a release candidate to a published release, and withdraw a bad one |
+| [Release acceptance](release-acceptance.md) | See the gate status and the evidence for builds, checksums, notices, install and update |
 | [Development handoff](next-steps.md) | Resume from the hardening checkpoint and complete outstanding acceptance |
 | [Upgrade notes](upgrade-notes.md) | See every behaviour change and upgrade step before replacing a binary |
 | [Trials](trials.md) | Collect and record the observe-day and enforce-week trial evidence |
 | [Console acceptance](console-acceptance.md) | Generate disposable fixtures and run the human console acceptance pass with an evidence template |
 | [Contributing](../CONTRIBUTING.md) | Navigate the code and validate a focused change |
+| [Security policy](../SECURITY.md) | Report a vulnerability privately and see which versions receive fixes |
 
 ## Mental model
 

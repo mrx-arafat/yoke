@@ -103,7 +103,7 @@ In observe mode Yoke prints nothing and records a `would_deny` decision.
 After a period of normal work, review `yoke log --outcome would_deny`, set top-level `mode = "enforce"` in `yoke.toml`, and run `yoke trust` again.
 The same simulated event then returns a denial, as shown in [Gates](#gates-observe-then-enforce).
 
-[Getting started](docs/getting-started.md) walks through every step, including uninstalling.
+[Getting started](docs/getting-started.md) walks through every step, and [uninstalling](docs/uninstalling.md) reverses the installer.
 
 ## How it works
 
@@ -300,10 +300,11 @@ In enforce mode, session start injects pinned notes, trusted shared knowledge an
 
 ## Status
 
-The workspace version is 0.1.0 and no binary release has been published, so `yoke update` has nothing to install yet.
-Release acceptance is not complete: each agent still needs a full working day in observe mode and a working week in enforce mode on real work, and the three non-native release builds have not run.
-So far only a partial Codex observe-mode day has been recorded.
-The [release acceptance checklist](docs/release-acceptance.md) and [trials](docs/trials.md) record what has and has not been verified, and the [execution record](docs/specs/2026-10-13-core-execution.md) covers the development milestones.
+Yoke 0.1.0 is a pre-release: no release is published, so `yoke update` has nothing to install, and the one-line install builds `main` from source until the first release exists.
+CI passes on Ubuntu and macOS, the installer passes on nine fresh Linux images, and the release package for the build host passed a local dry run.
+Still open: the release workflow has never run, so the three other builds are unverified, and the compliance ticks, the trademark search, console acceptance and update acceptance are not done.
+The real-work trials are also open: only a partial Codex observe-mode day has been recorded, and neither agent has had its enforce-mode week.
+The [gate status table](docs/release-acceptance.md#gate-status) lists every gate with its evidence, the [releasing runbook](docs/releasing.md) is the path to a published release, and [trials](docs/trials.md) records the real-work evidence.
 Read the [upgrade notes](docs/upgrade-notes.md) before replacing an existing Yoke binary, because the first new binary to open the state database migrates it.
 
 ## Documentation

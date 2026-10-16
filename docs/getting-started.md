@@ -166,4 +166,5 @@ yoke uninstall --agent claude,codex
 ```
 
 Uninstall removes Yoke-owned integration entries rather than erasing project policy or memory.
+For the full sequence, including the executable, the PATH line and `~/.yoke`, see [uninstalling](uninstalling.md).
 Continue with the [configuration reference](configuration.md) to define your own gates.
