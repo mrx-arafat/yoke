@@ -7,6 +7,12 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Local, trusted quality gates for Claude Code and Codex."
+repository = "https://github.com/mrx-arafat/yoke"
+homepage = "https://github.com/mrx-arafat/yoke"
+readme = "README.md"
+keywords = ["claude-code", "codex", "ai-agent", "quality-gate", "hooks"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.95"
 
 [workspace.dependencies]
 serde = { version = "1.0.210", features = ["derive"] }

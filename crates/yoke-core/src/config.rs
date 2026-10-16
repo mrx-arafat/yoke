@@ -570,7 +570,7 @@ mod tests {
             "[review.models]\nclaude='--dangerously-skip-permissions'",
             "[review.models]\ncodex=''",
             "[review.models]\nclaude='opus; rm -rf /'",
-            "[review.models]\ngemini='pro'",
+            "[review.models]\nunknown_agent='pro'",
             "[memory.digest_models]\nclaude='has space'",
         ] {
             assert!(Config::parse(bad).is_err(), "accepted {bad}");
