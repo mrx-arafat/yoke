@@ -4,7 +4,7 @@
 # guard: abort unless HOME is a non-empty, existing directory that differs from the invoking user's home.
 guard() {
   test -n "${HOME:-}" && test "$HOME" != "${REAL_HOME:?REAL_HOME must be set before guard}" \
-    && test "$HOME" != "/Users/easinarafat" && test -d "$HOME" || {
+    && test -d "$HOME" || {
     printf 'refusing to run: HOME=%s is empty, missing, or the real home\n' "${HOME:-}" >&2
     exit 1
   }

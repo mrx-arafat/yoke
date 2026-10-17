@@ -651,7 +651,7 @@ main() {
     # Migrating the database while hooks still run an older executable would make those hooks
     # fail closed, so migrate only once the hooks run this one.
     if [ "$connected" = 1 ]; then
-        if ! output=$("$bin" log --limit 1 2>&1); then
+        if ! output=$("$bin" log --all --limit 1 2>&1); then
             printf '%s\n' "$output" >&2
             die "yoke could not create or migrate its state database"
         fi

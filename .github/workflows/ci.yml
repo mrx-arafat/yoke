@@ -59,7 +59,12 @@ jobs:
       - name: Run the full test suite
         # Tests marked #[ignore] (the synthetic soak trial and the real-reviewer
         # checks) are skipped by default and only run with an explicit --ignored.
-        run: cargo test --workspace --locked
+        run: |
+          sh scripts/test-isolated-home-selftest.sh
+          sh scripts/test-isolated-home.sh cargo test --workspace --locked
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Bounded hook performance regression
+        run: uv run --no-project python scripts/benchmark_hooks.py --ci
 
   deny:
     runs-on: ubuntu-24.04

@@ -437,6 +437,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = log.read_text().splitlines()
         self.assertIn("install --agent claude", calls)
+        self.assertIn("log --all --limit 1", calls)
         self.assertEqual([c for c in calls if c.startswith(("trust", "preset"))], [])
         self.assertIn("yoke trust --global", result.stdout)
 
