@@ -3,6 +3,8 @@
 The release workflow builds all four supported targets on native GitHub runners for every tag.
 Each target produces `yoke-<target>`, `yoke-<target>.sha256`, a redistribution archive `yoke-<target>.tar.gz`, and `THIRD_PARTY_LICENSES-<target>`.
 The archive and notice asset each also have a `.sha256` file.
+The archive is reproducible: entries carry no owner, group or file time, and the gzip header carries no time or name, so equal inputs give equal bytes.
+The draft release also holds `SHA256SUMS`, one list of every asset's checksum, and every asset has signed build provenance made by the `draft` job; see [docs/verifying-releases.md](../../docs/verifying-releases.md).
 The checksum format is one lowercase SHA-256 digest, two spaces, and the exact asset basename.
 Packaging rejects empty binaries and binaries larger than 64 MiB before creating the output directory, matching the updater's accepted executable size.
 
@@ -14,12 +16,14 @@ The archive and companion notice asset provide the human-readable copy.
 Notices are generated from Cargo's resolved graph for the target, including build dependencies and any extra packages resolved by Cargo.
 The generator reproduces license files and nested NOTICE files from the downloaded crate sources, and refuses a dependency with no license text.
 It never edits generated artifacts by hand.
-`cargo deny check licenses sources` must pass before any package is built.
+The full `cargo deny check` (advisories, bans, licenses, sources) must pass in the `lint` job before any package is built, and a tag builds only a commit that is in `main` and passed `ci.yml` there.
+The toolchain is pinned in `release.yml` (`RUST_TOOLCHAIN`); raise it deliberately.
+`install.sh` pins a commit (`PINNED_COMMIT`) for source builds before a release exists; the preflight checks it is part of `HEAD`'s history, so update it with the release commit if it has gone stale.
 
 The workflow creates a draft release only after all four targets succeed.
 Tag/version agreement is checked before release compilation.
 Human review of the compliance checklist is required before publication.
-Only stable tags of the form `vMAJOR.MINOR.PATCH` or `MAJOR.MINOR.PATCH` are accepted by the updater.
+The workflow starts only on `vMAJOR.MINOR.PATCH` tags; the updater itself accepts `vMAJOR.MINOR.PATCH` or `MAJOR.MINOR.PATCH`.
 GitHub's latest-release endpoint does not expose drafts.
 Manual workflow runs create Actions artifacts without creating a release.
 

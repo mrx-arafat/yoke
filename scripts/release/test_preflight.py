@@ -10,6 +10,7 @@ from preflight import (
     Cmd,
     check_ci,
     check_clean_tree,
+    check_pinned_commit,
     check_tag,
 )
 
@@ -17,10 +18,38 @@ from preflight import (
 class PreflightTests(unittest.TestCase):
     def test_tag_must_be_stable_and_match_the_cli_version(self) -> None:
         self.assertEqual(check_tag("v0.1.0", "0.1.0").status, PASS)
-        self.assertEqual(check_tag("0.1.0", "0.1.0").status, PASS)
-        for tag in ("v0.2.0", "v0.1.0-rc1", "v0.1"):
+        # release.yml fires only on v-prefixed tags, so a bare version would never publish.
+        for tag in ("0.1.0", "v0.2.0", "v0.1.0-rc1", "v0.1"):
             with self.subTest(tag=tag):
                 self.assertEqual(check_tag(tag, "0.1.0").status, FAIL)
+
+    def test_install_script_pin_must_be_a_commit_in_this_history(self) -> None:
+        pinned = "ab" * 20
+        script = f"#!/bin/sh\nPINNED_COMMIT={pinned}\n"
+        calls: list[list[str]] = []
+
+        def ancestor(code: int):
+            def run(args):
+                calls.append(list(args))
+                return Cmd(code, "", "fatal: bad object")
+
+            return run
+
+        self.assertEqual(
+            check_pinned_commit(ancestor(0), script, "c" * 40).status, PASS
+        )
+        self.assertEqual(
+            calls, [["git", "merge-base", "--is-ancestor", pinned, "c" * 40]]
+        )
+        self.assertEqual(
+            check_pinned_commit(ancestor(1), script, "c" * 40).status, FAIL
+        )
+        self.assertEqual(
+            check_pinned_commit(ancestor(128), script, "c" * 40).status, FAIL
+        )
+        self.assertEqual(
+            check_pinned_commit(ancestor(0), "no pin here\n", "c" * 40).status, FAIL
+        )
 
     def test_dirty_tree_fails_but_tooling_directories_are_ignored(self) -> None:
         def porcelain(output: str):

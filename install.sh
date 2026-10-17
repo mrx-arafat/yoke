@@ -5,7 +5,9 @@
 #
 # Downloads the release executable for this platform and verifies its SHA-256
 # checksum, or builds from source with Cargo when no release asset exists,
-# installing a C compiler and Rust first when they are missing. Then connects
+# installing a C compiler and Rust first when they are missing. A source build
+# uses the newest release tag, or a pinned commit before any release exists, and
+# never a moving branch. Then connects
 # the agent hooks, creates or migrates the state database, adds Yoke's line to
 # Claude Code's status bar when you have none, offers a starter global policy for
 # you to trust, and checks health. It uses sudo only to install a C compiler,
@@ -16,8 +18,11 @@
 #   YOKE_INSTALL_DIR      absolute install directory
 #                         (default: /usr/local/bin for root, else $HOME/.local/bin)
 #   YOKE_VERSION          release tag to install, for example v0.1.0 (default: latest)
-#   YOKE_DOWNLOAD_URL     base URL serving yoke-<target> and yoke-<target>.sha256
+#   YOKE_DOWNLOAD_URL     https:// base URL serving yoke-<target> and yoke-<target>.sha256
+#                         (plain http only for localhost, 127.0.0.1 or [::1])
 #   YOKE_FROM_SOURCE=1    build from source with Cargo instead of downloading
+#   YOKE_COMMIT           full 40-character commit to build from source, for example
+#                         to test one commit; cannot be combined with YOKE_VERSION
 #   YOKE_YES=1            answer yes to every question, also without a terminal;
 #                         trusting a policy still needs you to type the phrase
 #   YOKE_INSTALL_RUST=1   install Rust with rustup without asking when Cargo is missing
@@ -25,6 +30,13 @@
 #   YOKE_NO_STATUSLINE=1  never touch Claude Code's statusLine setting
 #   YOKE_AGENTS           agents to connect, for example claude,codex, or none
 #                         (default: each of claude and codex that is found)
+
+# The commit a source build uses before any release exists. A release tag replaces it as soon
+# as one is published; scripts/release/preflight.py checks that it is part of main's history.
+PINNED_COMMIT=dea9c381002be73a82b586ac1a7b2312c064ba3d
+
+# Protocols fetch() may use. download_release widens it for a mirror on this machine only.
+fetch_proto='=https'
 
 say() { printf 'yoke-install: %s\n' "$*"; }
 err() { printf 'yoke-install: error: %s\n' "$*" >&2; }
@@ -99,10 +111,30 @@ detect_target() {
     esac
 }
 
+# True when $1 is plain http to this machine: localhost, 127.0.0.1 or [::1], with an optional
+# numeric port. A name like 127.0.0.1.example.com or userinfo like 127.0.0.1:80@example.com
+# is not this machine.
+loopback_http() {
+    case $1 in http://*) ;; *) return 1 ;; esac
+    rest=${1#http://}
+    authority=${rest%%/*}
+    case $authority in
+        127.0.0.1 | localhost | '[::1]') return 0 ;;
+        127.0.0.1:* | localhost:* | '[::1]':*)
+            port=${authority##*:}
+            case $port in '' | *[!0-9]*) return 1 ;; esac
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 # Download $1 to $2. Returns 0 on success, 2 when the server answers 404, 1 otherwise.
+# Transfers are limited to TLS 1.2 or newer, 10 minutes and the largest executable the updater
+# accepts (64 MiB).
 fetch() {
     if command -v curl >/dev/null 2>&1; then
-        code=$(curl -sSL --proto-redir '=https' --retry 3 -o "$2" -w '%{http_code}' "$1") || return 1
+        code=$(curl -sSL --proto "$fetch_proto" --proto-redir '=https' --tlsv1.2 --retry 3 --max-time 600 --max-filesize 67108864 -o "$2" -w '%{http_code}' "$1") || return 1
         case $code in
             200) return 0 ;;
             404) return 2 ;;
@@ -112,7 +144,13 @@ fetch() {
                 ;;
         esac
     elif command -v wget >/dev/null 2>&1; then
-        if wget -q -S -O "$2" "$1" 2>"$tmp/wget.log"; then return 0; fi
+        url=$1
+        set -- -q -S -O "$2"
+        # Older wget has no --https-only; the URL itself is already checked to be https.
+        if [ "$fetch_proto" = '=https' ] && wget --help 2>&1 | grep -q -e '--https-only'; then
+            set -- "$@" --https-only
+        fi
+        if wget "$@" "$url" 2>"$tmp/wget.log"; then return 0; fi
         case $(cat "$tmp/wget.log") in
             *"HTTP/"*" 404"*) return 2 ;;
         esac
@@ -157,6 +195,13 @@ download_release() {
     name=yoke-$target
     if [ -n "${YOKE_DOWNLOAD_URL:-}" ]; then
         base=${YOKE_DOWNLOAD_URL%/}
+        case $base in
+            https://*) ;;
+            *)
+                loopback_http "$base" || die "YOKE_DOWNLOAD_URL must be an https:// URL (plain http is accepted only for localhost, 127.0.0.1 and [::1]): $base"
+                fetch_proto='=http,https'
+                ;;
+        esac
     elif [ -n "${YOKE_VERSION:-}" ]; then
         base=https://github.com/mrx-arafat/yoke/releases/download/$YOKE_VERSION
     else
@@ -264,12 +309,46 @@ ensure_cargo() {
     command -v cargo >/dev/null 2>&1 || die "cargo is still not on PATH after installing Rust"
 }
 
-# Sets $candidate to an executable built by cargo install into a temporary root.
+# Prints the tag of the newest stable release, nothing when none is published yet (GitHub
+# answers 404), and fails when the lookup fails or answers something that is not a version.
+latest_release_tag() {
+    status=0
+    fetch https://api.github.com/repos/mrx-arafat/yoke/releases/latest "$tmp/latest.json" || status=$?
+    case $status in
+        0) ;;
+        2) return 0 ;;
+        *) return 1 ;;
+    esac
+    tag=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp/latest.json" | head -n 1)
+    if ! printf '%s\n' "$tag" | grep -Eq '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+        err "GitHub answered something that is not a release version: $tag"
+        return 1
+    fi
+    printf '%s\n' "$tag"
+}
+
+# Sets $candidate to an executable built by cargo install into a temporary root. The source is
+# always one exact revision: YOKE_COMMIT, YOKE_VERSION, the newest release tag, or before any
+# release exists the pinned commit. Never a branch, which moves.
 build_from_source() {
+    if [ -n "${YOKE_COMMIT:-}" ]; then
+        set -- --rev "$YOKE_COMMIT"
+        say "building the commit you asked for: $YOKE_COMMIT"
+    elif [ -n "${YOKE_VERSION:-}" ]; then
+        set -- --tag "$YOKE_VERSION"
+    else
+        latest=$(latest_release_tag) || die "could not look up the newest Yoke release, so nothing was built; rerun with YOKE_VERSION=<release tag> or YOKE_COMMIT=<40-character commit>"
+        if [ -n "$latest" ]; then
+            set -- --tag "$latest"
+            say "building the newest release, $latest"
+        else
+            set -- --rev "$PINNED_COMMIT"
+            say "no release is published yet, so building the pinned commit $PINNED_COMMIT; set YOKE_COMMIT to build another"
+        fi
+    fi
     ensure_cc
     ensure_cargo
-    set -- --locked --git https://github.com/mrx-arafat/yoke --root "$tmp/root"
-    if [ -n "${YOKE_VERSION:-}" ]; then set -- "$@" --tag "$YOKE_VERSION"; fi
+    set -- --locked --git https://github.com/mrx-arafat/yoke --root "$tmp/root" "$@"
     say "building Yoke from source with: cargo install $* yoke-cli"
     say "this takes a few minutes"
     # The temporary root on PATH keeps Cargo from suggesting it be added there.
@@ -489,6 +568,13 @@ main() {
     case ${YOKE_VERSION:-} in
         *[!A-Za-z0-9._-]* | [!A-Za-z0-9]*) die "invalid YOKE_VERSION: $YOKE_VERSION" ;;
     esac
+    if [ -n "${YOKE_COMMIT:-}" ]; then
+        case $YOKE_COMMIT in
+            *[!0-9a-f]*) die "invalid YOKE_COMMIT: it must be a full 40-character lowercase commit hash" ;;
+        esac
+        if [ "${#YOKE_COMMIT}" -ne 40 ]; then die "invalid YOKE_COMMIT: it must be a full 40-character lowercase commit hash"; fi
+        if [ -n "${YOKE_VERSION:-}" ]; then die "set only one of YOKE_VERSION and YOKE_COMMIT"; fi
+    fi
     detect_target
     if [ "$(id -u)" = 0 ]; then
         dir=${YOKE_INSTALL_DIR:-/usr/local/bin}
@@ -496,12 +582,21 @@ main() {
         dir=${YOKE_INSTALL_DIR:-$HOME/.local/bin}
     fi
     case $dir in /*) ;; *) die "YOKE_INSTALL_DIR must be an absolute path: $dir" ;; esac
+    # The directory is written inside double quotes into your shell startup file.
+    nl='
+'
+    case $dir in
+        *'"'* | *'$'* | *'`'* | *"\\"* | *"$nl"*)
+            die "the install directory must not contain a double quote, dollar sign, backtick, backslash or newline; set YOKE_INSTALL_DIR to another absolute path: $dir"
+            ;;
+    esac
     bin=$dir/yoke
     mkdir -p "$dir" || die "cannot create $dir"
     tmp=$(mktemp -d) || die "cannot create a temporary directory"
     say "installing Yoke for $target into $dir"
 
     from_source=${YOKE_FROM_SOURCE:-}
+    if [ -n "${YOKE_COMMIT:-}" ]; then from_source=1; fi
     case $target in
         *-musl)
             say "this system uses musl libc and release executables need glibc, so Yoke is built from source"

@@ -1,8 +1,10 @@
 """Focused local packaging tests, without builds, network access or publication."""
 
 import hashlib
+import os
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -63,6 +65,48 @@ class ReleasePackagingTests(unittest.TestCase):
                         b"Fixture dependency NOTICE",
                     )
                     self.assertEqual(archive.getmember("yoke").mode, 0o755)
+
+    def test_archive_does_not_depend_on_who_built_it_or_when(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "binary"
+            binary.write_bytes(b"#!/bin/sh\nprintf fixture")
+            for name in ("LICENSE-MIT", "LICENSE-APACHE"):
+                (root / name).write_text(name)
+            package_release(root, binary, root / "first", TARGETS[0], "Notices")
+            # A later build has newer file times, and the owner may differ.
+            later = time.time() + 3600
+            for path in (binary, root / "LICENSE-MIT", root / "LICENSE-APACHE"):
+                os.utime(path, (later, later))
+            package_release(root, binary, root / "second", TARGETS[0], "Notices")
+
+            name = f"yoke-{TARGETS[0]}.tar.gz"
+            self.assertEqual(
+                (root / "first" / name).read_bytes(),
+                (root / "second" / name).read_bytes(),
+            )
+            with tarfile.open(root / "first" / name) as archive:
+                for member in archive.getmembers():
+                    self.assertEqual(
+                        (
+                            member.uid,
+                            member.gid,
+                            member.uname,
+                            member.gname,
+                            member.mtime,
+                        ),
+                        (0, 0, "", "", 0),
+                        member.name,
+                    )
+                self.assertEqual(
+                    {m.name: m.mode for m in archive.getmembers()},
+                    {
+                        "yoke": 0o755,
+                        "THIRD_PARTY_LICENSES": 0o644,
+                        "LICENSE-MIT": 0o644,
+                        "LICENSE-APACHE": 0o644,
+                    },
+                )
 
     def test_graph_notices_include_nested_notice_and_fail_without_license(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

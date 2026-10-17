@@ -2,14 +2,67 @@ name: Release packages
 
 on:
   push:
-    tags: ['*']
+    # Stable vMAJOR.MINOR.PATCH tags only; package.py also checks the tag against the crate version.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  # Releases are built with one exact toolchain, so a rebuild of a tag uses the same compiler.
+  # Raise it deliberately, together with rust-version in Cargo.toml if that needs to move.
+  RUST_TOOLCHAIN: '1.95.0'
+
 jobs:
+  gate:
+    # A tag builds only a commit that is already in main's history and passed CI there, so a tag
+    # pushed on a side branch cannot become a signed release. Manual runs only package.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Tagged commit is in main and passed CI
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          status=$(gh api "repos/$GH_REPO/compare/main...$GITHUB_SHA" --jq .status)
+          case "$status" in
+            identical | behind) ;;
+            *)
+              echo "::error::$GITHUB_SHA is not in main's history (compare status: $status)"
+              exit 1
+              ;;
+          esac
+          passed=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --branch main --event push --status success --json databaseId --jq length)
+          if [ "$passed" -lt 1 ]; then
+            echo "::error::CI has no successful run for $GITHUB_SHA on main"
+            exit 1
+          fi
+
+  lint:
+    # The full dependency check runs here, away from the jobs that build and sign the binaries:
+    # installing cargo-deny builds hundreds of crates, and none of that belongs in a packaging job.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain and cargo-deny
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          cargo install cargo-deny --locked --version 0.20.2
+      - name: Check advisories, bans, licenses, and sources
+        run: cargo deny check
+
   package:
+    needs: [gate, lint]
     strategy:
       fail-fast: false
       matrix:
@@ -29,14 +82,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - name: Install stable Rust and license checker
+      - name: Install the pinned Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
           rustup target add '${{ matrix.target }}'
-          cargo install cargo-deny --locked
-      - name: Check licenses and sources
-        run: cargo deny check licenses sources
       - name: Focused updater and packaging checks
         run: |
           cargo test --locked -p yoke-cli update:: --quiet
@@ -71,15 +121,30 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: package
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    # The only job that signs or publishes. In Settings > Environments, give "release" required
+    # reviewers so that nothing is attested or drafted without a person approving it.
+    environment: release
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: yoke-*
           path: dist
           merge-multiple: true
+      - name: List the checksum of every asset in SHA256SUMS
+        working-directory: dist
+        run: |
+          LC_ALL=C sha256sum -- * > ../SHA256SUMS
+          mv ../SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
+      - name: Attest build provenance for every asset
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
       - name: Prepare draft for human release review
         env:
           GH_TOKEN: ${{ github.token }}
@@ -88,4 +153,4 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" dist/* --verify-tag --draft \
             --title "Yoke $RELEASE_TAG" \
-            --notes 'Download the archive for your platform to receive the executable and readable license notices. Raw updater executables also embed those notices. Review COMPLIANCE.md before publishing this draft.'
+            --notes 'Download the archive for your platform to receive the executable and readable license notices. Raw updater executables also embed those notices. Every asset has build provenance: verify it with gh attestation verify, as docs/verifying-releases.md describes. SHA256SUMS lists every asset checksum and detects corruption, not tampering. Review COMPLIANCE.md before publishing this draft.'

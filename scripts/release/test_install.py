@@ -5,6 +5,8 @@ import http.server
 import json
 import os
 import platform
+import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -105,6 +107,36 @@ install)
 health) echo '  "/h/.yoke/config.toml",true,false' ;;
 esac
 """
+# Stands in for GitHub's API and records every other request, then lets real curl run it.
+CURL_SHIM = """#!/bin/sh
+for last; do :; done
+case $last in
+https://api.github.com/*)
+    echo "api $last" >> "$YOKE_TEST_CURL_LOG"
+    prev=
+    for argument in "$@"; do
+        if [ "$prev" = -o ]; then out=$argument; fi
+        prev=$argument
+    done
+    printf '%s' "$YOKE_TEST_API_BODY" > "$out"
+    printf '%s' "$YOKE_TEST_API_CODE"
+    exit 0 ;;
+esac
+echo "$*" >> "$YOKE_TEST_CURL_LOG"
+exec "$YOKE_TEST_REAL_CURL" "$@"
+"""
+# Records its arguments and builds a fake executable into the --root it was given.
+CARGO_SHIM = """#!/bin/sh
+echo "$*" >> "$YOKE_TEST_CARGO_LOG"
+while [ $# -gt 0 ]; do
+    if [ "$1" = --root ]; then root=$2; fi
+    shift
+done
+mkdir -p "$root/bin"
+printf '#!/bin/sh\\necho 9.9.9\\n' > "$root/bin/yoke"
+chmod 755 "$root/bin/yoke"
+"""
+RELEASE_JSON = json.dumps({"tag_name": "v1.2.3", "draft": False, "prerelease": False})
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -157,6 +189,121 @@ class InstallScriptTests(unittest.TestCase):
             timeout=60,
             start_new_session=True,
         )
+
+    def shimmed(self, api_code: str = "404", api_body: str = "") -> dict[str, str]:
+        """An environment whose curl answers GitHub's API from the test and whose cargo builds
+        a fake executable, so the source build's choice of revision can be read from its log."""
+        shims = self.home / "shims"
+        shims.mkdir(exist_ok=True)
+        for name, body in (
+            ("curl", CURL_SHIM),
+            ("cargo", CARGO_SHIM),
+            ("cc", "#!/bin/sh\n"),
+        ):
+            (shims / name).write_text(body)
+            (shims / name).chmod(0o755)
+        return {
+            "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
+            "YOKE_TEST_REAL_CURL": shutil.which("curl") or "curl",
+            "YOKE_TEST_CURL_LOG": str(self.home / "curl.log"),
+            "YOKE_TEST_CARGO_LOG": str(self.home / "cargo.log"),
+            "YOKE_TEST_API_CODE": api_code,
+            "YOKE_TEST_API_BODY": api_body,
+        }
+
+    def cargo_calls(self) -> list[str]:
+        log = self.home / "cargo.log"
+        return log.read_text().splitlines() if log.exists() else []
+
+    def test_source_build_uses_the_newest_release_tag_or_a_pinned_commit_never_a_branch(
+        self,
+    ) -> None:
+        pinned = re.search(
+            r"^PINNED_COMMIT=([0-9a-f]{40})$", (ROOT / "install.sh").read_text(), re.M
+        )
+        self.assertIsNotNone(
+            pinned, "install.sh must pin a commit for use before any release"
+        )
+        commit = "a" * 40
+        cases = [
+            ("newest release", ("200", RELEASE_JSON), {}, "--tag v1.2.3", True),
+            ("no release yet", ("404", ""), {}, f"--rev {pinned.group(1)}", True),
+            (
+                "explicit version",
+                ("500", ""),
+                {"YOKE_VERSION": "v9.9.9"},
+                "--tag v9.9.9",
+                True,
+            ),
+            (
+                "explicit commit",
+                ("500", ""),
+                {"YOKE_COMMIT": commit},
+                f"--rev {commit}",
+                True,
+            ),
+            ("lookup failed", ("500", ""), {}, "", False),
+            ("garbage tag", ("200", '{"tag_name": "main"}'), {}, "", False),
+        ]
+        for label, api, extra, expected, builds in cases:
+            with self.subTest(label):
+                (self.home / "cargo.log").unlink(missing_ok=True)
+                (self.mirror / self.name).unlink(missing_ok=True)
+                result = self.install(
+                    hashlib.sha256(FAKE_YOKE).hexdigest(), **self.shimmed(*api), **extra
+                )
+                calls = self.cargo_calls()
+                if builds:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(len(calls), 1, calls)
+                    self.assertIn(expected, calls[0])
+                    self.assertNotIn("--branch", calls[0])
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(calls, [])
+                    self.assertIn("YOKE_VERSION", result.stderr)
+
+    def test_downloads_use_tls_1_2_and_size_and_time_limits(self) -> None:
+        result = self.install(
+            hashlib.sha256(FAKE_YOKE).hexdigest(), **self.shimmed("404")
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        downloads = [
+            line
+            for line in (self.home / "curl.log").read_text().splitlines()
+            if self.name in line
+        ]
+        self.assertEqual(len(downloads), 2, downloads)
+        for line in downloads:
+            for flag in ("--tlsv1.2", "--max-time", "--max-filesize", "--proto"):
+                self.assertIn(flag, line)
+
+    def test_refuses_a_plain_http_mirror_unless_it_is_loopback(self) -> None:
+        for url in (
+            "http://mirror.example.invalid/yoke",
+            "http://127.0.0.1.example.invalid/yoke",
+            "http://127.0.0.1:80@example.invalid/yoke",
+            "ftp://127.0.0.1/yoke",
+        ):
+            with self.subTest(url):
+                result = self.install(
+                    hashlib.sha256(FAKE_YOKE).hexdigest(), YOKE_DOWNLOAD_URL=url
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("YOKE_DOWNLOAD_URL", result.stderr)
+                self.assertFalse((self.bin / "yoke").exists())
+
+    def test_refuses_an_install_directory_that_would_break_the_path_line(self) -> None:
+        for name in ('a"b', "a$HOME", "a`b", "a\\b", "a\nb"):
+            with self.subTest(name):
+                result = self.install(
+                    hashlib.sha256(FAKE_YOKE).hexdigest(),
+                    YOKE_INSTALL_DIR=str(self.home / name),
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("YOKE_INSTALL_DIR", result.stderr)
+                self.assertFalse((self.home / name).exists())
 
     def test_installs_release_with_valid_checksum(self) -> None:
         result = self.install(hashlib.sha256(FAKE_YOKE).hexdigest())
@@ -271,7 +418,13 @@ class InstallScriptTests(unittest.TestCase):
             "YOKE_TEST_STATUSLINE": state,
         }
         driven = subprocess.run(
-            [sys.executable, "-c", TERMINAL_DRIVER, str(ROOT / "install.sh"), answer.decode()],
+            [
+                sys.executable,
+                "-c",
+                TERMINAL_DRIVER,
+                str(ROOT / "install.sh"),
+                answer.decode(),
+            ],
             env=env,
             capture_output=True,
             text=True,
@@ -291,7 +444,9 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("wrap it so Yoke's line comes first? ", output)
         self.assertNotIn("install --agent claude --statusline", calls)
         self.assertIn("keeping your statusline", output)
-        self.assertNotIn("YOKE_YES", output.split("keeping your statusline")[1].split("\n")[0])
+        self.assertNotIn(
+            "YOKE_YES", output.split("keeping your statusline")[1].split("\n")[0]
+        )
 
     def test_a_person_at_a_terminal_can_choose_to_wrap_their_statusline(self) -> None:
         output, calls = self.terminal_install("foreign", b"y")

@@ -1,6 +1,7 @@
 """Generate license notices and package one of Yoke's four release targets."""
 
 import argparse
+import gzip
 import hashlib
 import json
 import re
@@ -17,6 +18,7 @@ TARGETS = (
 )
 LICENSE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE")
 BINARY_LIMIT = 64 * 1024 * 1024
+EXECUTABLE_ARCNAME = "yoke"
 
 
 def generate_notices(metadata: dict) -> str:
@@ -52,6 +54,15 @@ def generate_notices(metadata: dict) -> str:
     return "".join(parts)
 
 
+def normalized(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Drop the builder's owner, group and times so equal inputs give equal archives."""
+    info.uid = info.gid = 0
+    info.uname = info.gname = ""
+    info.mtime = 0
+    info.mode = 0o755 if info.name == EXECUTABLE_ARCNAME else 0o644
+    return info
+
+
 def checksum(path: Path) -> None:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     path.with_name(f"{path.name}.sha256").write_text(
@@ -79,11 +90,16 @@ def package_release(
     licenses = output / f"THIRD_PARTY_LICENSES-{target}"
     licenses.write_text(notices, encoding="utf-8")
     archive = output / f"{name}.tar.gz"
-    with tarfile.open(archive, "w:gz") as bundle:
-        bundle.add(executable, arcname="yoke")
-        bundle.add(licenses, arcname="THIRD_PARTY_LICENSES")
+    # The gzip header would otherwise carry the build time and the output file name.
+    with (
+        archive.open("wb") as raw,
+        gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed,
+        tarfile.open(fileobj=compressed, mode="w") as bundle,
+    ):
+        bundle.add(executable, arcname=EXECUTABLE_ARCNAME, filter=normalized)
+        bundle.add(licenses, arcname="THIRD_PARTY_LICENSES", filter=normalized)
         for filename in ("LICENSE-MIT", "LICENSE-APACHE"):
-            bundle.add(root / filename, arcname=filename)
+            bundle.add(root / filename, arcname=filename, filter=normalized)
     for path in (executable, licenses, archive):
         checksum(path)
 
