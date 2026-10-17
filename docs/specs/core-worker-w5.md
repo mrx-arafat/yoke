@@ -70,11 +70,11 @@ The fixture omits real Git check execution; synthetic screenshot rows are explic
 
 Actual images for review:
 
-- `/Users/easinarafat/AI/yoke/crates/yoke-cli/src/console/artifacts/refined-icon-select-desktop.png`
-- `/Users/easinarafat/AI/yoke/crates/yoke-cli/src/console/artifacts/refined-icon-select-mobile.png`
-- `/Users/easinarafat/AI/yoke/crates/yoke-cli/src/console/artifacts/usage-light-1440.png`
-- `/Users/easinarafat/AI/yoke/crates/yoke-cli/src/console/artifacts/trust-light-390.png`
-- `/Users/easinarafat/AI/yoke/crates/yoke-cli/src/console/artifacts/yoke-icon-16.png` and `yoke-icon-32.png`
+- `crates/yoke-cli/src/console/artifacts/refined-icon-select-desktop.png`
+- `crates/yoke-cli/src/console/artifacts/refined-icon-select-mobile.png`
+- `crates/yoke-cli/src/console/artifacts/usage-light-1440.png`
+- `crates/yoke-cli/src/console/artifacts/trust-light-390.png`
+- `crates/yoke-cli/src/console/artifacts/yoke-icon-16.png` and `yoke-icon-32.png`
 
 Performance: prototype first paint and first contentful paint were 120 ms; shipped JS is 12,080 bytes / 3,745 bytes gzipped before the small Dismiss addition.
 Most route samples were about 32 ms, but Sessions measured a real cold 324.2 ms click-to-frame and 310.2 ms fetch duration over 100,006 decisions.
@@ -194,7 +194,7 @@ for dep in anyhow serde serde_json tempfile toml_edit; do
     files=(target/debug/deps/lib${dep}-*.rlib)
     args+=(--extern "$dep=${files[1]}")
 done
-print '#[path = "/Users/easinarafat/AI/yoke/crates/yoke-cli/src/install.rs"] mod install;' |
+print "#[path = \"$PWD/crates/yoke-cli/src/install.rs\"] mod install;" |
     rustc --edition=2021 --test -D warnings - -L dependency=target/debug/deps "${args[@]}" -o "$testdir/install-tests"
 "$testdir/install-tests" --quiet
 ```

@@ -1,5 +1,37 @@
 # Upgrade notes
 
+### Schema 15 keeps exact usage summaries
+
+- What changed: writable opens upgrade schemas 12 through 14 to 15 in one transaction.
+  The upgrade builds exact session, model and UTC-day summaries, adds time indexes and preserves raw usage samples and existing notification acknowledgements.
+  New partial transcript imports raise a `usage_partial` notification; a complete replacement import resolves it.
+  Existing partial sessions are backfilled in bounded batches when notifications are read.
+- Who is affected: installations with existing state databases.
+  The initial summary build reads existing usage once while holding the write lock; its duration depends on the amount of usage history.
+  Ordinary opens do not rebuild summaries or run statistics maintenance.
+  Read-only commands can still inspect schemas 12 through 14 with their older query paths.
+- What to do: replace all hook binaries together because older writers refuse schema 15.
+  Keep a backup of the database and its sidecars before upgrading if you may need to restore an older binary.
+  There is no downgrade command; raw usage samples are retained for detailed history.
+
+### Preset and shared-knowledge locks recover when a writer exits
+
+- What changed: preset writes record their PID in a persistent advisory lock file.
+  Shared knowledge uses a persistent `knowledge.lock` in the project's `.yoke` directory.
+  These files may remain after success or a crash; an existing file alone no longer means a writer holds the lock.
+- What to do: retry after a live writer finishes instead of deleting its lock file.
+  Existing shared note entries remain recognized, while new entries indent their content to keep marker-shaped note text separate from entry markers.
+
+Memory mutation reports now default to readable text.
+Scripts reading JSON from `yoke remember`, `yoke memory export` or `yoke memory import` must add `--json`; their JSON report fields and epoch timestamps are preserved.
+Plan list and status output now include the bound session; JSON uses `null` when no session is bound.
+Automatic release checks can be disabled with `[update]` and `check = false` in trusted configuration, followed by `yoke trust` in your own terminal (`--global` for global configuration).
+Explicit `yoke update --check` remains available.
+
+Project directory names must be UTF-8 for project plans, memory and accounting.
+If a directory name is not UTF-8, hooks report `project scope unavailable` and continue applying trusted parent and global policy instead of denying every tool call because the path cannot be stored.
+Rename the directory using UTF-8 names and restart the agent there to restore project scope.
+
 These notes cover user-visible changes since the implementation baseline at commit `e8b8ee0`, for anyone replacing a Yoke binary built from it or earlier.
 No release has been published yet, so they apply to development builds; see [release acceptance](release-acceptance.md).
 Each item says what changed, who is affected, and what to do.
@@ -16,6 +48,42 @@ Let active plan checks finish before replacing the binary: this build uses stabl
    A reinstall from another path is refused with `executable changed; uninstall before reinstalling`, followed by both paths and the exact `uninstall` command to run; the install script does this for you.
 
 ## Storage and upgrade
+
+### Hook installation records and process boundaries
+
+- What changed: new ownership receipts keep only Yoke's entries and hashes instead of complete agent settings.
+  Reinstalling upgrades existing receipts; uninstall still accepts older receipts.
+  The five newest private settings backups are retained, can contain credentials, and survive uninstall.
+  Exact byte restoration uses a retained original backup; when it expired, uninstall removes owned entries from the current file.
+  Dry runs omit unrelated settings and hide statusline commands.
+  Install now canonicalizes the executable and requires a regular executable file; install and health warn about shared-writable locations and build directories.
+  Git subprocesses use an absolute executable, disable filesystem monitoring and hooks, and discard inherited `GIT_*` overrides.
+  Agent tool calls cannot invoke `run-hook`, and valid recorded payloads gain OS-derived `_yoke_parent` audit context without a database schema change.
+- Who is affected: existing development installs and scripts relying on Git environment overrides or complete dry-run context.
+- What to do: run `yoke install` from your own terminal to upgrade the receipt, then `yoke health`.
+  Move development executables to a private stable location, uninstall the old hooks and reinstall from that location.
+  Copy recovery backups you need before the next settings changes expire them, and delete backups containing credentials once recovery is no longer needed.
+  Stop other settings writers while installing; if Yoke reports a concurrent save, compare the named recovery file with the settings before retrying.
+  The persistent `install.lock` file names the last holder; an OS lock releases automatically after a crash, so do not delete that file to unblock an installer.
+
+### Memory scope, context limits and moved project directories
+
+- What changed: agent memory commands now require a hook-recorded session anchor whose parent process identity matches the tool's OS ancestry.
+  A directory change no longer changes the memory project, and an unavailable or ambiguous binding refuses the command.
+  Agent exports cannot include all projects, and import previews cannot map records into another project.
+  Pinning and real imports remain human-only.
+  An injected item uses at most one quarter of the character budget, pins together use at most half, and space remains for approved knowledge and unpinned notes.
+  `yoke project move <old> <new> --dry-run` previews a transactional move of stored project attribution after its directory moves.
+  The real command requires a human terminal, and an occupied destination requires an explicit `--merge`.
+  Changed or missing destination trust snapshots drop the source trust batch; merging replaces any destination project trust with the verified source batch.
+- Who is affected: active sessions started with older hooks, oversized pinned notes, and people renaming or relocating a project directory.
+- What to do: update the binary your hooks run and restart agents in the project before using agent memory commands.
+  Run the command in your own terminal if your harness does not expose a unique parent binding.
+  Split oversized notes for useful context; complete text remains available through `yoke recall`.
+  Stop agents before moving a directory, inspect `project move --dry-run`, and use the exact absolute old path recorded by Yoke.
+  If plan slugs collide, choose a destination without those plans or keep the histories separate.
+  Restart sessions at the new location and run `yoke trust` yourself when the move reports `untrusted`.
+  Project paths already redacted in historical records are refused because their old attribution cannot be recovered unambiguously.
 
 ### State files are private and the log keeps less of a tool's output
 
@@ -347,6 +415,22 @@ Let active plan checks finish before replacing the binary: this build uses stabl
   Hooks that arrive during it wait up to their two-second busy timeout.
 - Who is affected: very busy sessions with the console open.
 - What to do: nothing.
+
+### Check gates and Codex rewrites
+
+- What changed: check gate children receive a reduced environment and have core dumps disabled.
+  They keep the documented `YOKE_*` variables, `HOME`, `PATH`, terminal and locale settings, toolchain locations such as `CARGO_HOME`, `RUSTUP_HOME` and `VIRTUAL_ENV`, and certificate paths listed in [Gate environment](configuration.md#gate-environment).
+  CPU, file-size and descriptor limits stay inherited, and the existing wall-clock process-group timeout remains in force.
+  Other inherited variables, including credentials and proxy URLs, are removed unless explicitly passed by name.
+  Large `YOKE_TOOL_INPUT` values are shortened to 32 KiB with `[YOKE TOOL INPUT TRUNCATED]` and `YOKE_TOOL_INPUT_TRUNCATED=1`.
+- Who is affected: existing `yoke.toml` checks that depend on additional inherited variables or complete large JSON inputs, and Codex rewrite gates without narrow matchers.
+- What to do: add any required inherited names to `[gates] pass_env = ["DATABASE_URL"]` or a check gate's `pass_env = ["SERVICE_TOKEN"]`, then review and run `yoke trust` in your own terminal.
+  A failing gate lists withheld names without values and points to `pass_env`.
+  Check `YOKE_TOOL_INPUT_TRUNCATED` before parsing input.
+  For a Codex rewrite gate, add both a nonempty `match_tool` and a nonempty `match_contains`, then review and run `yoke trust` in your own terminal.
+  Otherwise that gate reports `Codex rewrite gate '<name>' requires nonempty match_tool and match_contains; add both matchers to yoke.toml and approve the updated policy with yoke trust` and enforce mode refuses calls for its event; observe mode records the fault and continues without rewriting.
+  Existing Claude rewrite policies keep their behavior.
+  Plan checks may now declare `inputs = ["scripts/check.sh"]` to display and freeze SHA-256 hashes at approval; checks without `inputs` and existing database schemas require no migration for this feature.
 
 ### New pages and commands
 

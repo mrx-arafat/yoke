@@ -6,7 +6,9 @@ Run `yoke --help` or `yoke <command> --help` for installed-version usage.
 Without a command, Yoke displays the current mode, project, and trusted gates.
 `yoke --version` prints the package version.
 Angle-bracket values below are placeholders to replace, not literal arguments.
-A failing command prints `error:` and a `help:` line that names the subcommand that failed, and exits 1.
+An execution failure prints `error:` and a `help:` line that names the subcommand that failed, and exits 1.
+Invalid arguments exit 2 and print usage on stderr; help and version requests exit 0.
+Health exits 1 when it reports a failing check; a policy denial uses the agent's hook response rather than the ordinary CLI error format.
 On a terminal that is the only copy; when stdout is not a terminal the message also goes to stderr as `yoke: <message>`.
 Piping into a reader that closes early, such as `yoke log | head -1`, ends the command quietly.
 Text output shows times as local `YYYY-MM-DD HH:MM` (`yoke log` adds seconds); `--json` output keeps epoch seconds.
@@ -23,6 +25,7 @@ Plan commands print a compact text view by default, and `--json` prints the full
 | `yoke run-hook <event> [--agent claude\|codex]` | Read one JSON event from stdin; agent defaults to Claude |
 | `yoke install [--agent claude,codex] [--dry-run] [--statusline \| --statusline-if-absent] [--style compact\|detailed]` | Install managed agent integrations; `--statusline` adds Claude's statusline and wraps an existing command, `--statusline-if-absent` adds it only when none is set and reports any other one it left alone, and `--style` picks its look (see [Statusline](#statusline)) |
 | `yoke uninstall [--agent claude,codex] [--dry-run]` | Remove owned integration entries; it does not remove the executable, the PATH line or `~/.yoke` (see [uninstalling](uninstalling.md)) |
+| `yoke project move <old> <new> [--dry-run] [--merge] [--json]` | Human-only: move stored project records in one transaction after moving the directory; preview prints every affected table and count; existing target records require `--merge`, and conflicting plan slugs refuse the entire move |
 | `yoke health [--json]` | Read-only report of the executable, state schema, mode, policy trust and staleness, each agent's hook installation, enablement and last recorded event, unfinished plans, the project's memory facts that no digest has processed yet, problems and guidance; exits 1 when a check fails |
 | `yoke update [--check]` | Check releases or verify, test (`--version`) and replace the current executable; when no stable release is published yet it says so and exits 0 |
 | `yoke pause [--for DURATION \| --clear]` | Human-only. Without options, print the private token that lets you start an agent with `YOKE_OFF=<token>` and Yoke's hooks skipped; `--for 30m` (or `2h`, at most 24h) skips every hook for that long, and `--clear` ends it; each use is written to `~/.yoke/error.log` |
@@ -32,7 +35,24 @@ Without `--dry-run`, `install` and `uninstall` refuse to run from an agent's too
 Install and uninstall default to both agents.
 They use Claude settings under `CLAUDE_CONFIG_DIR` and Codex files under `CODEX_HOME` when those variables are set, which must then be absolute paths.
 Installing refuses while Claude user settings set `disableAllHooks`, or file-based managed settings set `disableAllHooks` or `allowManagedHooksOnly`; reinstalling reports these as warnings and never changes them.
-Use `--dry-run` to inspect their planned file changes: each file is shown as changed lines, `-` removed and `+` added, with two lines of context around them, and JSON files are pretty-printed first.
+Use `--dry-run` to inspect only changed Yoke hooks and feature flags, with `-` removed and `+` added.
+Other settings are omitted and statusline command contents are hidden.
+Installation resolves the executable's canonical path and requires a regular executable file.
+Install and health warn about group- or other-writable executable locations and paths inside a `target` build directory; use a stable private executable and reinstall the hooks to remove those warnings.
+The self-protection guard denies `run-hook` inside an agent tool call; the manual stdin examples remain available from your own terminal.
+Recorded hook payloads include `_yoke_parent.pid` and `_yoke_parent.name` from the operating system, overriding any fields submitted with those names; this is audit context, not authentication.
+The parent record also includes its OS start identity, so process ID reuse does not bind a new process to an old session.
+When an agent runs memory commands, Yoke matches that recorded parent to the tool's current OS ancestry and uses the session anchor instead of the tool's directory.
+Missing or ambiguous provenance refuses the command with a request to start a new session in the project or use your own terminal.
+Agents cannot export `--all`, and their import previews must map every destination to their anchored project; real imports and pinning still require a person.
+Each injected item is capped at a quarter of `memory.inject_tokens` in characters, pins use at most half of the character budget, and the remaining space reserves room for approved knowledge and unpinned notes.
+`yoke recall` still shows complete saved notes.
+For `project move`, stop agents first, move the directory yourself, then pass the exact absolute old project path and the existing new directory.
+Only project trust snapshots whose destination bytes equal the approved bytes are eligible to move; if any snapshot differs or is unavailable, the source project's trust is dropped as a batch and the result says `untrusted`.
+An explicit merge replaces the destination's prior project trust with the verified source batch, and all replaced or dropped trust rows are counted.
+Other records, including memory, sessions, plans, usage and notifications, move together; nested start directories and plan file paths follow the new root.
+Global trust and files on disk are not moved.
+Restart sessions in the new directory, and review and trust the new policy yourself when needed; plan checks containing old absolute paths may need reapproval.
 `update` depends on a published release; the development implementation does not establish release availability.
 `extensions` prints a one-line summary of counts, then drift, then the inventory: `shadowed` (same name at several scopes, with the documented winner), `stale` (a Yoke-managed hook or preset that differs from what this executable would install now) and `dangling` (a hook or MCP command whose program does not exist).
 Each inventory row gives the definition's agent, kind, name, scope, Yoke ownership, origin path and detail (for a hook or MCP server, the program or URL host).
@@ -158,8 +178,8 @@ A repository too slow for that shows its branch alone and is not retried for a m
 | Command | Purpose |
 | --- | --- |
 | `yoke plan new <slug> [--title '<title>'] [--json]` | Create an editable draft and print its path and next steps; `--json` prints the full record. The repository needs a first commit before a plan can be started or diffed |
-| `yoke plan list` | List persisted project plans |
-| `yoke plan status [<slug>] [--json]` | List plans, or show one plan's task and requirement progress, open feedback, check runs, and whether each captured artifact still matches its recorded hash; `--json` adds every field and the plan body |
+| `yoke plan list [--json]` | List persisted project plans with their bound session, or `none`; `--json` prints full records, using `null` for an unbound session |
+| `yoke plan status [<slug>] [--json]` | List plans, or show one plan's bound session, task and requirement progress, open feedback, check runs, and whether each captured artifact still matches its recorded hash; `--json` adds every field and the plan body; an unbound session is `null` in JSON |
 | `yoke plan validate <slug> --agent claude\|codex [--json]` | Ask the independent reviewer to check the plan for requirement coverage and risky assumptions before approval; findings are stored as `blocking` or `advice`; `--json` prints the digest and full finding text |
 | `yoke plan approve <slug> [--json]` | Human-only approval of frozen checks; refused while a blocking validation finding is open |
 | `yoke plan task done <slug> <task-id> [--evidence '<text>'] [--json]` | Mark an approved task done after its dependencies; tasks with `owner = "human"` need a human terminal |
@@ -191,7 +211,7 @@ See [workflows](workflows.md) for the approval and evidence model.
 
 | Command | Purpose |
 | --- | --- |
-| `yoke remember '<text>' [--pinned]` | Save a local project note with recognizable secrets redacted; with a project's first note in observe mode it says that session start injects nothing until enforce mode; `--pinned` (like `yoke memory pin`) refuses to run from an agent's tool process |
+| `yoke remember '<text>' [--pinned] [--json]` | Save a local project note with recognizable secrets redacted; text output shows its id, local time, pin and saved text; `--json` preserves the full record and epoch timestamp; with a project's first note in observe mode it says that session start injects nothing until enforce mode; `--pinned` (like `yoke memory pin`) refuses to run from an agent's tool process |
 | `yoke recall [<query>] [--limit <count>] [--json]` | Search project memory; any query word may match and the best matches come first, while no query lists pinned then newest notes; default limit 100, range 1 through 1000; the text output starts with the `project:` it searched and shows each note's local `time`, while `--json` keeps epoch seconds |
 | `yoke recall [<query>] --explain [--json]` | Show what session start injects in enforce mode for that query, within `memory.inject_tokens`, and why each item was selected; it prints `injection: inactive` while the mode is observe, and the explanation is never injected |
 | `yoke forget <id>` | Delete one memory of this project, and the project-knowledge entry `yoke share` wrote for it; exits 1 for an ID that is not in this project or when a shared entry could not be removed |
@@ -200,8 +220,8 @@ See [workflows](workflows.md) for the approval and evidence model.
 | `yoke memory digest <session-id> [--transcript <path>]` | Generate memories from pending facts with the configured CLI, up to 10 batches of 100 facts per run |
 | `yoke jobs [--all] [--json]` | List queued, running, failed and dead background jobs with their last error, including the hourly `retention` cleanup and digests queued at session start for sessions whose end hook never ran; `--all` adds succeeded jobs. Never creates or upgrades the state database: with no state it lists nothing, and with an older schema it exits 1 |
 | `yoke jobs retry <id>` | Give a dead job a fresh set of attempts and start a worker; requires a human terminal |
-| `yoke memory export <file> [--all] [--overwrite]` | Export current-project or all-project memory as plaintext |
-| `yoke memory import <file> --map '<source>=<destination>' [--dry-run] [--keep-pins]` | Import with explicit project-path mappings; repeat `--map` per source project, using `<source>=<source>` to restore in place; a dry run exits 1 when it finds conflicts and lists the memories it would add (`preview` in the JSON on stdout, a text table on stderr); imported notes are unpinned unless `--keep-pins` is given, records dated outside 1970 to tomorrow are rejected, and the real import refuses to run from an agent's tool process |
+| `yoke memory export <file> [--all] [--overwrite] [--json]` | Export current-project or all-project memory as plaintext; print counts as text, or the full report with `--json` |
+| `yoke memory import <file> --map '<source>=<destination>' [--dry-run] [--keep-pins] [--json]` | Import with explicit project-path mappings; repeat `--map` per source project, using `<source>=<source>` to restore in place; print counts and conflicts as text, or the full report with `--json`; a dry run exits 1 when it finds conflicts and lists the memories it would add (`preview` in JSON, a text table on stderr); imported notes are unpinned unless `--keep-pins` is given, records dated outside 1970 to tomorrow are rejected, and the real import refuses to run from an agent's tool process |
 | `yoke preset list` | List the bundled packs: gate packs `git-safety`, `web-redirect` and `token-saver`, and the `ui` plan-check templates |
 | `yoke preset add <name> [--global]` | Append readable policy for later human trust |
 

@@ -1,18 +1,22 @@
 # Development handoff
 
-Recorded 2026-10-17 at commit `0afac36`, after the second wave of fixes and features reached `main`.
+Recorded 2026-10-17 at commit `d5d4ed5`, after the second wave and the installer revision fix reached `main`.
 This is the starting point for the next development session, not a release acceptance claim.
 Track remaining acceptance in [issue #22](https://github.com/mrx-arafat/yoke/issues/22) and the [audit tracker #23](https://github.com/mrx-arafat/yoke/issues/23).
 
 ## State of main
 
-`main` is at `0afac36`.
-[CI run 39051349406](https://github.com/mrx-arafat/yoke/actions/runs/39051349406) and [installer run 39051349580](https://github.com/mrx-arafat/yoke/actions/runs/39051349580) passed for it.
+`main` is at `d5d4ed5`.
+[Installer run 39052847800](https://github.com/mrx-arafat/yoke/actions/runs/39052847800) passed all 11 jobs for it.
+[CI run 39052847858](https://github.com/mrx-arafat/yoke/actions/runs/39052847858) failed on the Ubuntu statusline width test; the reliability package is investigating it.
 No binary release is published, and nothing here replaced installed hooks.
 The state schema is now 14, so a machine that already runs older hooks needs the coordinated upgrade below.
+The independently checked working-tree usage package adds schema 15, pending commit and combined integration checks; all installed hook binaries must be upgraded together before that database upgrade.
 
 Commits since `746cef9`, the state recorded after the first field test, newest first:
 
+- `d5d4ed5` docs: add the verified user guide and refresh the field test ledger
+- `85cad17` fix: build the newest main when no release exists, and test that in CI
 - `0afac36` docs: document the security model, recovery paths, scale numbers and the observer
 - `a42a20e` ci: harden the release and installer paths
 - `6947257` fix: security hardening, failure-safe hooks, scale indexes and a richer observer
@@ -25,9 +29,9 @@ The first-wave fixes are `250dd84`, `ca1cb8f` and `746cef9`; earlier commits bac
 
 ## What is done
 
-- **First field test.** 79 findings across seven journeys, all but one fixed: 78 are fixed and 1 is partly fixed (j4-3, the `usage_partial` notification).
+- **First field test.** Implementation fixes now cover all 79 findings across seven journeys; the last `usage_partial` notification fix (j4-3) is independently checked in the working tree pending commit.
   See the [field test record](field-testing.md).
-- **Security.** A full audit found 29 findings; 10 are fixed, 8 partly fixed, 10 open and 1 declined.
+- **Security.** A full audit found 29 findings; 15 are fixed, 7 partly fixed, 6 open and 1 declined, including verified working-tree changes pending commit.
   A session is pinned to the project it started in, gates run in the directory of the trusted `yoke.toml`, the guard protects the hook registration files and the executable, `YOKE_OFF` works only with the private token from `yoke pause`, `yoke install`, `uninstall` and `update` refuse agent processes, state is private, redaction covers more shapes, and injected memory is fenced and labelled as untrusted data.
 - **Failure modes.** Hooks fail safely on malformed or oversized input, unreadable or locked state, killed processes and closed pipes.
   Observe mode keeps working when a project was last seen in observe mode and the state is unreadable.
@@ -45,9 +49,9 @@ The first-wave fixes are `250dd84`, `ca1cb8f` and `746cef9`; earlier commits bac
 
 This is implementation evidence, kept apart from release acceptance.
 
-- **CI.** The run above passed for `0afac36`.
-- **Installer matrix.** The installer run above passed for `0afac36`.
-  At `0afac36` the workflow never passes `YOKE_COMMIT`, so its source builds are not the commit under test (release-1 in the ledger); the change that fixes it was uncommitted and not yet run when this record was written.
+- **CI.** The earlier run passed for `0afac36`; the current run at `d5d4ed5` has the failure named above.
+- **Installer matrix.** The installer run above passed for `d5d4ed5`.
+  Commit `85cad17` passes `YOKE_COMMIT` to each source build, checks the installed build and makes the interactive statusline assertion fail correctly (release-1 in the ledger).
 - **Live enforcement with real agents.** On 2026-10-17, on the field-test server, a policy in enforce mode with one gate blocked a marker command in Claude Code and in Codex after `yoke trust`, an ordinary command ran in both, and the store held a `deny` with the gate name for each agent.
   That run used the build from before the second wave.
   See [enforcement verified with real agents](field-testing.md#enforcement-verified-with-real-agents-2026-10-17).
@@ -59,13 +63,18 @@ This is implementation evidence, kept apart from release acceptance.
   Every fix has focused tests, most written to fail first.
   See [second wave](field-testing.md#second-wave-2026-10-17).
 
-Not verified: no real Claude Code or Codex session has run the second-wave build, the release workflow has not run, and the console has not been driven by a person.
+The current Linux field test ran real Claude Code and Codex sessions against `d5d4ed5`: ordinary commands, trusted denials, settings protection and enforcement with `YOKE_OFF=1` passed.
+The directory-change attempts kept their original hook payload cwd, so live session-anchor acceptance remains unproven.
+See the [current installer and real-agent field test](field-testing.md#field-test-2026-10-17-current-installer-and-real-agents).
+The release workflow has not run, and the console has not been driven by a person.
 The full list is under [Not verified live](field-testing.md#not-verified-live).
 
 ## What is open
 
-- **Findings.** 23 ledger rows are open (7 P2 and 16 P3) and 11 are partly fixed; [open items](field-testing.md#open-items) groups them with a proposed fix for each.
-  The open P2 items are the forged `yoke run-hook` events (SEC-7), the review prompt's delimiter and unredacted data (SEC-12 and SEC-13), records stranded by a renamed project (G-8), a non-UTF-8 project path (G-10), the uninstall guide's export command (out-3) and the installer workflow's source revision (release-1).
+- **Findings.** 9 ledger rows are open (5 P2 and 4 P3) and 9 are partly fixed; [open items](field-testing.md#open-items) groups them with a proposed fix for each.
+  The release-rehearsal isolation guidance (release-2) is corrected and independently checked in the working tree, pending commit; safe account/container execution is still unrun.
+  The open P2 items are the forged `yoke run-hook` events (SEC-7), the review prompt's delimiter and unredacted data (SEC-12 and SEC-13), records stranded by a renamed project (G-8) and a non-UTF-8 project path (G-10).
+  The uninstall export correction and CLI polish are independently checked in the working tree; current combined integration, pending security regressions and commit hashes remain outstanding.
 - **Decisions.** The owner questions are under [Decisions and checks that need a person](field-testing.md#decisions-and-checks-that-need-a-person): the worktree memory identity, the linked-worktree trust rule, injection of notes by default, managed-settings install and the statusline priority.
 - **Release gates.** The [gate status table](release-acceptance.md#gate-status) was last checked at `e2745ce` on 2026-10-16, and `release.yml` has changed since, so recheck it before relying on it.
   The release workflow has not run on all four targets, no release is published, and the compliance ticks, trademark search, observe-day and enforce-week trials, console acceptance and part of the install acceptance need a person.
@@ -93,15 +102,17 @@ An agent cannot complete these and must not bypass their guards; record the exac
 
 ## Next work, in order
 
-1. **Close the open P2 items.**
-   `out-3` and `release-1` are small edits to `docs/uninstalling.md` and `installer.yml`, and the exact changes are in the [open items](field-testing.md#p2-open).
+1. **Close release-safety and P2 items.**
+   The corrected release-2 guidance requires a disposable account or container for shipped-artifact rehearsal.
+   `out-3` now documents all-project export and `release-1` passed the Installer matrix.
    SEC-7, SEC-12 and SEC-13 are code.
    G-8 and G-10 wait for the decisions in the previous section.
 2. **Run the second wave with real agents.**
    A person at the keyboard, on a fresh server or an isolated account: `yoke trust` and enforce mode in both agents, a `cd` out of the project and a planted nested `yoke.toml`, `yoke pause` and the token, a plan holding Stop, Codex hook approval after a reinstall, the statusline styles in Claude Code, and `yoke watch` in a terminal pane.
    Record it as a new dated section in [field testing](field-testing.md), starting from the list under [Not verified live](field-testing.md#not-verified-live).
 3. **Make the owner decisions and finish the partly fixed rows.**
-   The remainders of SEC-8, SEC-10, SEC-14, SEC-19 and SEC-28 are the ones that change what the product promises.
+   The remainders of SEC-8, SEC-10, SEC-14 and SEC-28 are the ones that change what the product promises.
+   SEC-19 now has a trusted update opt-out; SEC-29's nonblocking hash descriptors passed the corrected FIFO regression, including a checked child test count.
 4. **Coordinate the installed-binary upgrade.**
    Recheck which executable the installed hooks run and the state schema with `yoke health` before acting, then follow [upgrade notes](upgrade-notes.md): finish active checks, preserve a consistent database backup, replace every hook executable together, reinstall with the actual agent configuration directories, approve Codex hooks, and inspect `yoke health`.
    Do not open the real database with the new writable binary while old hooks still use it.

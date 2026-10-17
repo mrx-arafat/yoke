@@ -2,9 +2,14 @@
 
 [Documentation index](README.md)
 
-Yoke records actionable problems as notifications: hook errors, would-deny summaries in observe mode, waiting or stalled plans, failed or interrupted checks, and stale or untrusted configuration.
+Yoke records actionable problems as notifications: hook errors, would-deny summaries in observe mode, waiting or stalled plans, failed or interrupted checks, stale or untrusted configuration, and partly counted session usage.
 Read them with `yoke notifications` or on the console Notifications page, which also has a searchable copy of the recovery steps below.
+Recovery links in tagged release builds point to that release's documentation.
+Local builds and manual packages without a matching release tag use the documentation on `main`; no release needs to exist for those links to work.
 Each notification names the section of this page that explains it.
+On session start, hooks materialize at most 2,000 old decisions and queue one `notifications-drain` job for the rest.
+The existing job worker drains that history in paced transactions, so catching up does not require hundreds of later session starts.
+Run `yoke jobs --all` to inspect the job; failed jobs retry with backoff, and a human can run `yoke jobs retry <id>` for a dead job.
 
 ## A gate does not run
 
@@ -59,6 +64,10 @@ Agents cannot trust configuration.
 
 Yoke protects nothing when its hooks do not run.
 Run `yoke health` to see which agents have Yoke hooks installed and what stops them.
+Health also reports group or other access to `~/.yoke` or `state.db`, with the exact `chmod 700` or `chmod 600` command to restore private permissions.
+It reports these permissions without changing them.
+For hook executable paths, unprotected world-write access is a problem; a sticky directory such as `/tmp` is accepted when its next path component is owned by you or root.
+Group-write access produces guidance in health and a warning during install, naming the location and a `chmod g-w` command if shared write access is unnecessary; it does not make health fail.
 An unreadable installation receipt is reported as a problem rather than a missing installation; repair the reported receipt before retrying installation.
 An empty or zero-byte state database is reported as empty or incomplete without hiding installed agents; initialize it from your own terminal with `yoke config`, or let the next agent hook initialize it.
 Yoke reads Claude Code settings from `CLAUDE_CONFIG_DIR` and Codex settings from `CODEX_HOME` when they are set to absolute paths, and from `~/.claude` and `~/.codex` otherwise.
@@ -181,6 +190,7 @@ Export refuses to overwrite an existing archive unless `--overwrite` is supplied
 Session start injects notes only in enforce mode.
 `yoke recall --explain` prints `injection: inactive` while the mode is observe; set `mode = "enforce"` in `yoke.toml` and run `yoke trust` in your own terminal.
 Shared knowledge in `.yoke/knowledge.md` is injected only after `yoke trust` has approved the file, and `yoke forget` of a shared note asks for another `yoke trust` once the entry is removed.
+The console's Forget action keeps the shared entry in `.yoke/knowledge.md` so Undo can restore the note; its confirmation tells you to remove that entry by hand and run `yoke trust` in your own terminal if you want to stop sharing it.
 
 ## The installer refuses a setting or cannot find a release
 
@@ -226,6 +236,12 @@ Each import resumes where the previous one of that session stopped, so a long se
 Yoke reads a transcript again from its start when the file was truncated, replaced or rewritten, which is why a replaced transcript replaces the stored usage.
 A single read of more than 32 MiB does not fail: only its newest 32 MiB is counted, the usage in the skipped part is not, and `yoke usage` marks the session in its coverage column (for example `counted 31.8 MiB of 64.7 MiB`) and adds a note.
 That happens for a first import of a transcript larger than 32 MiB, and when more than 32 MiB was appended between two imports; usage counted earlier stays.
+Each partly counted session also raises one `usage_partial` notification.
+Acknowledging it does not change the totals, and repeated imports do not reopen it while the same condition holds.
+A full import after a transcript replacement resolves it.
+Keep the original transcript: incremental imports add new usage but cannot recover the bytes already skipped.
+Quota resets more than the advertised window plus five minutes after the observation are ignored.
+An invalid stored quota record is replaced when the agent next reports valid limits; no manual deletion is needed.
 Totals for such a session under-report, most for a session that has run for days.
 A Codex rollout whose cumulative token total restarts when Codex begins a new conversation segment, for example after a thread settings change, starts a new accounting segment instead of failing, and the next import catches up.
 A restart that neither decreases the total nor is reported as the last turn's usage counts only the difference from the previous total.
@@ -291,6 +307,7 @@ In every case you can run `yoke pause` in your own terminal and start the agent 
 | Hook input over 1 MiB | Enforce: denied with `hook payload exceeds 1 MiB`; observe: nothing is blocked. Yoke reads and drops up to 64 MiB more, so the agent's write does not fail with a broken pipe. | An `error` decision is recorded. | Ask the agent to use smaller tool inputs, for example a large file written in several edits. |
 | A tool input too large for a check gate | Enforce: denied with `gate 'name' could not run: the tool input is too large (N KiB) to pass to a check gate`. The tool input travels in the environment of the gate command, which the system limits (about 128 KiB per variable on Linux, 1 MiB for the whole environment on macOS). Gates that run no command (`deny`, `rewrite`) see the whole input and are not affected. | Nothing is lost. | Use smaller tool inputs, or narrow the gate with `match_tool` so it does not run for that tool. |
 | The working directory the agent reports is gone, or is not an absolute path | A vanished directory is governed by the policy of the project the session started in, or of the directory the hook runs in when that is gone too. A relative path is denied in enforce mode (`hook cwd must be absolute`) and not blocked in observe mode. | An `error` decision is recorded for the relative path. | Restart the agent in an existing directory. |
+| The project directory name is not UTF-8 | Yoke says `project scope unavailable`; trusted parent and global policy still apply, and the path alone does not deny tool calls. | Project plans, memory and accounting are unavailable; Yoke never uses a lossy path as another project's identity. | Rename the project directory using UTF-8 names and restart the agent there. |
 | `state.db` is damaged (`file is not a database`, `database disk image is malformed`), or is a directory, pipe or device instead of a file | An observe project is allowed through with a warning (see [the record of the last known mode](#the-record-of-the-last-known-mode)). Any other project is denied for blocking events; the reason says the database is damaged, or is not a regular file, and how to move it aside. A Stop is denied once. A pipe in its place does not make the hook wait. | The file is left as it is. | [Recover a damaged state database](#recover-a-damaged-state-database). |
 | `state.db` is an empty file | Yoke creates a new database. Trust approvals were in the old one, so the policy falls back to the defaults (observe, no gates) and nothing is denied. The hook says `state.db was empty` on stderr and in `error.log`. A file under ten seconds old is another hook creating the database and is not reported. | Trust approvals, history, memory and plans that file held are gone. A file left empty by a crash during the very first run held nothing. | Review `yoke.toml` and run `yoke trust` again; `yoke config` shows what is trusted. |
 | `state.db` is from a newer Yoke | An observe project is allowed through with a warning. Any other project is denied for blocking events; the reason says this `yoke` is older than the database. | Nothing is changed. | See [Storage failures block work](#storage-failures-block-work). |

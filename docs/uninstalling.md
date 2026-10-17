@@ -24,12 +24,13 @@ To keep them, export first, while `yoke` still works:
 
 ```sh
 yoke memory export ~/yoke-memory.json --all
-(umask 077; yoke log --limit 1000 --json > ~/yoke-decisions.json)
+(umask 077; yoke log --all --limit 1000 --json > ~/yoke-decisions.json)
 ```
 
 `yoke memory export` writes a JSON file with your memories and the facts waiting to become memories, for every project with `--all`.
 It refuses to replace an existing file unless you add `--overwrite`.
-`yoke log` saves only the newest 1000 decisions, which is the largest `--limit` it accepts.
+`yoke log --all` saves the newest 1000 decisions across all projects, which is the largest `--limit` it accepts.
+Without `--all`, only the current project's decisions are saved.
 Both files are plain text, and the decision log includes what your agents ran, so the `umask 077` keeps the second one readable by you alone (the memory export already is).
 Delete both when you no longer need them.
 Plans are files under `.yoke/plans` in each project, so they are not part of either export.
@@ -44,21 +45,26 @@ yoke uninstall --agent claude,codex
 ```
 
 The real run prints `changes: 3` and the three files it changed.
-The dry run prints the same list plus each file's contents before and after, and changes nothing.
+The dry run prints the same list plus only the changed Yoke hooks, feature flags and statusline ownership, and changes nothing.
+It omits neighboring settings and hides statusline commands, because those may hold credentials.
 
 What it does:
 
 - It removes only the entries Yoke added, as recorded in the receipts.
-- When you have not touched the files since installing, each one is restored byte for byte.
+- When you have not touched the files since installing and the original backup is still retained, each one is restored byte for byte.
+  If that backup expired, only Yoke's entries are removed and the current formatting is kept where possible.
 - When you have edited them since, your edits stay and only Yoke's entries go.
 - A Claude `statusLine` that Yoke added is removed again, one that Yoke wrapped goes back to your original command, and one the installer kept because it was already yours is never touched.
 - A file that did not exist before the install is deleted again.
   The `.claude` and `.codex` directories stay behind, empty.
 - If a Yoke entry itself was changed or duplicated, it stops with an error naming the hook and leaves the file untouched.
   Fix what the message names and run it again.
-- Before changing anything it copies the files, as they are at that moment, into `~/.yoke/backups/<timestamp>-<id>/` as `0.original`, `1.original` and so on, with an `index.json`.
+- Before changing anything it copies the files, as they are at that moment, into `~/.yoke/backups/<timestamp>-<id>/` as `0.original`, `1.original` and so on, with an `index.json` containing paths and hashes.
   The backup from your install holds your files from before Yoke existed.
-  Keep `~/.yoke/backups` until you are sure nothing is missing.
+  Yoke keeps the five newest backup directories and removes older ones on the next change.
+  These private backups can contain tokens and other credentials from your agent settings, survive uninstall, and are not redacted.
+  Copy any backup you need before it expires, and delete backups once you are sure nothing is missing.
+  Ownership receipts contain Yoke's entries and hashes, rather than whole settings files; a wrapped statusline still records the command needed to restore it.
 - Running it again is harmless and prints `changes: 0`.
 
 Check the result:

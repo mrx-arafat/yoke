@@ -14,6 +14,7 @@ On every hook event it runs the checks a human approved, records what it decided
 It is one executable and one SQLite database on your machine.
 It has no long-running daemon and no account.
 Yoke itself makes no network requests except `yoke update` and a release check that a session start runs at most once a day.
+Set trusted `update.check = false` to disable that automatic check; see [configuration](configuration.md#settings-and-defaults).
 Reviews and memory digests run your own agent CLI, which uses its own connection.
 
 An agent can say a task is done when no test proved it, and a rule written in a prompt is a request, not a guarantee.
@@ -326,7 +327,7 @@ yoke recall tests
 yoke recall --explain
 ```
 
-`yoke remember` prints the stored record as JSON.
+`yoke remember` prints the saved id, local time, pin and text; add `--json` for the full stored record with epoch seconds.
 `yoke recall` with no query lists pinned notes first, then the newest; with a query, any word may match and the best matches come first.
 Session start injects notes only in enforce mode, and `yoke remember` says so with a project's first note.
 `yoke recall --explain` shows exactly what session start would inject and why each item was chosen.

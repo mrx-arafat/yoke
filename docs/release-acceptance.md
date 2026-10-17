@@ -5,6 +5,7 @@
 This page is the checklist a human completes before publishing a Yoke release, and the record of what has been verified.
 The commands that take a release from ready to published are in [Releasing](releasing.md).
 Local focused checks are not release acceptance, and nothing on this page is complete until its evidence is recorded here.
+Shipped optimized binaries can ignore `HOME`; run them in a disposable OS account or a throwaway container so acceptance cannot write to your real Yoke state.
 
 A Git push never publishes a binary.
 Pushing a tag runs the release workflow, which builds every target on its own native runner and creates a draft release.
@@ -32,7 +33,7 @@ No row reads `done` on a claim alone, and the release preflight in [Releasing](r
 | Enforce-week trial, Codex | human | Not started | maintainer |
 | Enforce-week trial, Claude Code | human | Not started | maintainer |
 | Console acceptance | human | The [procedure and fixtures](console-acceptance.md) exist and record no result | maintainer |
-| Install acceptance | human | Steps 1, 2, 3, 5 part A and 6 passed for a packaged executable at `ff20d07`; steps 4 and 5 part B need `yoke trust` in a human terminal ([details](#install-acceptance)) | maintainer |
+| Install acceptance | pending | Safe-isolation rerun required in a disposable account or container; the `ff20d07` temporary-HOME run below is historical output and does not establish isolation; steps 4 and 5 part B also need a human terminal ([details](#install-acceptance)) | maintainer |
 | Update acceptance | pending | No release is published: `gh release list` printed nothing on 2026-10-16; the replacement path needs a second release to update from ([details](#update-acceptance)) | maintainer |
 
 ## Supported targets
@@ -42,7 +43,7 @@ The release review repeats the checks for the release commit.
 
 | Target | Release workflow runner | Status for `ff20d07` on 2026-10-15 |
 | --- | --- | --- |
-| `aarch64-apple-darwin` | `macos-15` | Packaging dry run and install acceptance passed on the host (see below) |
+| `aarch64-apple-darwin` | `macos-15` | Packaging dry run passed; install acceptance pending a safe-isolation rerun in a disposable native account (see below) |
 | `x86_64-apple-darwin` | `macos-15-intel` | Pending; no release workflow run exists yet |
 | `x86_64-unknown-linux-gnu` | `ubuntu-24.04` | Pending; no release workflow run exists yet |
 | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | Pending; no release workflow run exists yet |
@@ -175,9 +176,120 @@ Record the date, the tag, the workflow run URL and the person who checked each i
 
 ## Install acceptance
 
-Run on each platform with the archive's executable and an empty home directory, so no real agent settings change:
+Run the archive's executable inside one of the isolation environments below, with no real agent settings or state mounted or copied into it.
+Changing `HOME` alone does not isolate a shipped optimized binary when the account already has `~/.yoke`.
+A temporary HOME is valid only for a debug build or a build made with `--features honor-home-env`, not for acceptance of a shipped archive.
+Account creation and deletion require a human administrator; the commands below are instructions, not permission for an agent to create accounts.
 
-1. `export HOME=$(mktemp -d)` and unset `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, then run `./yoke --version`.
+### Throwaway Linux container, on Linux or macOS
+
+Use Docker only if your account already has access to a working daemon; this path does not require host `sudo`.
+It exercises the Linux archive matching the container architecture, including when Docker runs on macOS; native macOS acceptance still needs the separate account below.
+Start from a directory containing only the extracted, verified Linux archive:
+
+```sh
+docker info >/dev/null || exit 1
+printf 'Absolute path to the extracted Linux archive directory: '
+IFS= read -r YOKE_ACCEPT_DIR
+YOKE_ACCEPT_DIR=$(cd "${YOKE_ACCEPT_DIR:?}" && pwd -P) || exit 1
+test -f "$YOKE_ACCEPT_DIR/yoke" || exit 1
+docker run --rm -it \
+  --mount "type=bind,source=$YOKE_ACCEPT_DIR,target=/release,readonly" \
+  ubuntu:24.04 /bin/bash
+```
+
+Inside the container, copy the executable off the read-only mount so update acceptance can replace it, then continue with the acceptance steps:
+
+```sh
+apt-get update && apt-get install -y ca-certificates curl python3
+install -m 0755 /release/yoke /usr/local/bin/yoke
+unset CLAUDE_CONFIG_DIR CODEX_HOME
+cd /root
+test ! -e .yoke || exit 1
+```
+
+Only the archive directory is mounted, read-only; do not mount your home, an agent directory, or the Docker socket.
+Exit the container after recording evidence; `--rm` removes its filesystem and state.
+The shared base image remains in Docker's cache; do not delete an image another project uses.
+
+### Disposable native Linux account
+
+Use an existing root terminal on a disposable test machine; if you do not have one, use the container path or ask its administrator to prepare the account.
+Do not assume passwordless `sudo` or grant the test account administrator access.
+These commands refuse to reuse an existing account:
+
+```sh
+test "$(id -u)" -eq 0 || exit 1
+YOKE_ACCEPT_USER=yoke-accept
+if id "$YOKE_ACCEPT_USER" >/dev/null 2>&1; then
+  printf 'Account already exists; choose a different fresh acceptance account.\n' >&2
+  exit 1
+fi
+printf 'Absolute path to the verified native archive executable: '
+IFS= read -r YOKE_ACCEPT_BINARY
+test -f "${YOKE_ACCEPT_BINARY:?}" && test -x "$YOKE_ACCEPT_BINARY" || exit 1
+useradd -m -U -d "/home/$YOKE_ACCEPT_USER" -s /bin/bash "$YOKE_ACCEPT_USER" || exit 1
+install -m 0755 -o "$YOKE_ACCEPT_USER" -g "$YOKE_ACCEPT_USER" \
+  "$YOKE_ACCEPT_BINARY" "/home/$YOKE_ACCEPT_USER/yoke" || exit 1
+su - "$YOKE_ACCEPT_USER"
+```
+
+In the new account, run `unset CLAUDE_CONFIG_DIR CODEX_HOME`, `export PATH="$HOME:$PATH"`, and `cd "$HOME"` before the acceptance steps.
+Confirm `id -un` prints `yoke-accept` and `test ! -e "$HOME/.yoke"` succeeds before the first Yoke command.
+When finished, exit back to the original root terminal, retain the evidence elsewhere, then remove only the account created above with `userdel -r "$YOKE_ACCEPT_USER"`.
+The [useradd](https://man7.org/linux/man-pages/man8/useradd.8.html) and [userdel](https://man7.org/linux/man-pages/man8/userdel.8.html) manuals describe these account and home-directory operations.
+
+### Disposable native macOS account
+
+A human administrator creates a standard account using macOS's interactive authentication; no password is placed on the command line and no `sudo` setup is assumed.
+Stage only the verified native executable in a new shared temporary directory, then authenticate and set a password for the new account:
+
+```sh
+YOKE_ACCEPT_USER=yoke-accept
+if id "$YOKE_ACCEPT_USER" >/dev/null 2>&1; then
+  printf 'Account already exists; choose a different fresh acceptance account.\n' >&2
+  exit 1
+fi
+printf 'Absolute path to the verified native archive executable: '
+IFS= read -r YOKE_ACCEPT_BINARY
+test -f "${YOKE_ACCEPT_BINARY:?}" && test -x "$YOKE_ACCEPT_BINARY" || exit 1
+YOKE_ACCEPT_STAGE=$(mktemp -d /var/tmp/yoke-accept.XXXXXX) || exit 1
+chmod 755 "$YOKE_ACCEPT_STAGE"
+install -m 0755 "$YOKE_ACCEPT_BINARY" "$YOKE_ACCEPT_STAGE/yoke" || exit 1
+sysadminctl interactive -addUser "$YOKE_ACCEPT_USER" \
+  -fullName 'Yoke acceptance' -home "/Users/$YOKE_ACCEPT_USER" \
+  -shell /bin/zsh -password -
+printf 'Copy this executable path for the new account: %s/yoke\n' "$YOKE_ACCEPT_STAGE"
+su - "$YOKE_ACCEPT_USER"
+```
+
+Enter the new account's password for `su`, then copy from the path printed above:
+
+```sh
+test "$(id -un)" = yoke-accept || exit 1
+test ! -e "$HOME/.yoke" || exit 1
+printf 'Staged executable path printed by the original account: '
+IFS= read -r YOKE_ACCEPT_BINARY
+cp "${YOKE_ACCEPT_BINARY:?}" "$HOME/yoke" || exit 1
+unset CLAUDE_CONFIG_DIR CODEX_HOME
+export PATH="$HOME:$PATH"
+cd "$HOME"
+```
+
+After recording evidence, exit back to the original account and remove only the account and staging directory created above:
+
+```sh
+sysadminctl interactive -deleteUser "$YOKE_ACCEPT_USER"
+rm -f "${YOKE_ACCEPT_STAGE:?}/yoke"
+rmdir "$YOKE_ACCEPT_STAGE"
+```
+
+The `sysadminctl -h` output on macOS documents `interactive`, `-addUser`, `-deleteUser`, `-home` and `-password -`.
+The account and container instructions have had their command syntax reviewed; they have not been executed as part of the local documentation fix.
+
+### Acceptance steps
+
+1. In the disposable account or container prepared above, unset `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, check `command -v yoke` names its private copy, then run `yoke --version`.
 2. `yoke install --agent claude,codex --dry-run` lists three planned files; `yoke install --agent claude,codex` applies them, and repeating it reports `changes: 0`.
 3. `yoke health --json` reports both agents installed with no problems and exits 0.
 4. With `mode = "enforce"` and a `Bash` deny gate trusted through `yoke trust`, piping a `Bash` `PreToolUse` event into the installed hook command prints a denial, and a `Read` event prints nothing.
@@ -188,13 +300,14 @@ Run on each platform with the archive's executable and an empty home directory, 
 Steps 1, 2, 3, 5 part A and 6 can be run by an agent; step 4 and step 5 part B require a human terminal, because `yoke trust` refuses agent processes by design.
 
 On 2026-10-15, steps 1, 2, 3, 5 part A and 6 passed for the `ff20d07` dry-run executable of `aarch64-apple-darwin` in a temporary home.
+That historical run used the unsafe temporary-HOME setup: its output is retained below, but it does not establish isolation of a shipped binary and must be repeated in a disposable account or container.
 The dry run printed `changes: 3` with the three planned files and created nothing, the apply wrote them, the repeat printed `changes: 0`, and `yoke health --json` exited 0 with both agents installed and empty `problems` lists; its status was `attention` only because no hook event or trusted policy existed yet.
 With `CLAUDE_CONFIG_DIR` and `CODEX_HOME` set to absolute temporary directories, the same three files landed only under those directories, and the `.claude` and `.codex` directories under the home stayed empty.
 After `yoke uninstall --agent claude,codex` the three files were gone and `yoke health` exited 1 with `Yoke hooks are not installed for any agent.`
 Step 4 and step 5 part B were not run for the packaged executable, because `yoke trust` requires a human terminal.
 For the development build, `crates/yoke-cli/tests/core_workflow.rs` covers steps 2 and 6 in `install_dry_run_roundtrip_and_agent_specific_events_are_isolated`, steps 3 to 6 in `install_follows_agent_config_dirs_and_health_stays_read_only`, and the enforce denial with the silent allow in `untrusted_and_observe_are_silent_then_enforce_uses_snapshot_and_redacted_log`.
 Those tests commit the trust snapshot through the library, and `off_exits_before_parse_or_state_and_trust_has_no_agent_bypass` pins that `yoke trust` refuses agents and that `--yes` is not a bypass.
-To complete step 4 by hand, run the following in your own terminal after step 2, from a project directory inside the temporary home:
+To complete step 4 by hand, run the following in your own terminal after step 2, from a project directory inside the disposable account or container's real home:
 
 ```sh
 printf "mode='enforce'\n[[gate]]\nname='review'\non='PreToolUse'\naction='deny'\nmatch_tool='Bash'\nmessage='review required'\n" > yoke.toml
@@ -217,13 +330,14 @@ These fixtures do not establish native execution on another platform, hosted upd
 `yoke update` reads GitHub's latest-release endpoint, which never returns drafts.
 On 2026-10-15 the repository still had no published release: `/releases/latest` returned HTTP 404.
 `yoke update --check` from the `ff20d07` dry-run executable in a temporary home exited 1 with `release check failed (exit status: 56); check connectivity and release availability`, where 56 is the status curl 8.7.1 on the host returns for that 404 over HTTP/2, so update acceptance is not yet possible.
+This is historical output, not evidence that changing HOME isolated that optimized executable.
 On 2026-10-16 `gh release list` still printed nothing.
 
 The first release cannot complete update acceptance, because replacing an executable needs an older release to update from.
 After the first publication, [Releasing](releasing.md#step-8-check-the-published-release) checks that `yoke update --check` prints `latest_version: v0.1.0` and that `yoke update` prints `update: already current (0.1.0)`.
 After the second publication, update acceptance is:
 
-1. Install the previous release in a temporary home and run `yoke update --check`; it names the new version.
+1. Prepare a fresh disposable native account or throwaway Linux container as above, install the previous release there, and run `yoke update --check`; it names the new version.
 2. Run `yoke update`; it downloads the executable and its `.sha256`, refuses a mismatch, and replaces the executable atomically.
 3. `yoke --version` prints the new version, and `yoke health` still reports the installed hooks, because they point at the same executable path.
 

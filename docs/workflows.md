@@ -7,6 +7,8 @@
 Plans keep the editable task description in Git while SQLite owns workflow state and evidence.
 Changing Markdown alone cannot approve a plan or declare it done.
 The repository needs an existing HEAD commit for working-tree fingerprints, so make an initial commit first (`git commit` needs `user.name` and `user.email` set).
+Outside a repository, run `git init` first; for a bare repository use a working clone or worktree.
+`yoke plan approve` displays the header one line at a time, escaping and counting non-printable or non-ASCII characters so hidden formatting cannot alter the approval preview.
 Plans hold a Stop only in enforce mode: set `mode = "enforce"` in `yoke.toml` and run `yoke trust` in your own terminal once per project.
 In observe mode every plan command still works, but a Stop only records a `would_deny` decision (`yoke log --outcome would_deny`), and `yoke plan start` prints a note saying so.
 
@@ -34,7 +36,12 @@ blocking = true
 
 Write the task description after the closing delimiter.
 This example check is appropriate for the Yoke Rust workspace; use the actual verification commands for your own repository.
-Each check supports `name`, `run`, `timeout` (default 30 seconds), `blocking` (default true), and `artifacts` (an optional list of paths).
+Each check supports `name`, `run`, `timeout` (default 30 seconds), `blocking` (default true), `artifacts` (an optional list of paths), and `inputs` (optional project-relative files to freeze at approval).
+For example, `inputs = ["scripts/check.sh", "Makefile"]` displays each file's SHA-256 in the approved header and checks those exact bytes again at approval and before and after running checks.
+Changed or missing inputs require a human to run `yoke plan approve <slug>` again.
+Inputs must be unique regular project-local files, at most 64 per check, 10 MiB per file and 64 MiB across a plan.
+Declare the files your check reads explicitly; Yoke cannot infer dependencies of arbitrary shell commands.
+Checks without `inputs` retain their existing behavior.
 Approval requires at least one blocking check or required review.
 
 ### Requirements and tasks
@@ -106,6 +113,12 @@ Missing authentication, malformed findings, and blocking findings fail review.
 `yoke review <slug> --agent codex` can record a separate review on an existing plan.
 `yoke plan diff <slug>` shows the exact text the reviewer would receive: tracked changes since the plan's recorded base commit plus untracked, nonignored files.
 It runs no reviewer and changes nothing, so use it to check what review will judge, or why review input is refused as binary or above 1 MiB.
+Review collection skips secret-looking paths such as `.env*`, credential and secret files, private keys and database dumps, including tracked files.
+Both diff review and plan validation send a redacted JSON data envelope with a fresh random boundary, and reject a response that echoes that boundary.
+Before sending, stderr lists the included and skipped diff paths and reports the destination executable and payload size.
+The selected CLI sends to its configured vendor; with `auto`, Claude builds are reviewed by Codex and Codex builds by Claude.
+Redaction recognizes supported credential patterns, not every possible secret, so inspect `yoke plan diff` before sending sensitive changes.
+Random framing reduces prompt injection risk but cannot make an LLM verdict a security boundary.
 
 ### Validate a plan before approval
 
@@ -173,6 +186,9 @@ Ordinary prose such as `token is required` is kept, and a secret with no recogni
 Notes stored by an earlier version keep their original text until you forget and save them again.
 
 `yoke share <id>` appends the selected note to `.yoke/knowledge.md`; sharing it again changes nothing and says so.
+Sharing and removing a shared entry use the same project file lock, including when separate state databases write to that project.
+If another writer holds it, retry after that writer finishes; the lock releases when its process exits.
+New shared entries indent every content line so note text cannot impersonate another note's marker.
 Review that file before committing it or running `yoke trust` to enable trusted knowledge injection.
 `yoke forget <id>` also removes the entry `yoke share` wrote for that note, then reminds you to run `yoke trust` so trusted knowledge drops it.
 An entry you edited by hand is left in place and reported, and the command exits 1 so a stray copy is never silent.
@@ -211,7 +227,7 @@ yoke memory import ./yoke-memory.json \
 
 To restore in place, map each project to itself (`--map '/path/to/project=/path/to/project'`); the error for a missing `--map` prints that line for every project in the archive.
 Dry runs report additions and duplicates without creating the destination database, and exit 1 when they find conflicts, as the real import would.
-A dry run also lists the memories the import would add, as they would be stored, each cut at 200 characters and quoted: as `preview` in the JSON report on stdout, and as a text table on stderr.
+A dry run also lists the memories the import would add, as they would be stored, each cut at 200 characters and quoted: as `preview` in the JSON report on stdout with `--json`, and as a text table on stderr.
 Read it, because an archive is text that nobody in the project wrote.
 An import never takes pins or pending digests from the archive: every imported note is unpinned unless a person adds `--keep-pins` to restore their own export, and pending facts are stored as already digested so an archive cannot queue digest jobs that send text to a model.
 It rejects a record dated before 1970 or more than a day in the future, and, like `yoke remember --pinned`, the real import refuses to run from an agent's tool process; a dry run is allowed.
@@ -330,6 +346,8 @@ Set `NO_COLOR` to any non-empty value to turn color off, and `YOKE_ASCII=1` to d
 
 `yoke usage` shows how much of each agent's quota is used and left, and what recent sessions cost, without opening the console.
 It reads local records only and never creates, migrates or writes state, so it is safe to run while hooks are active.
+Schema 15 keeps exact summaries per session and UTC day, with an indexed read for the partial boundary day, so default usage reads do not aggregate every historical sample.
+Detailed dated history still reads the original samples.
 `--limit <n>` sets how many recent sessions to list (default 10, range 1 through 100), and `--json` prints the whole report for scripts.
 
 The report has these parts:
@@ -371,6 +389,16 @@ The usage in the skipped part is not counted: Claude messages and Codex counts b
 Usage counted by earlier imports stays.
 Such a session is marked `counted X MiB of Y MiB` in `yoke usage` and in its `partial` field with `--json`, and a note gives how many sessions are affected, because their totals under-report.
 The marker clears when a later import of that session reads the whole transcript from the start.
+Each such session also raises a `usage_partial` notification with a recovery action to read its coverage.
+
+### Bounded performance checks
+
+After building the debug CLI, run `uv run --no-project python scripts/benchmark_hooks.py --ci` for a small regression check.
+It fails if a hook's full process p99 exceeds 250 ms, verifies each hook wrote its decision, and checks seeded usage totals.
+Use `--json --samples 30` for full per-event p50, p95 and p99 output with the default larger seed.
+The script also runs the notification-drain job synchronously and checks its counts.
+It refuses release binaries, uses an isolated home outside the repository, caps its database at 48 MiB, checks real state for test-project leaks, and removes the fixture when it finishes.
+These are bounded debug measurements; the script does not prove the 700 MB release hook budget.
 
 ## Security model and limits
 
@@ -383,6 +411,8 @@ Two layers enforce it:
    Text handed to an interpreter (`python3 -c`, `osascript`, `tmux send-keys`) or piped into a shell is matched as a phrase instead, so it can be denied when it only mentions a human-only command.
 2. Every human-only command refuses to run when a Claude Code or Codex agent marker is set in its environment or when it is not attached to an interactive terminal, and most then ask for a typed confirmation phrase.
    `yoke install`, `yoke uninstall` and `yoke update` check the agent marker only, so the install script keeps working from your own shell.
+   Agent tool calls to `yoke run-hook` are also denied by the guard, while a human can still pipe a manual event into it.
+   Each recorded valid event includes an OS-derived parent PID and process name in `_yoke_parent`; this helps audit manual and forged invocations but does not authenticate the hook sender.
 
 Which policy governs an agent's tool calls is not left to the agent either.
 A session is bound to the project it started in (`CLAUDE_PROJECT_DIR` for Claude Code, else the directory of its first event), and the directory a later event reports only selects a `yoke.toml` that a human trusted at or below it.
@@ -420,6 +450,9 @@ Each release also carries signed build provenance that you can verify yourself w
 [Verifying releases](verifying-releases.md) has the commands and the limits.
 `install.sh` builds from source at one exact revision: a release tag, a commit you name, or the one commit `main` pointed to when it ran.
 A gate, an approved plan check or `yoke update` still runs code with your full privileges, outside your agent's sandbox.
+Gate children use a restricted environment, disabled core dumps and a wall-clock process-group timeout described in [configuration](configuration.md#gate-environment).
+Plan checks freeze explicitly declared input hashes, not every dependency or runtime access; files can still change between validation and execution.
+Only approve check commands and code you trust to run with your privileges.
 
 What Yoke writes to disk is private to your user and bounded.
 `~/.yoke` is created with mode 0700, and `state.db`, its `-wal` and `-shm` files, `error.log` and the install backups with 0600 (backup folders 0700), because they hold redacted tool inputs, memories and configuration snapshots.

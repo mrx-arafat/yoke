@@ -31,6 +31,7 @@ yoke gates
 | --- | --- | --- | --- |
 | `mode` | string | `"observe"` | `observe` records potential effects; `enforce` applies policy |
 | `meta.name` | string | `""` | Project label |
+| `update.check` | boolean | `true` | Check GitHub for a stable release at most once daily at session start; set to `false` in trusted configuration to disable automatic release checks; explicit `yoke update --check` still works |
 | `log.retention_days` | integer (days) | `90` | Retention in days for decisions, facts, check runs of done or cancelled plans, and succeeded or dead background jobs; cleanup is queued at most hourly at session start and runs in a background worker in short batches, so a session never waits for it and a large backlog drains in the background. Memories, trusted snapshots, and the check runs and evidence of unfinished plans are never removed by retention. Notifications use the same window when they are listed, except unresolved conditions |
 | `log.payload_cap` | integer (bytes) | `4096` | Bytes of each redacted hook payload stored, cut at a UTF-8 character boundary; `yoke log --json` flags a cut payload with `payload_truncated`; a tool's `tool_response` is stored as its size and status flags (plus a 200-character excerpt of a shell command's error output), not as the output |
 | `stop.max_blocks` | integer | `5` | Stop attempts without progress that Yoke blocks before an active plan becomes `stalled` |
@@ -133,6 +134,9 @@ Observe mode logs potential denials and does not rewrite input.
 In enforce mode, checks and denials must pass before the first matching rewrite can apply.
 Rewrites are supported only for `pre_tool_use`.
 Codex rewrites use an allow decision that bypasses its normal permission prompt for that invocation; keep matchers narrow.
+For Codex, a matching rewrite gate must set both a nonempty `match_tool` and a nonempty `match_contains`.
+Otherwise enforce mode refuses calls for that gate's event with a message to narrow those matchers and trust the updated policy in your own terminal.
+Observe mode records the fault and continues without rewriting.
 Claude rewrites preserve normal permission evaluation.
 
 ## Gate environment
@@ -142,7 +146,8 @@ Claude rewrites preserve normal permission evaluation.
 | `YOKE_EVENT` | Normalized hook event |
 | `YOKE_GATE` | Current gate name |
 | `YOKE_TOOL_NAME` | Event tool name |
-| `YOKE_TOOL_INPUT` | JSON tool input. The system limits an environment (about 128 KiB per variable on Linux, 1 MiB in total on macOS); when it refuses one this large the check gate does not run and the call is denied in enforce mode, with a reason that says the tool input is too large. `deny` and `rewrite` gates, and `match_contains` and `match_pattern`, see the whole input |
+| `YOKE_TOOL_INPUT` | JSON tool input up to 32 KiB. Larger values end with `[YOKE TOOL INPUT TRUNCATED]` and are no longer valid JSON. Matchers, `deny` and `rewrite` gates still see the whole original input |
+| `YOKE_TOOL_INPUT_TRUNCATED` | `1` when tool input was shortened, otherwise `0`; checks that need the complete input should refuse when this is `1` |
 | `YOKE_SESSION` | Agent session identifier |
 | `YOKE_CWD` | Directory the agent reported for the event; the agent chooses it, so treat it as data |
 | `YOKE_PROJECT` | Resolved project root |
@@ -150,6 +155,45 @@ Claude rewrites preserve normal permission evaluation.
 A check gate runs in the directory of the trusted `yoke.toml` it came from, the project root unless a nested trusted policy applies, and not in `YOKE_CWD`.
 So `run = "./check.sh"` or `run = "make lint"` means the same file whichever directory the agent works in.
 Relative `PATH` entries and `require_command` wrappers resolve against that directory as well.
+
+Check gates receive the variables above, `HOME` from the hook's chosen home, and these inherited variables when set:
+
+| Purpose | Default inherited names |
+| --- | --- |
+| Shell, terminal and locale | `PATH`, `TMPDIR`, `TMP`, `TEMP`, `LANG`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`, `TZ`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `COLORTERM`, `NO_COLOR`, `CI` |
+| User directories | `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR` |
+| Rust and Go | `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, `GOPATH`, `GOROOT`, `GOCACHE`, `GOMODCACHE`, `GOFLAGS` |
+| Node and package managers | `NVM_DIR`, `NODE_OPTIONS`, `VOLTA_HOME`, `PNPM_HOME`, `BUN_INSTALL` |
+| Python | `PYENV_ROOT`, `VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_CACHE_DIR` |
+| JVM, Android and .NET | `JAVA_HOME`, `GRADLE_USER_HOME`, `MAVEN_OPTS`, `ANDROID_HOME`, `DOTNET_ROOT` |
+| Certificates and native packages | `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `PKG_CONFIG_PATH` |
+| Proxy exclusions | `NO_PROXY`, `no_proxy` |
+
+Other inherited variables, including credentials, proxy URLs that may contain passwords and shell startup overrides, are removed by default.
+Pass additional names explicitly in the trusted configuration, globally or for one gate:
+
+```toml
+[gates]
+pass_env = ["DATABASE_URL"]
+
+[[gate]]
+name = "integration"
+on = "stop"
+run = "./scripts/integration.sh"
+pass_env = ["SERVICE_TOKEN", "HTTPS_PROXY"]
+```
+
+Per-gate names add to the global list.
+Each list accepts at most 64 exact variable names, up to 128 ASCII letters, digits and underscores, starting with a letter or underscore; globs and values are not accepted.
+The variables must already exist in the hook's environment, and the hook's `HOME` and documented `YOKE_*` values always win.
+Review the names and run `yoke trust` in your own terminal after changing them.
+Only pass credentials to check code you trust to receive them.
+On failure, the gate reason lists withheld names (never their values) with a `pass_env` hint; a long list is shortened and the message stays within 4 KiB.
+
+Child processes have core dumps disabled.
+File-size, CPU and descriptor limits stay inherited so normal build and test tools retain their existing resources.
+The wall-clock timeout kills the gate's process group, including its children and grandchildren.
+These controls do not restrict filesystem access or network access and are not a sandbox.
 
 Treat payload-derived environment values as untrusted input in your own scripts.
 For storage failures and the explicit `yoke pause` recovery mechanism, see [troubleshooting](troubleshooting.md).

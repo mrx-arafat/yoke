@@ -35,7 +35,7 @@ Run the smallest existing tests covering your change.
 For example, configuration changes can be checked with:
 
 ```sh
-cargo test -p yoke-core config::tests -- --quiet
+sh scripts/test-isolated-home.sh cargo test -p yoke-core config::tests -- --quiet
 ```
 
 Inspect nearby test names before selecting filters for another module.
@@ -63,7 +63,10 @@ Before any run that could touch a real `~/.yoke`, set `HOME` to a fresh director
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push to `main` and on every pull request.
-It checks formatting, runs clippy with warnings denied, runs the full `cargo test --workspace --locked` suite on Ubuntu and macOS, enforces `deny.toml` with `cargo deny check`, validates `CHANGELOG.md`, runs the release packaging unit tests, and checks Markdown links, anchors and dashes with `scripts/check_docs.py`.
+It checks formatting, runs clippy with warnings denied, runs the full `cargo test --workspace --locked` suite on Ubuntu and macOS through `scripts/test-isolated-home.sh`, enforces `deny.toml` with `cargo deny check`, validates `CHANGELOG.md`, runs the release packaging unit tests, and checks Markdown links, anchors and dashes with `scripts/check_docs.py`.
+The test wrapper uses a disposable `HOME`, removes inherited agent configuration directories, and supplies an offline curl stub while preserving `CARGO_HOME` and `RUSTUP_HOME` for the installed toolchain.
+Its selftest checks toolchain resolution and cleanup on success, failure and termination.
+The test job also runs `uv run --no-project python scripts/benchmark_hooks.py --ci` against the debug binary, using disposable state capped at 48 MiB and a 250 ms per-event p99 ceiling.
 Tests marked `#[ignore]` (the synthetic soak trial and the real-reviewer checks) stay out of CI and run only when invoked explicitly with `--ignored`.
 Local runs stay focused on the smallest tests covering a change; CI is where the full suite runs.
 

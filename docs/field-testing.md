@@ -10,6 +10,29 @@ It produces findings about the experience, such as wrong guidance, silent failur
 This page records what was tested, how Yoke behaves in real use, the second-wave audit and failure-mode passes, every finding with its status, and how to repeat the test.
 It is a record of observations, not a release acceptance claim.
 
+## Field test 2026-10-17: current installer and real agents
+
+The documented one-line installer built `d5d4ed5`, matching the current `main` revision before and after installation.
+The executable reported `0.1.0`, and health reported state schema 14 with supported schema 14.
+This was a Linux field test of that installed revision; it does not accept newer uncommitted packages or a hosted release.
+
+Twelve sequential real-agent sessions covered ordinary commands, trusted-gate denials, writes to protected hook settings and `YOKE_OFF=1` without a pause token.
+Both agents allowed ordinary commands, denied the marker command under the named gate, and denied all four attempted settings writes through self-protection.
+Protected settings and the trusted policy retained their initial SHA-256 values.
+An administrator independently queried the decision database read-only and confirmed all twelve expected session outcomes.
+
+The two directory-change attempts did not change the cwd reported in the hook payload.
+Their denials and stored session anchors therefore do not establish enforcement after a real cwd transition; that live acceptance criterion remains open.
+No extra agent sessions were added beyond the twelve-call budget.
+
+Detailed statusline output fit widths 60, 100 and 160, with observed line widths of 59/56, 100/56 and 100/56 terminal cells.
+The non-terminal watch printed one snapshot and exited; usage, project-scoped log and explicit all-project log also completed.
+These single CLI timings do not establish hook latency percentiles or a large-database performance target.
+
+The installed revision still repeats the Codex review warning after a no-op install (G-11), and partial transcript accounting remains visible (j4-3).
+The test also found unsafe release-acceptance isolation guidance: changing HOME alone does not isolate a shipped optimized executable (release-2, corrected in the working tree pending commit).
+Use a disposable operating-system account or container for shipped artifacts; debug and `honor-home-env` builds establish source rehearsal only.
+
 ## Field test 2026-10-16
 
 ### Environment
@@ -311,10 +334,10 @@ See [upgrade notes](upgrade-notes.md) for how to run it on purpose.
 ## Findings ledger
 
 One row per finding, sorted by status and then severity.
-It holds 152 rows: 83 from the first field test (79 journey findings and 4 observations from the first check of the fixed build) and 69 from the second wave.
-Of the 152, 116 are fixed, 11 are partly fixed, 23 are open and 2 are declined.
-Of the 23 open rows, 7 are P2 and 16 are P3; no P1 is open, and the remainder of j4-3 is partly fixed.
-Status is `fixed in <short sha>`, `partly fixed in <short sha>` with what remains in brackets, `open` or `declined`.
+It holds 153 rows: 83 from the first field test (79 journey findings and 4 observations from the first check of the fixed build), 69 from the second wave and one release-rehearsal finding from the current Linux field test.
+Of the 153, 133 are fixed, 9 are partly fixed, 9 are open and 2 are declined.
+Of the 17 open rows, 6 are P2 and 11 are P3; no P1 is open.
+Status is `fixed in <short sha>`, `partly fixed in <short sha>` with what remains in brackets, `open` or `declined`; `fixed in working tree` identifies independently verified work awaiting its commit hash.
 The first wave is carried by `250dd84`, `ca1cb8f` and `746cef9`.
 The second wave is carried by `6947257` (code), `a42a20e` (release and installer paths) and `0afac36` (documentation only).
 The ID prefix says where a row came from:
@@ -340,37 +363,33 @@ Several findings share a cause, such as the log scope (j1-2 and j3-memory-14), t
 | SEC-13 | P2 | Review | review sends the unredacted diff and untracked files to the other vendor | open | `crates/yoke-core/src/review/input.rs` |
 | G-8 | P2 | Layouts | after a project directory is renamed, trust is lost as designed but memory, plans and log stay under the old path, and no supported command moves them | open (documented in `docs/troubleshooting.md`) | `crates/yoke-core/src/store.rs` |
 | G-10 | P2 | Layouts | on Linux a project directory whose name is not UTF-8 makes the policy unavailable and denies every tool call, even in observe mode (reasoned from code, not reproduced) | open | `crates/yoke-core/src/trust.rs` |
-| out-3 | P2 | Docs | the uninstall guide saves decisions with `yoke log --limit 1000 --json`, which now exports only the current project | open | `docs/uninstalling.md` |
-| release-1 | P2 | CI | at `0afac36` the installer workflow never passes `YOKE_COMMIT`, so its source builds are not the commit under test, and one assertion in its interactive job cannot fail | open (a change that passes `YOKE_COMMIT`, checks the built version and fixes the assertion was in the working tree, uncommitted and not run, when this was written) | `.github/workflows/installer.yml` |
+| out-3 | P2 | Docs | the uninstall guide saves decisions with `yoke log --limit 1000 --json`, which now exports only the current project | fixed in working tree (guide uses `--all` and explains current-project scope; export and isolated uninstall evidence checked) | `docs/uninstalling.md` |
 | SEC-18 | P3 | Gates | on Codex a rewrite gate answers `allow` and skips Codex's approval prompt | open (documented in `docs/configuration.md`; a rewrite gate still does not require `match_tool` and `match_contains`) | `crates/yoke-core/src/wire.rs` |
-| SEC-20 | P3 | Repository | four tracked files embed a maintainer's account name and home path | open | `scripts/acceptance/lib.sh`, `docs/specs/`, `crates/yoke-cli/src/console/artifacts/impeccable.json` |
-| SEC-22 | P3 | Plans | `yoke plan approve` prints the header as one JSON string, and Unicode formatting characters could change what a person reads (terminal rendering not verified) | open | `crates/yoke-cli/src/workflow.rs` |
+| SEC-20 | P3 | Repository | four tracked files embed a maintainer's account name and home path | fixed in working tree (portable and relative paths; tracked-tree scan clean; six bypass tests passed) | `scripts/acceptance/lib.sh`, `docs/specs/`, `crates/yoke-cli/src/console/artifacts/impeccable.json` |
+| SEC-22 | P3 | Plans | `yoke plan approve` prints the header as one JSON string, and Unicode formatting characters could change what a person reads (terminal rendering not verified) | fixed in working tree (line-preserving escaped preview has focused coverage; human terminal acceptance remains unverified) | `crates/yoke-cli/src/workflow.rs` |
 | SEC-23 | P3 | Installer | the hook command is the executable path as found, with no check that the file or its directories are writable by others | open | `crates/yoke-cli/src/install.rs` |
-| SEC-26 | P3 | Usage | one crafted statusline input can pin a forged quota window until a human deletes the file | open | `crates/yoke-core/src/quota.rs` |
 | SEC-27 | P3 | Installer | installer and health robustness: the JSON re-render drops whitespace, the unchanged check runs before the write, the install lock has no liveness check, and `yoke health` can block on a FIFO | open | `crates/yoke-cli/src/install/` |
-| SEC-29 | P3 | Hardening | same-user races and stale state: a FIFO swap blocks Stop, the preset lock has no PID, memory markers can be confused, `share` has no file lock, the extension scan is unbounded | open | `crates/yoke-core/src/plan/files.rs`, `crates/yoke-core/src/memory.rs` |
-| G-7 | P3 | Plans | `yoke plan new` outside a repository, or in a bare one, says to make an initial commit, which cannot be followed there | open | `crates/yoke-core/src/plan.rs` |
-| G-11 | P3 | Guidance | every "trusted policy unavailable" denial ends with a storage hint, and a no-op Codex install repeats the hook review warning | open | `crates/yoke-cli/src/hook.rs`, `crates/yoke-cli/src/install.rs` |
-| S-4 | P3 | Scale | `yoke usage` reads every usage sample and samples are never pruned (about 0.6 s at 500 thousand) | open | `crates/yoke-core/src/usage.rs` |
-| S-5 | P3 | Scale | nothing runs `ANALYZE` or `PRAGMA optimize`, so the query planner has no statistics | open | `crates/yoke-core/src/store.rs` |
-| out-1 | P3 | CLI output | `yoke remember` and the `memory export` and `memory import` reports still print one JSON value, and `remember` includes epoch seconds | open | `crates/yoke-cli/src/memory.rs` |
-| out-2 | P3 | Plans | `yoke plan status` and `plan list` do not show the session a plan is bound to | open | `crates/yoke-cli/src/workflow.rs` |
-| out-4 | P3 | Installer | the installer's migration step `yoke log --limit 1` now depends on the project of the working directory | open | `install.sh` |
+| G-7 | P3 | Plans | `yoke plan new` outside a repository, or in a bare one, says to make an initial commit, which cannot be followed there | fixed in working tree (missing repository, empty repository and bare repository guidance distinguished; CLI regression passed) | `crates/yoke-cli/src/workflow.rs` |
+| G-11 | P3 | Guidance | every "trusted policy unavailable" denial ends with a storage hint, and a no-op Codex install repeats the hook review warning | partly fixed in working tree (policy guidance has focused proof; dedicated no-op warning assertion remains with installer owner) | `crates/yoke-cli/src/hook.rs`, `crates/yoke-cli/src/install.rs` |
+| out-1 | P3 | CLI output | `yoke remember` and the `memory export` and `memory import` reports still print one JSON value, and `remember` includes epoch seconds | fixed in working tree (readable defaults, local timestamps and explicit `--json`; focused tests and isolated CLI execution passed) | `crates/yoke-cli/src/memory.rs` |
+| out-2 | P3 | Plans | `yoke plan status` and `plan list` do not show the session a plan is bound to | fixed in working tree (text and JSON include bound sessions; list accepts `--json`; CLI regression passed) | `crates/yoke-cli/src/workflow.rs` |
+| out-4 | P3 | Installer | the installer's migration step `yoke log --limit 1` now depends on the project of the working directory | fixed in working tree (migration uses `log --all --limit 1`; installer regression passed) | `install.sh` |
 | anchor-1 | P3 | Notifications | a stale trusted nested policy makes the notification sync log an error line, because its lookup uses the project root | open | `crates/yoke-core/src/notifications.rs` |
-| health-1 | P3 | Notifications | notification links point at the `main` branch, so an installed binary links to documents that change later | open | `crates/yoke-core/src/notifications.rs` |
-| j4-3 | P1 | Usage | a transcript over 32 MiB made a whole session's usage disappear, with only an anonymous `error.log` line | partly fixed in ca1cb8f, 6947257 (usage import resumes from a stored byte offset and keeps the newest 32 MiB as the fallback; the `usage_partial` notification remains) | `crates/yoke-core/src/usage.rs` |
 | SEC-8 | P2 | Security | session-start memory injection was unlabeled, and an agent could plant and pin notes for any project | partly fixed in 6947257 (notes arrive in a fenced block labelled as untrusted data and pinning needs a person; the memory commands still resolve the project from the shell directory, and a per-item cap, a reserved budget for approved knowledge, `memory.inject = "trusted-only"` and an author column are not built) | `crates/yoke-core/src/memory.rs`, `crates/yoke-cli/src/memory.rs` |
 | SEC-10 | P2 | Release | release authenticity was a same-origin SHA-256, and the source fallback built an unpinned branch | partly fixed in a42a20e (source builds use one exact revision, named before it is built, and releases gain `SHA256SUMS` and build provenance; the installer and the updater do not verify provenance, there is no detached signature, and the workflow has not run on a real release) | `install.sh`, `.github/workflows/release.yml` |
 | SEC-14 | P2 | Security | gates and approved plan checks run project code outside the agent's sandbox, and approval freezes the command text, not the code | partly fixed in 0afac36 (the Security model section says so; check inputs are not hashed into the approval, and gate processes have no resource limits or environment allow-list) | `docs/workflows.md`, `crates/yoke-core/src/engine.rs` |
 | C13 | P2 | State | a zero-byte `state.db` silently became a fresh install, so trust was gone and enforcement was off | partly fixed in 6947257 (a loud warning on stderr and in `error.log`; failing closed was declined, see D2) | `crates/yoke-core/src/store.rs` |
 | SEC-16 | P3 | Hooks | a very large tool input overflows the environment of a check gate | partly fixed in 6947257 (the denial says the input is too large for a check gate instead of an unexplained errno; the input still travels in the environment and payloads over 1 MiB are still denied in enforce mode) | `crates/yoke-core/src/engine.rs` |
+| SEC-29 | P3 | Hardening | same-user races and stale state: FIFO opens, preset lock ownership, ambiguous memory markers, unlocked sharing and unbounded extension scans | fixed in working tree (locks, unambiguous entries and bounded extension reads verified; corrected FIFO/swap test passed with a checked child count, nonblocking hash descriptors and regular-file validation; earlier zero-test result withdrawn) | `crates/yoke-core/src/plan/files.rs`, `crates/yoke-core/src/memory.rs` |
 | SEC-17 | P3 | Security | relative `PATH` entries and the Git, agent and shell commands resolve against the agent's directory | partly fixed in 6947257 (gate command lookup uses the policy directory; there is still no shared Git constructor with `core.fsmonitor` off, scrubbed `GIT_*` variables and absolute paths for `claude`, `codex` and `sh`) | `crates/yoke-core/src/plan/files.rs`, `crates/yoke-core/src/review.rs` |
-| SEC-19 | P3 | Updates | the daily release check has no opt-out, and the updater launched the `curl` found on `PATH` | partly fixed in 6947257 (fixed `curl` path, TLS 1.2 and a smoke test before the rename; there is no `update.check = false` opt-out) | `crates/yoke-cli/src/update.rs`, `crates/yoke-cli/src/update/transport.rs` |
+| SEC-19 | P3 | Updates | the daily release check has no opt-out, and the updater launched the `curl` found on `PATH` | fixed in working tree (prior transport fixes retained; trusted `update.check = false` suppresses scheduling and child launch, defaults on and merges explicitly; focused proof checked) | `crates/yoke-core/src/config.rs`, `crates/yoke-cli/src/hook.rs` |
 | SEC-24 | P3 | Installer | the receipt and backups keep full copies of the agent settings, which can hold tokens, are never pruned and survive uninstall | partly fixed in 6947257 (backup directories are 0700; the copies, retention and unredacted `--dry-run` context remain) | `crates/yoke-cli/src/install/files.rs` |
 | SEC-28 | P3 | Release | the release workflow used floating tools, `tags: ['*']` and no protected environment | partly fixed in a42a20e (tag filter, pinned toolchain and `cargo-deny`, deny in its own job, a green-CI gate, a protected `release` environment and reproducible archives; there is no scheduled advisory run or dependency-update automation, `ci.yml` still uses floating stable, and none of it has run) | `.github/workflows/release.yml` |
-| S-3 | P3 | Scale | the first runs after an upgrade needed 124 notification syncs to read 500 thousand old decisions | partly fixed in 6947257 (13 runs of `yoke notifications`; hooks read a window of 2,000 ids, about 250 session starts) | `crates/yoke-core/src/notifications.rs` |
+| S-3 | P3 | Scale | the first runs after an upgrade needed 124 notification syncs to read 500 thousand old decisions | fixed in working tree (bounded hooks queue one durable drain; windows skip deleted ids; focused queue/gap tests passed and an exact-count 20,000-row job drained in 261 ms; 700 MB performance remains unverified) | `crates/yoke-core/src/notifications.rs` |
 | SEC-21 | P3 | Hooks | a hook killed with SIGKILL leaves a running gate command behind | declined (see the failure-mode decisions below, D5) | `crates/yoke-core/src/review/process.rs` |
 | after-fix-2 | note | Usage | `yoke usage` showed only a weekly Codex window | declined: not a defect, Codex reported only a 7-day window on that plan | none |
+| release-2 | P1 | Acceptance | install and update rehearsal instructions treated a temporary HOME as isolation for a shipped optimized executable, which can reach real state | fixed in working tree (disposable account or container required; current acceptance summaries mark a safe rerun pending; account and container execution remain unrun) | `docs/release-acceptance.md` |
+| j4-3 | P1 | Usage | a transcript over 32 MiB made a whole session's usage disappear, with only an anonymous error-log line | fixed in working tree (incremental accounting retained; per-session `usage_partial` notifications and the `yoke usage` recovery action verified; skipped older bytes still under-report as documented) | `crates/yoke-core/src/usage.rs`, `crates/yoke-core/src/notifications.rs`, `crates/yoke-cli/src/notifications.rs` |
 | j3-memory-1 | P1 | Memory | `recall --explain` said session start injects notes, but observe mode injects nothing | fixed in ca1cb8f | `crates/yoke-cli/src/memory.rs` |
 | j3-memory-2 | P1 | Memory | `forget`, `memory pin` and `share` took a global id and acted on other projects | fixed in ca1cb8f | `crates/yoke-core/src/memory.rs` |
 | j3-memory-5 | P1 | Redaction | credentials inside URLs and multi-word values were stored in plain text | fixed in 250dd84 | `crates/yoke-core/src/redact.rs` |
@@ -385,6 +404,7 @@ Several findings share a cause, such as the log scope (j1-2 and j3-memory-14), t
 | G-1 | P1 | Layouts | a nested untrusted `yoke.toml` replaced a trusted project's gates for every hook below it (same cause as SEC-1) | fixed in 6947257 (the nearest trusted project wins and the ignored file is listed) | `crates/yoke-core/src/trust.rs` |
 | G-2 | P1 | Layouts | a linked Git worktree ran with no gates because its copy of `yoke.toml` starts untrusted | fixed in 6947257 (the policy trusted for the main repository applies until the worktree's own file is trusted; the trust-model extension needs the owner's confirmation) | `crates/yoke-core/src/trust.rs` |
 | G-4 | P1 | Layouts | a payload directory that no longer existed denied every tool call, even in observe mode | fixed in 6947257 (the hook uses the directory it runs in) | `crates/yoke-cli/src/hook.rs` |
+| release-1 | P2 | CI | the installer workflow did not build its tested revision, and its interactive statusline assertion could not fail | fixed in 85cad17 (passes `YOKE_COMMIT` and checks the installed build; all 11 jobs passed in [Installer run 39052847800](https://github.com/mrx-arafat/yoke/actions/runs/39052847800) at d5d4ed5) | `.github/workflows/installer.yml` |
 | j1-2 | P2 | CLI output | `yoke log` lists every project by default while other status commands are project-scoped; agent, tool and project columns were added | fixed in 6947257 (`yoke log` lists the current project, `--all` lists every project, and the table has a session column) | `crates/yoke-cli/src/log_cmd.rs` |
 | j1-7 | P2 | Notifications | the notification `doc` field is a repo-relative path that does not exist on an installed machine | fixed in 6947257 (full URLs in the notification `doc` field; the next step for a configuration waiting for trust is `yoke trust`) | `crates/yoke-core/src/notifications.rs`, `crates/yoke-cli/src/notifications.rs` |
 | j4-5 | P2 | Notifications | same cause as j1-7, seen again in the usage journey | fixed in 6947257 (same cause as j1-7) | `crates/yoke-core/src/notifications.rs`, `crates/yoke-cli/src/notifications.rs` |
@@ -439,6 +459,10 @@ Several findings share a cause, such as the log scope (j1-2 and j3-memory-14), t
 | after-fix-3 | P3 | Usage | Codex reports `plan_type` and a credits balance; `plan_type` is only in `yoke usage --json` and the balance is not read | fixed in 6947257 (the plan shows in the quota table; the Codex credits balance is declined because it is a billing figure, not a rate-limit window) | `crates/yoke-core/src/quota.rs`, `crates/yoke-cli/src/usage_cmd.rs` |
 | after-fix-4 | P3 | Usage | the compact `quota[n]{...}` table reads better for scripts than for people | fixed in 6947257 (the quota block is an aligned table; the structured records stay in `--json`) | `crates/yoke-cli/src/usage_cmd.rs` |
 | j4-9 | P3 | Statusline | nothing pointed a new user at the statusline, and it cannot show notifications | fixed in ca1cb8f, 746cef9, 6947257 (the session-start hook syncs notifications and the statusline shows `! N unread`; the installer step is after-fix-1) | `crates/yoke-cli/src/health.rs`, `crates/yoke-cli/src/statusline.rs` |
+| SEC-26 | P3 | Usage | one crafted statusline input could pin a forged quota window indefinitely | fixed in working tree (reset bounded by converted observation time plus window and five-minute slack; parsing and persistence regressions pass) | `crates/yoke-core/src/quota.rs` |
+| S-4 | P3 | Scale | the default usage view scanned all usage samples | fixed in working tree (exact session/model/day summaries with indexed boundary reads; independently measured on a database under 50 MB; raw samples retained) | `crates/yoke-core/src/usage.rs`, `crates/yoke-core/src/store/015-usage-summaries.sql` |
+| S-5 | P3 | Scale | the query planner had no maintained statistics | fixed in working tree (bounded `PRAGMA optimize` with analysis limit 400 during upgrades only; query plans measured) | `crates/yoke-core/src/store.rs` |
+| health-1 | P3 | Notifications | notification links followed `main` even for released builds | fixed in working tree (matching tag-build metadata pins the version; local/manual builds keep the main fallback; tagged artifact execution remains unverified) | `crates/yoke-core/src/notifications.rs` |
 | j1-3 | P3 | CLI output | timestamps were raw Unix seconds in the human tables | fixed in ca1cb8f, 6947257 (`yoke recall` shows local time and the plan commands print text; `remember` and the memory export and import reports remain, see out-1) | `crates/yoke-core/src/timefmt.rs` |
 | j1-8 | P3 | CLI output | `yoke log` filters matched exactly and failed silently | fixed in ca1cb8f | `crates/yoke-cli/src/log_cmd.rs` |
 | j1-9 | P3 | Guidance | health and config listed policy files that do not exist as things to trust | fixed in ca1cb8f | `crates/yoke-core/src/trust.rs` |
@@ -492,7 +516,8 @@ Declined parts of otherwise fixed findings:
 
 - j3-memory-11: `yoke remember` gives no notice for identical text.
   Identical notes are harmless and deduplication needs a policy decision.
-- j3-memory-13: the epoch in `.yoke/knowledge.md` stays, because `forget` finds the entry by its exact text and a new format would orphan older entries.
+- j3-memory-13: the epoch in `.yoke/knowledge.md` stays.
+  The hardened entry format indents note content and recognizes complete legacy entries so existing shared notes are not orphaned.
 - j3-memory-2: ids are still table row ids and can be reused after a delete.
   Project scoping removes the cross-project hazard, and a stable id needs a schema migration.
 - j7-extensions-codex-6: `payload` stays a string in `--json`; the new `payload_truncated` field marks the cut rows.
@@ -510,7 +535,16 @@ Declined parts of otherwise fixed findings:
 
 Everything below is open, partly fixed, declined or waiting for a person.
 Each item names its row in the [findings ledger](#findings-ledger); this section groups them and adds what a row cannot hold.
-No P1 is open, apart from the remainder of j4-3.
+No P1 is open.
+
+### Release blockers, in priority order
+
+1. Close the forged-event and review-data security findings SEC-7, SEC-12 and SEC-13 with independently reproduced evidence.
+2. Restore green CI on the current commit; the Ubuntu statusline test failed at `d5d4ed5`, while the Installer matrix passed all 11 jobs.
+3. Verify the remaining P2 fixes, cross-package integration, migration compatibility and the installed build with real agents.
+4. Complete the human-only release gates, observe-day and enforce-week trials, repository settings and console acceptance.
+
+The six active packages and their follow-ons are work in progress, not evidence that these blockers are closed.
 
 ### P2, open
 
@@ -520,15 +554,10 @@ No P1 is open, apart from the remainder of j4-3.
   Until then, recreating the old directory reads the records back.
 - G-10: treat a project path that is not UTF-8 as "project scope unavailable" with a visible message, instead of denying every tool call.
   It needs a Linux test environment.
-- out-3: the export command in the "keep your data" step of `docs/uninstalling.md` must become `yoke log --all --limit 1000 --json`, and the paragraph after it must say that without `--all` only the current project is saved.
-  As written, a person who follows the guide saves a fraction of the history before the files are removed.
-- release-1: pass `YOKE_COMMIT` to the source builds of the installer workflow (the root job, the sudo-user job and the terminal job), and replace the `! grep -F ...` line in its interactive job with `if grep ...; then exit 1; fi`, because `bash` ignores a failing `!` command under `errexit` and the assertion can never fail.
-  A change that does both was in the working tree and uncommitted when this was written; commit it, run the Installer workflow, and then mark the row fixed.
 
 ### Partly fixed, with what remains
 
-- j4-3: raise a `usage_partial` notification per partly counted session (`usage::partial_imports` already returns them).
-  Usage in the older part of a single read over 32 MiB stays uncounted.
+- G-11: policy refusals now have relevant guidance; the installer still needs a dedicated assertion that a no-op does not repeat the Codex review warning.
 - SEC-8: bind `remember`, `memory pin`, `forget`, `import` and `export` to the session's project, which needs a verified session id in an agent shell; cap each injected item; reserve part of the injection budget for approved knowledge; offer `memory.inject = "trusted-only"`; and record an author per memory.
   Pins that an agent made before the fix cannot be told apart, so the [upgrade notes](upgrade-notes.md) ask people to review their pins.
 - SEC-10: decide whether the installer and the updater verify build provenance or leave it a documented manual step, add a detached signature, and run the release workflow once to prove the attestation, the `release` environment and the gate.
@@ -537,47 +566,32 @@ No P1 is open, apart from the remainder of j4-3.
 - SEC-16: deliver a large tool input to a check gate on stdin, or truncate it with a marker.
   Delivery on stdin was declined (see D4 below).
 - SEC-17: one shared Git constructor with an absolute path, `-c core.fsmonitor=false`, `-c core.hooksPath=/dev/null`, `--no-optional-locks` and scrubbed `GIT_*` variables, and absolute paths for `claude`, `codex` and `sh`.
-- SEC-19: an `update.check = false` setting in the trusted configuration for the daily release check.
 - SEC-24: keep only Yoke's own groups and a hash in the install receipt, add backup retention and a warning in `docs/uninstalling.md`, and print only Yoke's hunks in `--dry-run`.
 - SEC-28: a weekly `cargo deny check advisories` workflow, dependency-update automation, and a pinned toolchain in `ci.yml`.
   The first two are a maintainer's policy choice.
 - C13: a zero-byte `state.db` still falls back to defaults with a loud warning (see D2 below).
-- S-3: draining 500 thousand old decisions through hooks alone takes about 250 session starts; run `yoke notifications` to catch up faster.
 
 ### P3, open
 
 - SEC-18: require `match_tool` and `match_contains` on a Codex rewrite gate, or keep the documentation.
-- SEC-20: scrub the maintainer's account name and home path from four tracked files, and drop the literal from the guard line in `scripts/acceptance/lib.sh`.
-- SEC-22: print the `yoke plan approve` header line by line, escape every non-ASCII-printable character and print a count of them, as `yoke trust` does.
 - SEC-23: canonicalize the executable at install, require a regular executable, and warn about writable ancestors and `/target/` paths, in `yoke install`, `yoke health` and `install.sh`.
-- SEC-26: bound a quota window's `resets_at` to `observed_at + window + slack`.
 - SEC-27: keep whitespace when the installer re-renders JSON, check for a concurrent save after the write instead of before it, give the install lock a liveness check, and open project-controlled settings files without blocking.
-- SEC-29: open listed files with `O_NONBLOCK`, put a PID in the preset lock, make memory markers unambiguous, lock `share`, and cap the extension scan before it collects entries.
-- G-7: a separate `plan new` message for a directory that is not a Git repository, such as "run `git init` and make an initial commit first".
-- G-11: append the storage hint only to storage errors, and print the Codex review warning only when an install changed a Codex hook.
-- S-4: prune or summarize usage samples, or index them, so that `yoke usage` stops growing linearly.
-- S-5: decide whether to run `ANALYZE` or `PRAGMA optimize`.
-- out-1: text output with `--json` for `yoke remember` and the memory export and import reports.
-- out-2: show the bound session in `yoke plan status` and `yoke plan list`.
-- out-4: run the installer's migration step with `yoke log --all --limit 1`, so that it does not depend on the working directory.
 - anchor-1: derive the trust lookup root for a project file from the file's path, or look the row up by scope and file, so that a stale trusted nested policy raises a notification instead of an error.
-- health-1: pin notification links to the release tag once releases exist.
-- j3-memory-3 (remainder): forgetting a shared note in the console leaves its entry in `.yoke/knowledge.md`; the console should say so.
-- `yoke health` does not report `~/.yoke` or `state.db` with group or other permission bits (SEC-5), and `yoke trust` does not write the last known mode record, so a project switched to enforce reads as observe until the next hook runs.
 - Test fixtures that hid `curl` by restricting `PATH` now reach the real `curl`, so their background update check can call the network.
   Setting `YOKE_CURL` to a stub in those fixtures removes it.
 - The long soak scenario for oversized transcripts expected an ingestion warning that the incremental importer no longer raises; the failure-mode pass saw it fail and nothing here records a rerun.
-- `schedule_update` does not pass the home the hook chose to its child, as `spawn_worker` now does.
 
 ### Not verified live
 
 These rest on tests, isolated debug builds, reading code or documentation, not on a real agent session.
 
-- Wave-2 behaviour with real agents: the session anchor, the guard on hook registration files, the `yoke pause` token, and whether a settings file's `env` block reaches hooks and is reloaded in a running session (SEC-2).
-  The live enforcement check above ran before these changes.
+- The session anchor after an actual change to hook payload cwd, the human `yoke pause` token flow, and whether a settings file's `env` block reaches hooks and is reloaded in a running session (SEC-2).
+  The current Linux field test confirmed protected-settings denials and that `YOKE_OFF=1` without a token does not disable enforcement, but did not exercise those remaining cases.
 - The statusline styles in a real Claude Code session: colors, the terminal width, and a second line.
-- `yoke watch` in a terminal emulator and on Linux.
-  It was driven through a pseudo-terminal on macOS only.
+- The escaped plan approval preview and shared-note console disclosure in human interaction.
+  Focused source/action tests cover the changes; no browser or human approval was run in this wave.
+- `yoke watch` in a Linux terminal emulator.
+  A non-terminal Linux snapshot passed; the interactive view was driven through a pseudo-terminal on macOS only.
 - Linux behaviour of the failure-mode pass: the environment size limit for a gate, a full ext4 disk, and the file modes of private state.
 - `yoke pause` end to end, and the human-only plan commands `approve`, `resume`, `cancel` and `reassign`: they refuse agent processes, so only their parts and renderers have tests.
 - The release-profile behaviour of `honor-home-env`: it is tested through its decision function, not by running an optimized binary.

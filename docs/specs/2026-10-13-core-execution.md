@@ -9,7 +9,7 @@ This is an execution tracker, not a claim that 0.2 acceptance has passed.
 
 ## Shared constraints
 
-All workers share `/Users/easinarafat/AI/yoke` and the current branch.
+All workers share the repository root and the current branch.
 The latest user request authorizes the orchestrator to commit and push this version on the current branch after checks pass.
 Workers must not write Git state.
 Branch changes, live installation, binary replacement, tagging, and release publication remain outside this authorization.
