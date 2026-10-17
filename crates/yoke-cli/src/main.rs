@@ -1,3 +1,4 @@
+mod bypass;
 mod commands;
 mod console;
 mod diff;
@@ -11,11 +12,13 @@ mod memory;
 mod notifications;
 mod presets;
 mod preview;
+mod retention;
 mod starter;
 mod statusline;
 mod trial;
 mod update;
 mod usage_cmd;
+mod watch;
 mod workflow;
 
 use std::io::IsTerminal;
@@ -61,6 +64,20 @@ enum Cmd {
         /// Existing statusline command to run; its output follows Yoke's line.
         #[arg(long)]
         wrap: Option<String>,
+        /// How much to show: one line, or a second line with the model and last event.
+        #[arg(long, value_enum, default_value_t)]
+        style: statusline::Style,
+        /// Internal: refresh the cached git count for this directory, then exit.
+        #[arg(
+            long,
+            hide = true,
+            value_name = "DIR",
+            conflicts_with = "refresh_health"
+        )]
+        refresh_git: Option<std::path::PathBuf>,
+        /// Internal: refresh the cached health problem for this directory, then exit.
+        #[arg(long, hide = true, value_name = "DIR")]
+        refresh_health: Option<std::path::PathBuf>,
     },
     /// Create, approve and execute plans with persisted evidence.
     Plan {
@@ -135,7 +152,7 @@ enum Cmd {
         #[command(subcommand)]
         command: presets::PresetCommand,
     },
-    /// Write a starter yoke.toml without replacing an existing file.
+    /// Write a starter yoke.toml at the project root without replacing an existing file.
     Init,
     /// List effective, trusted gates in this project.
     Gates,
@@ -159,12 +176,15 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Show newest decisions with optional exact-match filters.
+    /// Show the newest decisions of this project, or of every project with --all; optional exact-match filters.
     Log {
         /// Only decisions for the project that contains this path; a path outside any project matches as written.
         #[arg(long)]
         project: Option<String>,
-        /// Only decisions from this session id.
+        /// Show decisions from every project instead of the current one.
+        #[arg(long, conflicts_with = "project")]
+        all: bool,
+        /// Only decisions from this session id; searched in every project unless --project is given.
         #[arg(long)]
         session: Option<String>,
         /// Only decisions with this outcome: allow, deny, would_deny, rewrite or error.
@@ -199,6 +219,9 @@ enum Cmd {
         /// Install the Claude statusline only when none is set; keep any other command.
         #[arg(long, conflicts_with = "statusline")]
         statusline_if_absent: bool,
+        /// With --statusline or --statusline-if-absent: compact is one line, detailed adds a second.
+        #[arg(long, value_enum)]
+        style: Option<statusline::Style>,
     },
     /// Remove only hooks managed by Yoke.
     Uninstall {
@@ -257,14 +280,24 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Live read-only view of this project's decisions, quota, plans and health; q quits. Without a terminal it prints one snapshot.
+    Watch,
+    /// Show the token that lets you start an agent with Yoke's hooks skipped, or pause every hook for a limited time. Human-only.
+    Pause {
+        /// Skip every hook for this long, for example 30m or 2h (at most 24h).
+        #[arg(long = "for", value_name = "DURATION", conflicts_with = "clear")]
+        duration: Option<String>,
+        /// End a pause early.
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
-    // This escape hatch must not read stdin, discover config or touch the database.
-    if args.get(1).is_some_and(|arg| arg == "run-hook")
-        && std::env::var_os("YOKE_OFF").is_some_and(|value| value == "1")
-    {
+    // The bypass must not read stdin, discover config or touch the database. Only the per-install
+    // token or a pause set by a human skips the hook; YOKE_OFF=1 and similar values are refused.
+    if args.get(1).is_some_and(|arg| arg == "run-hook") && bypass::skips_hook() {
         return;
     }
     if args.len() == 2 && matches!(args[1].to_str(), Some("-v" | "-V" | "--version")) {
@@ -290,6 +323,8 @@ fn main() {
     let result = match cli.cmd {
         // Reads recorded state only: no trusted project configuration is needed or loaded.
         Some(Cmd::Usage { limit, json }) => usage_cmd::run(json, limit),
+        // Opens existing state read-only and keeps running without it, like `yoke usage`.
+        Some(Cmd::Watch) => watch::run(),
         command => commands::run(command),
     };
     if let Err(error) = result {

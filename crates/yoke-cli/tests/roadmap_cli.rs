@@ -17,6 +17,16 @@ fn run_with_path(
     path: Option<&Path>,
 ) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_yoke"));
+    // A person at a shell: pinning and importing refuse an agent's tool process, and this run
+    // may itself have been started by one.
+    for marker in [
+        "CLAUDECODE",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+    ] {
+        command.env_remove(marker);
+    }
     command
         .args(args)
         .env("HOME", home)
@@ -76,6 +86,8 @@ fn memory_transfer_preserves_identity_and_fresh_home_dry_run_writes_nothing() {
         archive.to_str().unwrap(),
         "--map",
         &mapping,
+        // Restoring one's own export keeps its pin; an import drops pins by default.
+        "--keep-pins",
     ];
     let mut dry_args = args.to_vec();
     dry_args.push("--dry-run");
@@ -136,20 +148,60 @@ fn memory_transfer_preserves_identity_and_fresh_home_dry_run_writes_nothing() {
     }
 }
 
+/// Run `yoke statusline` as a person's shell would, with colors off and a fixed width so the
+/// line does not depend on the developer's terminal.
+fn statusline(home: &Path, cwd: &Path, args: &[&str], input: &[u8]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_yoke"));
+    command
+        .arg("statusline")
+        .args(args)
+        .env("HOME", home)
+        .env("NO_COLOR", "1")
+        .env("YOKE_STATUSLINE_WIDTH", "200")
+        .env_remove("YOKE_ASCII")
+        .env_remove("COLUMNS")
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// Every file and directory below `dir`, as paths relative to it.
+fn entries_under(dir: &Path) -> Vec<String> {
+    fn walk(dir: &Path, base: &Path, found: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            found.push(path.strip_prefix(base).unwrap().display().to_string());
+            if path.is_dir() {
+                walk(&path, base, found);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(dir, dir, &mut found);
+    found.sort();
+    found
+}
+
 #[test]
 fn statusline_fresh_home_and_wrapper_are_read_only() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
+    let work = temp.path().join("work");
     fs::create_dir(&home).unwrap();
+    fs::create_dir(&work).unwrap();
     let input = br#"{"context_window":{"used_percentage":42}}"#;
     // The wrapper has a fixed 250 ms budget that a loaded host can miss once; a wrapper that
     // really cannot finish fails every attempt.
-    let mut output = run(&home, temp.path(), &["statusline", "--wrap", "cat"], input);
+    let mut output = statusline(&home, &work, &["--wrap", "cat"], input);
     for _ in 0..9 {
         if output.status.success() {
             break;
         }
-        output = run(&home, temp.path(), &["statusline", "--wrap", "cat"], input);
+        output = statusline(&home, &work, &["--wrap", "cat"], input);
     }
     assert!(
         output.status.success(),
@@ -159,11 +211,65 @@ fn statusline_fresh_home_and_wrapper_are_read_only() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         format!(
-            "yoke (no data yet) | ctx 42% | {}\n",
+            "yoke (no data yet) | ctx 42% \u{2588}\u{2588}\u{2588}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591} | {}\n",
             String::from_utf8_lossy(input)
         )
     );
-    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+    assert_eq!(entries_under(&home), Vec::<String>::new());
+
+    // A git repository in the callback adds the branch, and still creates nothing: the count of
+    // changed files is cached only where `~/.yoke` already exists, and no helper starts without it.
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let callback = serde_json::json!({
+        "session_id": "fresh",
+        "workspace": {"current_dir": repo},
+        "cost": {"total_cost_usd": 0.5, "total_duration_ms": 120_000},
+    });
+    let output = statusline(&home, &work, &[], callback.to_string().as_bytes());
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "yoke (no data yet) | main | $0.50 \u{b7} 2m\n"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(entries_under(&home), Vec::<String>::new());
+}
+
+#[test]
+fn statusline_helpers_write_only_inside_an_existing_state_directory() {
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(home.join(".yoke")).unwrap();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let callback = serde_json::json!({"workspace": {"current_dir": repo}}).to_string();
+
+    // The first paint answers at once with the branch alone and starts the detached count.
+    let output = statusline(&home, &repo, &[], callback.as_bytes());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "yoke (no data yet) | main\n"
+    );
+    // The paint notes that a count was started; the helper's own result adds a `state`.
+    let cache = home.join(".yoke/statusline-git.json");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !fs::read_to_string(&cache).is_ok_and(|text| text.contains("\"state\"")) {
+        assert!(
+            Instant::now() < deadline,
+            "the helper never wrote its result"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Only the cache appeared, and only inside the state directory: no state database, no
+    // quota file, nothing else under the home.
+    assert_eq!(
+        entries_under(&home),
+        [".yoke".to_owned(), ".yoke/statusline-git.json".to_owned()]
+    );
 }
 
 #[test]
@@ -288,7 +394,13 @@ fn stop_schedules_bounded_digest_with_off_and_debounces_repeat() {
     }
     loop {
         let jobs = json(run(&home, &project, &["jobs", "--all", "--json"], b""));
-        let jobs = jobs.as_array().unwrap();
+        // Session start also queues the hourly retention job; this test is about the digest.
+        let jobs: Vec<_> = jobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|job| job["kind"] == "memory_digest")
+            .collect();
         assert_eq!(jobs.len(), 1, "one deduplicated digest job");
         if jobs[0]["state"] == "succeeded" {
             assert_eq!(jobs[0]["kind"], "memory_digest");
@@ -392,7 +504,14 @@ fn plan_cli_records_session_waits_for_human_and_completes_real_check() {
     let started = json(run(
         &home,
         &project,
-        &["plan", "start", "fixture", "--session", "plan-fixture"],
+        &[
+            "plan",
+            "start",
+            "fixture",
+            "--session",
+            "plan-fixture",
+            "--json",
+        ],
         b"",
     ));
     assert_eq!(started["state"], "building");
@@ -405,6 +524,7 @@ fn plan_cli_records_session_waits_for_human_and_completes_real_check() {
             "Which behavior?",
             "--session",
             "plan-fixture",
+            "--json",
         ],
         b"",
     ));
@@ -514,7 +634,7 @@ fn plan_cli_records_session_waits_for_human_and_completes_real_check() {
     let checked = json(run(
         &home,
         &project,
-        &["plan", "check", "fixture", "--agent", "codex"],
+        &["plan", "check", "fixture", "--agent", "codex", "--json"],
         b"",
     ));
     assert_eq!(checked["passed"], true);
@@ -618,11 +738,26 @@ fn plan_commands_explain_a_missing_first_commit_and_observe_mode() {
         b"",
     );
     assert!(started.status.success());
+    // The default view is text with the next step; the observe note stays on stderr.
+    let text = String::from_utf8_lossy(&started.stdout);
     assert!(
-        serde_json::from_slice::<Value>(&started.stdout).is_ok(),
-        "stdout stays one JSON value"
+        text.starts_with("plan: \"fixture\"\nstate: building\nsession: \"observed\"\nfile: "),
+        "{text}"
     );
+    assert!(text.contains("yoke plan check fixture --agent"), "{text}");
     assert!(String::from_utf8_lossy(&started.stderr).contains("mode is observe"));
+    let checked = run(
+        &home,
+        &project,
+        &["plan", "check", "fixture", "--agent", "codex"],
+        b"",
+    );
+    let text = String::from_utf8_lossy(&checked.stdout);
+    assert!(checked.status.success(), "{text}");
+    assert!(
+        text.starts_with("plan: \"fixture\"\nstate: done\nresult: pass\nchecks[1]{name,result,blocking,ms,detail}:\n  \"diff\",pass,true,"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -749,13 +884,15 @@ fn plan_cli_validates_tracks_tasks_and_keeps_human_actions_human() {
         br#"{"session_id":"tasks","tool_name":"Bash","tool_input":{"command":"true"}}"#,
     );
     assert!(hook.status.success());
-    json(run(
+    assert!(run(
         &home,
         &project,
         &["plan", "start", "fixture", "--session", "tasks"],
         b"",
-    ));
-    let done = json(run(
+    )
+    .status
+    .success());
+    let done = run(
         &home,
         &project,
         &[
@@ -768,8 +905,30 @@ fn plan_cli_validates_tracks_tasks_and_keeps_human_actions_human() {
             "built",
         ],
         b"",
+    );
+    let text = String::from_utf8_lossy(&done.stdout);
+    assert!(done.status.success(), "{text}");
+    assert!(
+        text.starts_with("plan: \"fixture\"\ntask: \"build\"\nstate: done\n")
+            && text.contains("by: agent\nevidence: \"built\"\n"),
+        "{text}"
+    );
+    let full = json(run(
+        &home,
+        &project,
+        &[
+            "plan",
+            "task",
+            "done",
+            "fixture",
+            "build",
+            "--evidence",
+            "built",
+            "--json",
+        ],
+        b"",
     ));
-    assert_eq!(done["state"], "done");
+    assert_eq!(full["state"], "done");
     for args in [
         &["plan", "task", "done", "fixture", "signoff"][..],
         &[

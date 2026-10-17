@@ -347,7 +347,11 @@ fn help_search_matches_topics_and_every_topic_has_a_troubleshooting_section() {
         })
         .collect();
     for topic in HELP {
-        let anchor = topic.doc.strip_prefix("docs/troubleshooting.md#").unwrap();
+        // An installed machine has no docs/ directory, so the link must be openable as it is.
+        let anchor = topic
+            .doc
+            .strip_prefix("https://github.com/mrx-arafat/yoke/blob/main/docs/troubleshooting.md#")
+            .unwrap_or_else(|| panic!("{} is not a full URL", topic.doc));
         assert!(anchors.iter().any(|a| a == anchor), "missing {anchor}");
     }
     for kind in [
@@ -419,7 +423,7 @@ fn large_backlog_drains_in_bounded_calls_with_one_shot_results_and_rowid_ranges(
 
     let (_one_dir, one_shot) = store();
     fill(&one_shot);
-    assert!(!sync_bounded(&one_shot, &config, now, i64::MAX, Duration::MAX).unwrap());
+    assert!(!sync_bounded(&one_shot, &config, now, i64::MAX, Duration::MAX, PAUSE).unwrap());
 
     let (_dir, batched) = store();
     fill(&batched);
@@ -428,7 +432,7 @@ fn large_backlog_drains_in_bounded_calls_with_one_shot_results_and_rowid_ranges(
     // the bound deterministically; wall-clock assertions would flake on a loaded machine.
     loop {
         calls += 1;
-        let pending = sync_bounded(&batched, &config, now, 1_000, Duration::ZERO).unwrap();
+        let pending = sync_bounded(&batched, &config, now, 1_000, Duration::ZERO, PAUSE).unwrap();
         if !pending {
             break;
         }
@@ -454,7 +458,12 @@ fn large_backlog_drains_in_bounded_calls_with_one_shot_results_and_rowid_ranges(
             .unwrap();
         let searches: Vec<_> = details
             .iter()
-            .filter(|d| !d.contains("B-TREE") && !d.contains("SUBQUERY"))
+            .filter(|d| {
+                !d.contains("B-TREE")
+                    && !d.contains("SUBQUERY")
+                    && !d.contains("CO-ROUTINE")
+                    && !d.starts_with("SCAN")
+            })
             .collect();
         assert!(
             !searches.is_empty()
@@ -508,7 +517,8 @@ fn a_writer_with_no_busy_timeout_gets_the_lock_between_windows() {
     let config = loaded("/work/p0", Vec::new());
     let mut calls = 0;
     loop {
-        let pending = sync_bounded(&store, &config, 1_030_000, 1_000, Duration::ZERO).unwrap();
+        let pending =
+            sync_bounded(&store, &config, 1_030_000, 1_000, Duration::ZERO, PAUSE).unwrap();
         calls += 1;
         window.send(calls).unwrap();
         assert_eq!(
@@ -532,7 +542,7 @@ fn back_to_back_drains_never_starve_a_hook_waiting_for_the_lock() {
         .connection()
         .execute_batch(
             "INSERT INTO sessions(id,agent,project,started_at) VALUES('s','codex','/work/p0',0);
-             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<60000)
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<240000)
              INSERT INTO decisions(ts,session_id,agent,project,event,tool,mode,outcome,reason,gates,payload)
              SELECT 1000000+i,'s','codex','/work/p0','pre_tool_use','Bash','enforce',
                     CASE WHEN i%2 THEN 'error' ELSE 'allow' END,'disk full','[]','{}' FROM n;",

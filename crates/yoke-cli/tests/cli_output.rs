@@ -137,15 +137,15 @@ fn a_closed_output_pipe_ends_the_command_quietly() {
 #[test]
 fn log_rows_name_agent_tool_and_command_in_local_time_and_json_flags_cut_payloads() {
     let home = seeded_home();
-    let all = text(&yoke(home.path(), home.path(), &["log"]));
+    let all = text(&yoke(home.path(), home.path(), &["log", "--all"]));
     assert!(
-        all.starts_with("decisions[3]{time,agent,project,event,tool,outcome,gate,detail}:\n"),
+        all.starts_with("project: all\ndecisions[3]{time,agent,session,project,event,tool,outcome,gate,detail}:\n"),
         "{all}"
     );
     for row in [
-        r#"  "2026-10-16 16:02:00","claude","/work/beta","pre_tool_use","Bash","deny","no-force-push","git push --force - force push blocked""#,
-        r#"  "2026-10-16 16:01:00","codex","/work/alpha","post_tool_use","Bash","allow","","git status second line""#,
-        r#"  "2026-10-16 16:00:00","codex","/work/alpha","stop","","allow","","""#,
+        r#"  "2026-10-16 16:02:00","claude","s1","/work/beta","pre_tool_use","Bash","deny","no-force-push","git push --force - force push blocked""#,
+        r#"  "2026-10-16 16:01:00","codex","s1","/work/alpha","post_tool_use","Bash","allow","","git status second line""#,
+        r#"  "2026-10-16 16:00:00","codex","s1","/work/alpha","stop","","allow","","""#,
     ] {
         assert!(all.lines().any(|line| line == row), "{row}\n{all}");
     }
@@ -155,12 +155,16 @@ fn log_rows_name_agent_tool_and_command_in_local_time_and_json_flags_cut_payload
         &["log", "--project", "/work/alpha"],
     ));
     assert!(
-        one.starts_with("decisions[2]{time,agent,event,tool,outcome,gate,detail}:\n"),
+        one.starts_with("project: \"/work/alpha\"\ndecisions[2]{time,agent,session,event,tool,outcome,gate,detail}:\n"),
         "{one}"
     );
 
-    let json: Value =
-        serde_json::from_str(&text(&yoke(home.path(), home.path(), &["log", "--json"]))).unwrap();
+    let json: Value = serde_json::from_str(&text(&yoke(
+        home.path(),
+        home.path(),
+        &["log", "--all", "--json"],
+    )))
+    .unwrap();
     assert_eq!(json[0]["ts"], T0 + 120);
     assert_eq!(json[0]["payload_truncated"], false);
     assert_eq!(json[2]["payload_truncated"], true);
@@ -191,7 +195,7 @@ fn log_filters_resolve_the_project_and_say_when_nothing_matches() {
     drop(store);
 
     let dot = text(&yoke(&home, &deep, &["log", "--project", "."]));
-    assert!(dot.starts_with("decisions[1]"), "{dot}");
+    assert!(dot.contains("\ndecisions[1]"), "{dot}");
 
     let typo = yoke(&home, &home, &["log", "--outcome", "wouldeny"]);
     assert_eq!(typo.status.code(), Some(1));
@@ -205,9 +209,116 @@ fn log_filters_resolve_the_project_and_say_when_nothing_matches() {
         "{out}"
     );
 
-    let none = text(&yoke(&home, &home, &["log", "--tool", "bash"]));
-    assert!(none.starts_with("decisions[0]"), "{none}");
+    let none = text(&yoke(&home, &home, &["log", "--all", "--tool", "bash"]));
+    assert!(none.contains("decisions[0]"), "{none}");
     assert!(none.contains("case-sensitive"), "{none}");
+}
+
+/// Two Git projects with one decision each and a third with none; returns the canonical home.
+fn two_projects() -> (tempfile::TempDir, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    fs::create_dir(home.join(".yoke")).unwrap();
+    let store = Store::open(home.join(".yoke/state.db")).unwrap();
+    for (name, session) in [("alpha", "session-a"), ("beta", "session-b")] {
+        fs::create_dir_all(home.join(name).join("sub")).unwrap();
+        fs::create_dir(home.join(name).join(".git")).unwrap();
+        store
+            .record_decision(
+                &DecisionRecord {
+                    ts: T0,
+                    session_id: session.into(),
+                    agent: "claude".into(),
+                    project: home.join(name).display().to_string(),
+                    event: "pre_tool_use".into(),
+                    tool: Some("Bash".into()),
+                    mode: "observe".into(),
+                    outcome: "allow".into(),
+                    reason: None,
+                    gates: json!([]),
+                    payload: "{}".into(),
+                },
+                4096,
+            )
+            .unwrap();
+    }
+    fs::create_dir_all(home.join("gamma/.git")).unwrap();
+    (temp, home)
+}
+
+#[test]
+fn log_defaults_to_the_current_project_and_all_widens_it() {
+    let (_temp, home) = two_projects();
+    let alpha = home.join("alpha");
+
+    let here = text(&yoke(&home, &alpha.join("sub"), &["log"]));
+    assert!(
+        here.starts_with(&format!(
+            "project: \"{}\"\ndecisions[1]{{time,agent,session,event,tool,outcome,gate,detail}}:\n",
+            alpha.display()
+        )),
+        "{here}"
+    );
+    assert!(
+        here.contains("\"session-a\"") && !here.contains("session-b"),
+        "{here}"
+    );
+    assert!(here.contains("yoke log --all"), "{here}");
+
+    let all = text(&yoke(&home, &alpha, &["log", "--all"]));
+    assert!(all.starts_with("project: all\ndecisions[2]{"), "{all}");
+    assert!(
+        all.contains("session-a") && all.contains("session-b"),
+        "{all}"
+    );
+
+    // A session id names one session, so it is searched everywhere unless a project is given.
+    let session = text(&yoke(&home, &alpha, &["log", "--session", "session-b"]));
+    assert!(
+        session.contains("\ndecisions[1]") && session.contains("session-b"),
+        "{session}"
+    );
+
+    let conflict = yoke(&home, &alpha, &["log", "--all", "--project", "."]);
+    assert_eq!(conflict.status.code(), Some(2));
+
+    let empty = text(&yoke(&home, &home.join("gamma"), &["log"]));
+    assert!(empty.contains("decisions[0]"), "{empty}");
+    assert!(
+        empty.contains("No decisions recorded for this project yet"),
+        "{empty}"
+    );
+    assert!(empty.contains("yoke log --all"), "{empty}");
+}
+
+#[test]
+fn log_would_deny_with_no_rows_says_no_gate_has_run() {
+    let (_temp, home) = two_projects();
+    let gamma = home.join("gamma");
+
+    let none = text(&yoke(&home, &gamma, &["log", "--outcome", "would_deny"]));
+    assert!(none.contains("decisions[0]"), "{none}");
+    assert!(
+        none.contains("no gate has run") && none.contains("no trusted gates"),
+        "{none}"
+    );
+
+    // A yoke.toml that no human trusted contributes nothing, and the answer names the way on.
+    fs::write(gamma.join("yoke.toml"), "mode = \"enforce\"\n").unwrap();
+    let untrusted = text(&yoke(&home, &gamma, &["log", "--outcome", "would_deny"]));
+    assert!(untrusted.contains("no gate has run"), "{untrusted}");
+    assert!(
+        untrusted.contains("not trusted") && untrusted.contains("yoke trust"),
+        "{untrusted}"
+    );
+
+    // Rows that exist are never explained away.
+    let rows = text(&yoke(
+        &home,
+        &home.join("alpha"),
+        &["log", "--outcome", "allow"],
+    ));
+    assert!(!rows.contains("no gate has run"), "{rows}");
 }
 
 #[test]

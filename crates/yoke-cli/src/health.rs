@@ -8,13 +8,15 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::Serialize;
 use yoke_core::config::{self, Mode};
-use yoke_core::store::Store;
+use yoke_core::store::{MissingSidecars, Store};
 
 use crate::{commands, hook, install};
 
 #[derive(Serialize)]
 struct Report {
     status: &'static str,
+    /// What `status` means, so `attention` is not mistaken for a fault.
+    meaning: &'static str,
     executable: String,
     state: State,
     mode: Option<&'static str>,
@@ -22,6 +24,7 @@ struct Report {
     policy: Vec<Policy>,
     agents: Vec<AgentReport>,
     plans: Option<Vec<PlanReport>>,
+    memory: Option<MemoryReport>,
     problems: Vec<String>,
     guidance: Vec<String>,
 }
@@ -62,6 +65,14 @@ struct LastEvent {
 }
 
 #[derive(Serialize)]
+struct MemoryReport {
+    /// Facts of this project that no digest has turned into memories yet.
+    pending_facts: i64,
+    digest: bool,
+    note: Option<&'static str>,
+}
+
+#[derive(Serialize)]
 struct PlanReport {
     slug: String,
     state: String,
@@ -99,6 +110,20 @@ pub fn run(json_output: bool) -> Result<()> {
     Ok(())
 }
 
+/// The first problem `yoke health` would report for the current directory, for the statusline's
+/// background check. It reads exactly what `run` reads and writes nothing.
+pub(crate) fn first_problem() -> Result<Option<String>> {
+    let home = commands::home()?;
+    let executable = std::env::current_exe()?;
+    let report = collect(Inputs {
+        options: install::options(&home, executable.clone(), Vec::new()),
+        cwd: std::env::current_dir()?,
+        home,
+        executable,
+    })?;
+    Ok(report.problems.into_iter().next())
+}
+
 fn collect(inputs: Inputs) -> Result<Report> {
     let Inputs {
         home,
@@ -133,12 +158,17 @@ fn collect(inputs: Inputs) -> Result<Report> {
         },
         Err(error) => {
             let detail = format!("{error:#}");
-            problems.push(format!(
-                "cannot read {}: {detail}; {}",
-                path.display(),
-                hook::newer_state_hint(&detail)
-                    .unwrap_or("check free disk space and file permissions")
-            ));
+            // Missing WAL files already say how to get them back; a disk hint would mislead.
+            let hint = if error.downcast_ref::<MissingSidecars>().is_some() {
+                String::new()
+            } else {
+                format!(
+                    "; {}",
+                    hook::newer_state_hint(&detail)
+                        .unwrap_or("check free disk space and file permissions")
+                )
+            };
+            problems.push(format!("cannot read {}: {detail}{hint}", path.display()));
             (Store::open(":memory:")?, false, None)
         }
     };
@@ -182,6 +212,11 @@ fn collect(inputs: Inputs) -> Result<Report> {
             Vec::new()
         }
     };
+    // The ways to switch Yoke off lead the list, so the statusline shows them first.
+    problems.splice(
+        0..0,
+        crate::bypass::switch_problems(&home, options.as_ref().ok(), &project),
+    );
     for agent in &agents {
         let name = agent.install.agent;
         // An unreadable receipt is a problem to fix, not an absent installation to repeat:
@@ -242,20 +277,73 @@ fn collect(inputs: Inputs) -> Result<Report> {
                 })
                 .collect::<Vec<_>>()
         });
+    if readable && current {
+        let silent = project.to_str().and_then(|project| {
+            let (silent, newer) = (crate::bypass::SILENT_SECS, 12 * 3600);
+            store
+                .silent_sessions(project, now_secs(), (silent, newer))
+                .ok()
+        });
+        for (id, agent, seconds) in silent.into_iter().flatten() {
+            guidance.push(format!(
+                "Session {id} ({agent}) is open but recorded no hook decision for {}; if its agent is still running, its hooks may be switched off (check env.YOKE_OFF and disableAllHooks in the settings above, and yoke pause).",
+                yoke_core::timefmt::duration_text(seconds)
+            ));
+        }
+    }
+    if readable && current {
+        // The hourly cleanup is a background job; a failing one means history keeps piling up.
+        let latest = yoke_core::jobs::list(&store, true, 1000)
+            .ok()
+            .and_then(|jobs| {
+                jobs.into_iter()
+                    .find(|job| job.kind == crate::retention::RETENTION_JOB)
+            });
+        if let Some(job) = latest.filter(|job| matches!(job.state.as_str(), "failed" | "dead")) {
+            guidance.push(format!(
+                "Retention cleanup is {} (job {}: {}), so old history is not being removed; see `yoke jobs`.",
+                if job.state == "dead" { "failing" } else { "retrying after a failure" },
+                job.id,
+                job.last_error.as_deref().unwrap_or("no error recorded")
+            ));
+        }
+    }
     match &plans {
         Some(plans) if plans.is_empty() => guidance.push("No unfinished plan in this project, so Stop is not held for plan checks; start one with `yoke plan new <slug>`.".into()),
         Some(plans) => guidance.extend(plans.iter().filter_map(plan_step)),
         None => {}
     }
-    let status = if !problems.is_empty() {
-        "failing"
+    // Facts need the memory tables, which a state older than the current schema may lack.
+    let memory = loaded
+        .as_ref()
+        .zip(project.to_str())
+        .filter(|_| readable && current)
+        .and_then(|(loaded, project)| match store.pending_fact_count(project) {
+            Ok(pending_facts) => Some(MemoryReport {
+                pending_facts,
+                digest: loaded.config.memory.digest,
+                note: (pending_facts > 0 && !loaded.config.memory.digest).then_some(
+                    "Facts become memories only when a human sets digest = true under [memory] in yoke.toml or ~/.yoke/config.toml and runs yoke trust.",
+                ),
+            }),
+            Err(error) => {
+                problems.push(format!("cannot count pending memory facts: {error:#}"));
+                None
+            }
+        });
+    let (status, meaning) = if !problems.is_empty() {
+        (
+            "failing",
+            "A check failed; fix the problems below. This command exits 1.",
+        )
     } else if !guidance.is_empty() {
-        "attention"
+        ("attention", "Setup is unfinished or a step is waiting for you; nothing is broken. The guidance below lists the next steps.")
     } else {
-        "ok"
+        ("ok", "Everything Yoke checks is in place.")
     };
     Ok(Report {
         status,
+        meaning,
         executable: executable.display().to_string(),
         state: State {
             path: path.display().to_string(),
@@ -268,9 +356,16 @@ fn collect(inputs: Inputs) -> Result<Report> {
         policy,
         agents,
         plans,
+        memory,
         problems,
         guidance,
     })
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
 fn policy_guidance(loaded: &config::LoadedConfig, guidance: &mut Vec<String>) {
@@ -363,6 +458,7 @@ fn agent_reports(
 fn print_text(report: &Report) {
     let quote = |value: &str| commands::quote(value);
     println!("health: {}", report.status);
+    println!("meaning: {}", quote(report.meaning));
     println!("executable: {}", quote(&report.executable));
     println!(
         "state: {} schema={} supported={}",
@@ -421,6 +517,19 @@ fn print_text(report: &Report) {
             }
         }
         None => println!("plans: unknown"),
+    }
+    match &report.memory {
+        Some(memory) => {
+            println!(
+                "memory: pending_facts={} digest={}",
+                memory.pending_facts,
+                if memory.digest { "on" } else { "off" }
+            );
+            if let Some(note) = memory.note {
+                println!("  note: {}", quote(note));
+            }
+        }
+        None => println!("memory: unknown"),
     }
     for (name, lines) in [
         ("problems", &report.problems),

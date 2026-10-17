@@ -53,6 +53,9 @@ pub enum PlanCommand {
         /// What was checked and how.
         #[arg(long)]
         evidence: String,
+        /// Print the full requirement record as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Anchor feedback to `plan`, `requirement:<id>`, `task:<id>`, `check:<name>` or `heading:<slug>`.
     Comment {
@@ -90,6 +93,9 @@ pub enum PlanCommand {
         /// Note recorded with the resolution.
         #[arg(long)]
         note: Option<String>,
+        /// Print the full feedback record as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Human-only: accept the risk of a finding or comment without changing the plan.
     Acknowledge {
@@ -100,19 +106,28 @@ pub enum PlanCommand {
         /// Note recorded with the acknowledgement.
         #[arg(long)]
         note: Option<String>,
+        /// Print the full feedback record as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Review and freeze exact check commands in a human terminal.
     Approve {
         /// Plan to approve.
         slug: String,
+        /// Print the approved plan record as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Bind an approved plan to an existing recorded agent session.
     Start {
         /// Plan to start.
         slug: String,
-        /// Recorded session id that will build the plan.
+        /// Recorded session id that will build the plan; the session column of yoke log lists them.
         #[arg(long)]
         session: String,
+        /// Print the full plan record as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Record a question and wait for a human response.
     Ask {
@@ -124,11 +139,17 @@ pub enum PlanCommand {
         /// Recorded session id of the active plan, used instead of --slug.
         #[arg(long)]
         session: Option<String>,
+        /// Print the full plan record as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Human-only: resume a waiting or stalled plan, or recover one whose check was interrupted.
     Resume {
         /// Plan to resume.
         slug: String,
+        /// Print the resumed plan record as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Human-only: cancel an unfinished plan and release its session.
     Cancel {
@@ -137,6 +158,9 @@ pub enum PlanCommand {
         /// Audit reason recorded with the cancellation.
         #[arg(long)]
         reason: Option<String>,
+        /// Print the cancelled plan record as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Human-only: move a building, waiting, or stalled plan to a replacement session.
     Reassign {
@@ -145,6 +169,9 @@ pub enum PlanCommand {
         /// Recorded session id that takes over the plan.
         #[arg(long)]
         session: String,
+        /// Print the reassigned plan record as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Run frozen checks and required independent review on the actual tree.
     Check {
@@ -153,6 +180,9 @@ pub enum PlanCommand {
         /// Agent that built the change; the other agent reviews it.
         #[arg(long, value_enum)]
         agent: AgentArg,
+        /// Print the full check summary as JSON, including fingerprints and output tails.
+        #[arg(long)]
+        json: bool,
     },
     /// Show the exact diff the independent review sees; read-only.
     Diff {
@@ -175,6 +205,9 @@ pub enum TaskCommand {
         /// What was done and how it was verified.
         #[arg(long)]
         evidence: Option<String>,
+        /// Print the full task record as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -257,6 +290,7 @@ pub fn run(command: PlanCommand) -> Result<()> {
                     slug,
                     task,
                     evidence,
+                    json,
                 },
         } => {
             let definition = plan::task(&store, project, &slug, &task)?;
@@ -278,12 +312,17 @@ pub fn run(command: PlanCommand) -> Result<()> {
             };
             let progress =
                 plan::complete_task(&store, project, &slug, &task, evidence.as_deref(), actor)?;
-            println!("{}", serde_json::to_string(&progress)?);
+            if json {
+                println!("{}", serde_json::to_string(&progress)?);
+            } else {
+                print!("{}", render_task(&slug, &progress));
+            }
         }
         PlanCommand::Accept {
             slug,
             requirement,
             evidence,
+            json,
         } => {
             let detail = plan::detail(&store, project, &slug)?;
             let item = detail
@@ -302,7 +341,11 @@ pub fn run(command: PlanCommand) -> Result<()> {
             if commands::confirm(&format!("accept {requirement}"))? {
                 let accepted =
                     plan::accept_requirement(&store, project, &slug, &requirement, &evidence)?;
-                println!("{}", serde_json::to_string(&accepted)?);
+                if json {
+                    println!("{}", serde_json::to_string(&accepted)?);
+                } else {
+                    print!("{}", render_requirement(&slug, &accepted));
+                }
             } else {
                 println!("accept: cancelled");
             }
@@ -332,18 +375,35 @@ pub fn run(command: PlanCommand) -> Result<()> {
             let item = plan::reply(&store, project, &slug, id, &text, actor("plan reply"))?;
             print_added(&item, json)?;
         }
-        PlanCommand::Resolve { slug, id, note } => {
-            close(&store, project, &slug, id, plan::Closure::Resolved, note)?
-        }
-        PlanCommand::Acknowledge { slug, id, note } => close(
+        PlanCommand::Resolve {
+            slug,
+            id,
+            note,
+            json,
+        } => close(
+            &store,
+            project,
+            &slug,
+            id,
+            plan::Closure::Resolved,
+            note,
+            json,
+        )?,
+        PlanCommand::Acknowledge {
+            slug,
+            id,
+            note,
+            json,
+        } => close(
             &store,
             project,
             &slug,
             id,
             plan::Closure::Acknowledged,
             note,
+            json,
         )?,
-        PlanCommand::Approve { slug } => {
+        PlanCommand::Approve { slug, json } => {
             let prepared = plan::prepare_approval(&store, project, &slug)?;
             println!(
                 "plan: {}\nheader: {}\ndigest: {}",
@@ -353,19 +413,28 @@ pub fn run(command: PlanCommand) -> Result<()> {
             );
             print_feedback("open_feedback", &prepared.open_feedback);
             if commands::confirm(&format!("approve {slug}"))? {
-                println!(
-                    "{}",
-                    serde_json::to_string(&plan::approve(&store, &prepared)?)?
-                );
+                let approved = plan::approve(&store, &prepared)?;
+                let help = [format!("Run `yoke plan start {slug} --session <session-id>`; the session column of `yoke log` lists recorded session ids")];
+                print_record(&approved, &[], &help, json)?;
             } else {
                 println!("approval: cancelled");
             }
         }
-        PlanCommand::Start { slug, session } => {
-            println!(
-                "{}",
-                serde_json::to_string(&plan::start(&store, project, &slug, &session)?)?
-            );
+        PlanCommand::Start {
+            slug,
+            session,
+            json,
+        } => {
+            let started = plan::start(&store, project, &slug, &session)?;
+            let help = [format!(
+                "Build the change, then run `yoke plan check {slug} --agent <claude|codex>`"
+            )];
+            print_record(
+                &started,
+                &[("session", commands::quote(&session))],
+                &help,
+                json,
+            )?;
             if loaded.config.mode == Mode::Observe {
                 eprintln!("{OBSERVE_NOTE}");
             }
@@ -374,6 +443,7 @@ pub fn run(command: PlanCommand) -> Result<()> {
             question,
             slug,
             session,
+            json,
         } => {
             let slug = match slug {
                 Some(slug) => slug,
@@ -387,62 +457,59 @@ pub fn run(command: PlanCommand) -> Result<()> {
                     .slug
                 }
             };
-            println!(
-                "{}",
-                serde_json::to_string(&plan::ask(&store, project, &slug, &question)?)?
-            );
+            let waiting = plan::ask(&store, project, &slug, &question)?;
+            let help = [format!(
+                "A human answers and runs `yoke plan resume {slug}` in their own terminal"
+            )];
+            print_record(&waiting, &[("question", short(&question))], &help, json)?;
         }
-        PlanCommand::Resume { slug } => {
-            println!(
-                "{}",
-                serde_json::to_string(&plan::get(&store, project, &slug)?)?
-            );
+        PlanCommand::Resume { slug, json } => {
+            print_preview(&plan::get(&store, project, &slug)?);
             if commands::confirm(&format!("resume {slug}"))? {
-                println!(
-                    "{}",
-                    serde_json::to_string(&plan::resume(&store, project, &slug)?)?
-                );
+                let resumed = plan::resume(&store, project, &slug)?;
+                let help = [format!(
+                    "Continue the work, then run `yoke plan check {slug} --agent <claude|codex>`"
+                )];
+                print_record(&resumed, &[], &help, json)?;
             } else {
                 println!("resume: cancelled");
             }
         }
-        PlanCommand::Cancel { slug, reason } => {
-            println!(
-                "{}",
-                serde_json::to_string(&plan::get(&store, project, &slug)?)?
-            );
+        PlanCommand::Cancel { slug, reason, json } => {
+            print_preview(&plan::get(&store, project, &slug)?);
             if commands::confirm(&format!("cancel {slug}"))? {
                 let reason = reason.as_deref().unwrap_or("cancelled by human");
-                println!(
-                    "{}",
-                    serde_json::to_string(&plan::cancel(&store, project, &slug, reason)?)?
-                );
+                let cancelled = plan::cancel(&store, project, &slug, reason)?;
+                print_record(&cancelled, &[("reason", short(reason))], &[], json)?;
             } else {
                 println!("cancel: aborted");
             }
         }
-        PlanCommand::Reassign { slug, session } => {
-            println!(
-                "{}",
-                serde_json::to_string(&plan::get(&store, project, &slug)?)?
-            );
+        PlanCommand::Reassign {
+            slug,
+            session,
+            json,
+        } => {
+            print_preview(&plan::get(&store, project, &slug)?);
             if commands::confirm(&format!("reassign {slug}"))? {
-                println!(
-                    "{}",
-                    serde_json::to_string(&plan::reassign(&store, project, &slug, &session)?)?
-                );
+                let moved = plan::reassign(&store, project, &slug, &session)?;
+                print_record(&moved, &[("session", commands::quote(&session))], &[], json)?;
             } else {
                 println!("reassign: aborted");
             }
         }
-        PlanCommand::Check { slug, agent } => {
+        PlanCommand::Check { slug, agent, json } => {
             let reviewer = review::Reviewer::select(
                 &loaded.config.review.reviewer,
                 yoke_core::event::Agent::from(agent).as_str(),
             )?;
             let model = loaded.config.review.models.get(reviewer.as_str());
             let summary = plan::check(&store, project, &slug, Some((reviewer, model)))?;
-            println!("{}", serde_json::to_string(&summary)?);
+            if json {
+                println!("{}", serde_json::to_string(&summary)?);
+            } else {
+                print!("{}", render_check(&summary));
+            }
             ensure!(
                 summary.passed,
                 "plan checks did not pass; inspect yoke plan status {slug}"
@@ -530,6 +597,7 @@ fn close(
     id: i64,
     closure: plan::Closure,
     note: Option<String>,
+    json: bool,
 ) -> Result<()> {
     let detail = plan::detail(store, project, slug)?;
     let item = detail
@@ -544,7 +612,7 @@ fn close(
     };
     if commands::confirm(&format!("{verb} {id}"))? {
         let item = plan::close(store, project, slug, id, closure, note.as_deref())?;
-        println!("{}", serde_json::to_string(&item)?);
+        print_added(&item, json)?;
     } else {
         println!("{verb}: cancelled");
     }
@@ -629,6 +697,158 @@ fn render_new(record: &plan::PlanRecord, has_head: bool) -> String {
         record.state,
         commands::quote(&record.file),
         help_lines(&help)
+    )
+}
+
+/// Longest tail of a failed check's output a table row shows.
+const OUTPUT_TAIL: usize = 160;
+
+/// A plan after a state change: the full record with `--json`, a compact text view otherwise.
+fn print_record(
+    record: &plan::PlanRecord,
+    facts: &[(&str, String)],
+    help: &[String],
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(record)?);
+    } else {
+        print!("{}", render_record(record, facts, help));
+    }
+    Ok(())
+}
+
+/// The plan a human is about to change, shown before the confirmation prompt.
+fn print_preview(record: &plan::PlanRecord) {
+    print!("{}", render_record(record, &[], &[]));
+}
+
+/// `facts` are extra `key: value` lines whose values are already quoted where they need to be.
+fn render_record(record: &plan::PlanRecord, facts: &[(&str, String)], help: &[String]) -> String {
+    let mut text = format!(
+        "plan: {}\nstate: {}\n",
+        commands::quote(&record.slug),
+        record.state
+    );
+    for (key, value) in facts {
+        text.push_str(&format!("{key}: {value}\n"));
+    }
+    text.push_str(&format!("file: {}\n", commands::quote(&record.file)));
+    if let Some(base) = &record.base_ref {
+        text.push_str(&format!("base: {base}\n"));
+    }
+    if !help.is_empty() {
+        text.push_str(&help_lines(help));
+    }
+    text
+}
+
+/// The serialized name of a state enum, such as `done` or `human`.
+fn word<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// Why a check did not pass: its exit code and the end of its output on one line.
+fn check_detail(run: &plan::CheckRun) -> String {
+    if run.result == "pass" {
+        return String::new();
+    }
+    let flat = run
+        .output_tail
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let start = flat
+        .char_indices()
+        .rev()
+        .nth(OUTPUT_TAIL - 1)
+        .map_or(0, |(at, _)| at);
+    let tail = format!("{}{}", if start > 0 { "..." } else { "" }, &flat[start..]);
+    match (run.exit_code, tail.is_empty()) {
+        (Some(code), false) => format!("exit {code}: {tail}"),
+        (Some(code), true) => format!("exit {code}"),
+        (None, _) => tail,
+    }
+}
+
+/// Text view of a finished check run; `--json` carries fingerprints and the stored output tails.
+fn render_check(summary: &plan::CheckSummary) -> String {
+    let slug = &summary.plan.slug;
+    let mut text = format!(
+        "plan: {}\nstate: {}\nresult: {}\n",
+        commands::quote(slug),
+        summary.plan.state,
+        if summary.passed { "pass" } else { "fail" }
+    );
+    if summary.checks.is_empty() {
+        text.push_str("checks: none declared\n");
+    } else {
+        text.push_str(&format!(
+            "checks[{}]{{name,result,blocking,ms,detail}}:\n",
+            summary.checks.len()
+        ));
+    }
+    for run in &summary.checks {
+        text.push_str(&format!(
+            "  {},{},{},{},{}\n",
+            commands::quote(&run.name),
+            run.result,
+            run.blocking,
+            run.ms,
+            commands::quote(&check_detail(run))
+        ));
+    }
+    if !summary.passed {
+        text.push_str(&help_lines(&[
+            format!("Fix the blocking failures, then run `yoke plan check {slug} --agent <claude|codex>` again"),
+            format!("Run `yoke plan status {slug} --json` for each check's full output"),
+        ]));
+    }
+    text
+}
+
+/// `by` and `evidence` lines of a recorded completion.
+fn completion_lines(completion: Option<&plan::Completion>) -> String {
+    let Some(completion) = completion else {
+        return String::new();
+    };
+    let mut text = format!("by: {}\n", completion.actor);
+    if let Some(evidence) = &completion.evidence {
+        text.push_str(&format!("evidence: {}\n", short(evidence)));
+    }
+    text
+}
+
+/// Text view of a completed task; `--json` carries the full record.
+fn render_task(slug: &str, progress: &plan::TaskProgress) -> String {
+    format!(
+        "plan: {}\ntask: {}\nstate: {}\ntitle: {}\n{}{}",
+        commands::quote(slug),
+        commands::quote(&progress.task.id),
+        word(&progress.state),
+        short(&progress.task.title),
+        completion_lines(progress.completion.as_ref()),
+        help_lines(&[format!(
+            "Run `yoke plan status {slug}` for the remaining tasks and requirements"
+        )])
+    )
+}
+
+/// Text view of a requirement a human accepted; `--json` carries the full record.
+fn render_requirement(slug: &str, progress: &plan::RequirementProgress) -> String {
+    format!(
+        "plan: {}\nrequirement: {}\nstatus: {}\ntext: {}\n{}{}",
+        commands::quote(slug),
+        commands::quote(&progress.requirement.id),
+        word(&progress.status),
+        short(&progress.requirement.text),
+        completion_lines(progress.completion.as_ref()),
+        help_lines(&[format!(
+            "Run `yoke plan status {slug}` for the remaining tasks and requirements"
+        )])
     )
 }
 
@@ -974,6 +1194,105 @@ mod tests {
         );
         assert!(text.contains("--json` for the full finding text"), "{text}");
         assert!(!text.starts_with('{'), "{text}");
+    }
+
+    fn run(
+        name: &str,
+        result: &str,
+        exit: Option<i32>,
+        tail: &str,
+        blocking: bool,
+    ) -> plan::CheckRun {
+        plan::CheckRun {
+            id: 1,
+            plan_id: 1,
+            ts: 1,
+            name: name.into(),
+            command: "true".into(),
+            exit_code: exit,
+            output_tail: tail.into(),
+            fingerprint: String::new(),
+            blocking,
+            ms: 5,
+            result: result.into(),
+            findings: serde_json::Value::Null,
+            artifacts: Vec::new(),
+            artifact_hashes: Default::default(),
+        }
+    }
+
+    #[test]
+    fn state_changes_and_checks_print_compact_text_with_the_next_step() {
+        let mut building = record();
+        building.state = "building".into();
+        building.base_ref = Some("abc123".into());
+        let help = ["Run `yoke plan check format-policy --agent <claude|codex>`".to_owned()];
+        assert_eq!(
+            render_record(&building, &[("session", commands::quote("s-1"))], &help),
+            "plan: \"format-policy\"\nstate: building\nsession: \"s-1\"\nfile: \"/p/.yoke/plans/format-policy.md\"\nbase: abc123\nhelp[1]:\n  Run `yoke plan check format-policy --agent <claude|codex>`\n"
+        );
+
+        let mut summary = plan::CheckSummary {
+            plan: building,
+            passed: false,
+            fingerprint_before: "a".into(),
+            fingerprint_after: "a".into(),
+            checks: vec![
+                run("diff", "pass", Some(0), "", true),
+                run("tests", "fail", Some(1), "3 failed\nleft == right", true),
+                run("lint", "fail", Some(1), "warn", false),
+            ],
+        };
+        assert_eq!(
+            render_check(&summary),
+            "plan: \"format-policy\"\nstate: building\nresult: fail\nchecks[3]{name,result,blocking,ms,detail}:\n  \"diff\",pass,true,5,\"\"\n  \"tests\",fail,true,5,\"exit 1: 3 failed left == right\"\n  \"lint\",fail,false,5,\"exit 1: warn\"\nhelp[2]:\n  Fix the blocking failures, then run `yoke plan check format-policy --agent <claude|codex>` again\n  Run `yoke plan status format-policy --json` for each check's full output\n"
+        );
+        summary.passed = true;
+        summary.plan.state = "done".into();
+        let passed = render_check(&summary);
+        assert!(passed.contains("state: done\nresult: pass\n"), "{passed}");
+        assert!(!passed.contains("help"), "{passed}");
+    }
+
+    #[test]
+    fn task_and_requirement_progress_print_who_recorded_what() {
+        let task = plan::TaskProgress {
+            task: plan::Task {
+                id: "capture".into(),
+                title: "Capture the shots".into(),
+                requirements: Vec::new(),
+                depends_on: Vec::new(),
+                owner: plan::Actor::Agent,
+            },
+            state: plan::TaskState::Done,
+            completion: Some(plan::Completion {
+                ts: 1,
+                actor: "agent".into(),
+                evidence: Some("wrote shots/a.png".into()),
+            }),
+        };
+        assert_eq!(
+            render_task("fix", &task),
+            "plan: \"fix\"\ntask: \"capture\"\nstate: done\ntitle: \"Capture the shots\"\nby: agent\nevidence: \"wrote shots/a.png\"\nhelp[1]:\n  Run `yoke plan status fix` for the remaining tasks and requirements\n"
+        );
+        let requirement = plan::RequirementProgress {
+            requirement: plan::Requirement {
+                id: "signed-off".into(),
+                text: "A person signed off".into(),
+                checks: Vec::new(),
+                human: true,
+            },
+            status: plan::RequirementStatus::Human,
+            completion: Some(plan::Completion {
+                ts: 1,
+                actor: "human".into(),
+                evidence: Some("reviewed".into()),
+            }),
+        };
+        assert_eq!(
+            render_requirement("fix", &requirement),
+            "plan: \"fix\"\nrequirement: \"signed-off\"\nstatus: human\ntext: \"A person signed off\"\nby: human\nevidence: \"reviewed\"\nhelp[1]:\n  Run `yoke plan status fix` for the remaining tasks and requirements\n"
+        );
     }
 
     #[test]

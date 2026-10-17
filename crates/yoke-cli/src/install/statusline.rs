@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::Statusline;
+use crate::statusline::Style;
 
 #[derive(Serialize, Deserialize, PartialEq)]
 pub(super) struct Owned {
@@ -17,18 +18,48 @@ fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-pub(super) fn build(executable: &Path, before: Option<Value>) -> Result<Owned> {
+/// `'<exe>' statusline`, with `--style detailed` when that style is asked for; the compact
+/// default adds no flag, so a line installed before styles existed stays byte for byte equal.
+fn base(executable: &str, style: Style) -> String {
+    match style {
+        Style::Compact => format!("{} statusline", quote(executable)),
+        Style::Detailed => format!("{} statusline --style detailed", quote(executable)),
+    }
+}
+
+/// The style a command asks for: detailed only when it carries the flag right after `statusline`.
+pub(super) fn style_of(command: &str) -> Style {
+    let detailed = command
+        .split_once(" statusline --style detailed")
+        .is_some_and(|(_, rest)| rest.is_empty() || rest.starts_with(" --wrap "));
+    if detailed {
+        Style::Detailed
+    } else {
+        Style::Compact
+    }
+}
+
+/// `style` is what the user asked for. Without it, a line that already runs Yoke keeps its own
+/// style and a new one is compact.
+pub(super) fn build(
+    executable: &Path,
+    before: Option<Value>,
+    style: Option<Style>,
+) -> Result<Owned> {
     let executable = executable
         .to_str()
         .context("executable path must be UTF-8")?;
-    let base = format!("{} statusline", quote(executable));
+    let (compact, detailed) = (
+        base(executable, Style::Compact),
+        base(executable, Style::Detailed),
+    );
     let mut after = before.clone().unwrap_or_else(|| json!({"type":"command"}));
     ensure!(
         after.is_object() && after["type"] == "command",
         "existing statusLine must be a command object; no settings changed"
     );
     let command = match before.as_ref() {
-        None => base,
+        None => base(executable, style.unwrap_or_default()),
         Some(value) => {
             let existing = value["command"]
                 .as_str()
@@ -37,16 +68,21 @@ pub(super) fn build(executable: &Path, before: Option<Value>) -> Result<Owned> {
                 !existing.trim().is_empty() && existing.len() <= 4096 && !existing.contains('\0'),
                 "existing statusLine command is empty or exceeds wrapper limits"
             );
-            // A pre-existing identical entry belongs to the user. It stays
-            // identical on uninstall rather than being wrapped recursively.
-            if existing == base {
-                base
+            // A pre-existing identical entry belongs to the user; asking for the other style
+            // restyles it, and uninstall puts it back as it was rather than wrapping it.
+            if existing == compact || existing == detailed {
+                base(executable, style.unwrap_or_else(|| style_of(existing)))
             } else {
                 ensure!(
-                    !existing.starts_with(&format!("{base} --wrap ")),
+                    !existing.starts_with(&format!("{compact} --wrap "))
+                        && !existing.starts_with(&format!("{detailed} --wrap ")),
                     "existing Yoke statusline lacks matching receipt; refusing recursive wrapping"
                 );
-                format!("{base} --wrap {}", quote(existing))
+                format!(
+                    "{} --wrap {}",
+                    base(executable, style.unwrap_or_default()),
+                    quote(existing)
+                )
             }
         }
     };
@@ -54,24 +90,35 @@ pub(super) fn build(executable: &Path, before: Option<Value>) -> Result<Owned> {
     Ok(Owned { before, after })
 }
 
-pub(super) fn add(executable: &Path, value: &mut Value) -> Result<Owned> {
-    let owned = build(executable, value.get("statusLine").cloned())?;
+pub(super) fn add(executable: &Path, value: &mut Value, style: Option<Style>) -> Result<Owned> {
+    let owned = build(executable, value.get("statusLine").cloned(), style)?;
     value["statusLine"] = owned.after.clone();
     Ok(owned)
+}
+
+/// The ownership record for a line Yoke already owns when the user now asks for a different
+/// style, or `None` when it already has that style. Wrapped commands stay wrapped.
+pub(super) fn restyle(executable: &Path, owned: &Owned, style: Style) -> Result<Option<Owned>> {
+    let current = owned.after["command"].as_str().map(style_of);
+    if current == Some(style) {
+        return Ok(None);
+    }
+    build(executable, owned.before.clone(), Some(style)).map(Some)
 }
 
 /// Apply `mode` to `value`. Returns the ownership record when Yoke's statusline was added.
 pub(super) fn apply(
     mode: Statusline,
+    style: Option<Style>,
     executable: &Path,
     value: &mut Value,
     warnings: &mut Vec<String>,
 ) -> Result<Option<Owned>> {
     match mode {
         Statusline::Off => Ok(None),
-        Statusline::Wrap => add(executable, value).map(Some),
+        Statusline::Wrap => add(executable, value, style).map(Some),
         Statusline::IfAbsent => match value.get("statusLine") {
-            None => add(executable, value).map(Some),
+            None => add(executable, value, style).map(Some),
             Some(existing) if runs_yoke(existing) => Ok(None),
             Some(existing) => {
                 warnings.push(kept_warning(existing));

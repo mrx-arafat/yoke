@@ -47,11 +47,15 @@ fn jobs(home: &Path, project: &Path) -> Vec<Value> {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Session start also queues the hourly retention job; these tests are about the digest.
     serde_json::from_slice::<Value>(&output.stdout)
         .unwrap()
         .as_array()
         .unwrap()
-        .clone()
+        .iter()
+        .filter(|job| job["kind"] == "memory_digest")
+        .cloned()
+        .collect()
 }
 
 #[test]

@@ -8,7 +8,7 @@ use anyhow::{bail, ensure, Context, Result};
 use clap::Subcommand;
 use serde::Deserialize;
 use yoke_core::config::{LoadedConfig, Mode};
-use yoke_core::memory::{self, SharedCopy};
+use yoke_core::memory::{self, ImportOptions, SharedCopy};
 use yoke_core::{config, jobs, review, store::Store};
 
 use crate::commands;
@@ -46,9 +46,14 @@ pub enum MemoryCommand {
         /// restore in place.
         #[arg(long = "map", value_name = "SOURCE=DESTINATION")]
         mappings: Vec<String>,
-        /// Report additions and duplicates without writing imported records.
+        /// Report additions and duplicates, and show the text of the memories it would add, without
+        /// writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Keep the archive's pinned flags. By default every imported memory is unpinned, because
+        /// a pinned memory is injected at every session start; use this to restore your own export.
+        #[arg(long)]
+        keep_pins: bool,
     },
     /// Pin a memory for context injection; add --unpin to remove the pin.
     Pin {
@@ -88,7 +93,23 @@ fn project_of(loaded: &LoadedConfig) -> Result<&str> {
         .context("project path must be UTF-8")
 }
 
+/// A pinned memory is injected at every session start and an import brings in text nobody here
+/// wrote, so neither may be done from an agent's tool process. This closes the casual path only;
+/// it needs no terminal, so scripts that a person runs keep working.
+fn require_person(action: &str, why: &str) -> Result<()> {
+    if let Some(signal) = yoke_core::guard::agent_process_signal() {
+        bail!("{action} cannot run from an agent tool process ({signal}): {why}; run it in your own terminal");
+    }
+    Ok(())
+}
+
 pub fn remember(text: &str, pinned: bool) -> Result<()> {
+    if pinned {
+        require_person(
+            "yoke remember --pinned",
+            "a pinned note is injected at every session start, so only a person may pin; save the note without --pinned",
+        )?;
+    }
     let (store, loaded) = commands::load_project()?;
     let project = project_of(&loaded)?;
     let row = memory::remember(&store, project, text, pinned, timestamp()?)?;
@@ -116,7 +137,7 @@ pub fn recall(query: &str, limit: u16, json: bool, explain: bool) -> Result<()> 
         println!("{}", serde_json::to_string(&rows)?);
     } else {
         println!("project: {}", commands::quote(project));
-        println!("memories[{}]{{id,ts,pinned,text}}:", rows.len());
+        println!("memories[{}]{{id,time,pinned,text}}:", rows.len());
         if rows.is_empty() {
             println!(
                 "help: \"{}\"",
@@ -131,7 +152,7 @@ pub fn recall(query: &str, limit: u16, json: bool, explain: bool) -> Result<()> 
             println!(
                 "  {},{},{},{}",
                 row.id,
-                row.ts,
+                commands::quote(&yoke_core::timefmt::local_time(row.ts)),
                 row.pinned,
                 commands::quote(&row.text)
             );
@@ -207,9 +228,9 @@ fn explain_context(
     println!(
         "help: \"{} Lower BM25 scores are better matches. Explanations are never injected.\"",
         if query.trim().is_empty() {
-            "Session start injects this selection in enforce mode: pinned, trusted knowledge, then recent memories within memory.inject_tokens."
+            "Session start injects this selection in enforce mode, inside a block that labels it untrusted data: pinned, trusted knowledge, then recent memories within memory.inject_tokens."
         } else {
-            "Session start injects the selection for an empty query (pinned, trusted knowledge, then recent memories) in enforce mode; this shows how your words would rank within memory.inject_tokens."
+            "Session start injects the selection for an empty query (pinned, trusted knowledge, then recent memories) in enforce mode, inside a block that labels it untrusted data; this shows how your words would rank within memory.inject_tokens."
         }
     );
     Ok(())
@@ -282,7 +303,14 @@ pub fn run(command: MemoryCommand) -> Result<()> {
             file,
             mappings,
             dry_run,
+            keep_pins,
         } => {
+            if !dry_run {
+                require_person(
+                    "yoke memory import",
+                    "it adds text that nobody in this project wrote; read it first with --dry-run",
+                )?;
+            }
             let mut projects = BTreeMap::new();
             for mapping in mappings {
                 let (source, destination) = mapping
@@ -310,8 +338,14 @@ pub fn run(command: MemoryCommand) -> Result<()> {
             } else {
                 commands::open_store(&home)?
             };
-            let report = memory::import_archive(&store, &file, &projects, dry_run)?;
+            let options = ImportOptions {
+                dry_run,
+                keep_pins,
+                now: timestamp()?,
+            };
+            let report = memory::import_archive(&store, &file, &projects, &options)?;
             println!("{}", serde_json::to_string(&report)?);
+            print_import_notes(&report);
             // The real import refuses on conflicts, so a dry run must fail the same way for scripts.
             ensure!(
                 report.conflicts.is_empty(),
@@ -321,6 +355,12 @@ pub fn run(command: MemoryCommand) -> Result<()> {
         }
         MemoryCommand::Pin { id, unpin } => {
             ensure!(id > 0, "memory id must be positive");
+            if !unpin {
+                require_person(
+                    "yoke memory pin",
+                    "a pinned note is injected at every session start, so only a person may pin",
+                )?;
+            }
             let (store, loaded) = commands::load_project()?;
             memory::pin_in_project(&store, project_of(&loaded)?, id, !unpin)?;
             println!("id: {id}\npinned: {}", !unpin);
@@ -345,6 +385,40 @@ pub fn run(command: MemoryCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What an import took and left out, in words; a dry run also lists the text it would add.
+/// It goes to stderr, so stdout stays the single JSON report that scripts parse.
+fn print_import_notes(report: &memory::ImportReport) {
+    if report.dry_run {
+        eprintln!(
+            "preview[{}]{{project,source,time,pinned,text}}:",
+            report.preview.len()
+        );
+        for row in &report.preview {
+            eprintln!(
+                "  {},{},{},{},{}",
+                commands::quote(&row.project),
+                row.source,
+                commands::quote(&yoke_core::timefmt::local_time(row.ts)),
+                row.pinned,
+                commands::quote(&row.text)
+            );
+        }
+        if report.preview_omitted > 0 {
+            eprintln!(
+                "preview_omitted: {} more memories are not shown",
+                report.preview_omitted
+            );
+        }
+    }
+    if report.pins_dropped > 0 {
+        eprintln!(
+            "note: \"{} pinned note(s) {} imported unpinned; pin one after reading it with yoke memory pin <id>, or restore your own export with --keep-pins.\"",
+            report.pins_dropped,
+            if report.dry_run { "would be" } else { "were" }
+        );
+    }
 }
 
 fn digest(

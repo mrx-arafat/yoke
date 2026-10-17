@@ -1,8 +1,7 @@
-use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,17 +12,34 @@ use yoke_core::engine::{evaluate_with_context, EvaluationContext};
 use yoke_core::event::Agent;
 use yoke_core::redact::redact;
 use yoke_core::store::{DecisionRecord, Store};
-use yoke_core::{memory, plan, stop_guard, wire, AgentEvent, EventKind};
+use yoke_core::{memory, notifications, plan, stop_guard, trust, wire, AgentEvent, EventKind};
 
 use crate::commands;
 
+mod mode_cache;
+
+/// A line for the person watching stderr. Unlike `eprintln!` it never panics: a stderr pipe the
+/// agent has already closed would otherwise end the hook with exit 101 before it printed its
+/// denial, and an agent treats a crashed hook as no answer at all.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        let _ = writeln!(std::io::stderr().lock(), $($arg)*);
+    }};
+}
+
 const INPUT_CAP: u64 = 1024 * 1024;
+/// How much of an oversized payload is read and dropped, so that an agent still writing it is
+/// not cut off by a broken pipe and the hook still ends in bounded time.
+const INPUT_DRAIN_CAP: u64 = 64 * 1024 * 1024;
+/// error.log is moved to error.log.1 once it passes this size, so a failure that repeats on
+/// every tool call cannot fill the disk.
+const ERROR_LOG_CAP: u64 = 1024 * 1024;
 const UPDATE_INTERVAL: i64 = 86400;
 pub(crate) const UPDATE_ATTEMPT: &str = "update.last_attempt";
-// Retention runs at most hourly and briefly, so SessionStart never waits on a large backlog.
-const RETENTION_ATTEMPT: &str = "retention.last_prune";
-const RETENTION_INTERVAL: i64 = 3600;
-const RETENTION_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+// A yoke.toml that nobody trusted, nearer to an event than the trusted policy, is reported
+// when it is first seen, at most once in this interval, instead of at the next session start.
+const IGNORED_CONFIG_NOTICE: &str = "notifications.ignored_config";
+const IGNORED_CONFIG_INTERVAL: i64 = 300;
 /// Marks a process Yoke started in the background with its stderr pointed at error.log.
 pub(crate) const BACKGROUND: &str = "YOKE_BACKGROUND";
 /// Claude Code lets a call through when a hook outlives its timeout (600 s by default, 30 s for
@@ -39,6 +55,8 @@ static MODE: AtomicU8 = AtomicU8::new(0);
 static DEADLINE_MS: AtomicU64 = AtomicU64::new(u64::MAX);
 /// What the watchdog needs to record its own decision, published once the policy is loaded.
 static OVERRUN: Mutex<Option<Overrun>> = Mutex::new(None);
+/// The payload said an earlier Stop hook already kept the agent working (`stop_hook_active`).
+static STOP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 struct Overrun {
     home: PathBuf,
@@ -107,9 +125,9 @@ fn watchdog(agent: Agent, kind: EventKind) {
             return;
         }
         *answered = true;
-        let reason = format!("yoke error: hook evaluation exceeded {} ms; for an explicit bypass, restart your coding agent from your own terminal with YOKE_OFF=1 in its environment", limit.as_millis());
-        eprintln!("{}", redact(&reason));
-        if let Ok(home) = commands::home() {
+        let reason = format!("yoke error: hook evaluation exceeded {} ms; for an explicit bypass, a human runs yoke pause in their own terminal", limit.as_millis());
+        say!("{}", redact(&reason));
+        if let Ok(home) = crate::bypass::hook_home() {
             let _ = append_error(&home, &reason);
         }
         let enforce = MODE.load(Ordering::SeqCst) != 1;
@@ -137,7 +155,7 @@ fn record_overrun(kind: EventKind, reason: &str, limit: Duration, enforce: bool)
         .unwrap_or_else(PoisonError::into_inner)
         .take()
     else {
-        return denial;
+        return once_per_stop(kind, denial);
     };
     let mut row = context.row;
     row.reason = Some(reason.into());
@@ -169,8 +187,20 @@ fn record_overrun(kind: EventKind, reason: &str, limit: Duration, enforce: bool)
             &context.home,
             &format!("watchdog decision was not saved: {error:#}"),
         );
-        denial
+        once_per_stop(kind, denial)
     })
+}
+
+/// A Stop that blocks keeps the agent working and sends it back to Stop, so a block that rests
+/// on Yoke's own failure (unreadable state, no stall count to cap it) would repeat for as long
+/// as the failure lasts. The agent sets `stop_hook_active` on that second Stop: it is told once
+/// and then allowed. Gate failures are not affected; the stall cap bounds them.
+fn once_per_stop(kind: EventKind, denial: Option<String>) -> Option<String> {
+    if denial.is_some() && kind == EventKind::Stop && STOP_ACTIVE.load(Ordering::SeqCst) {
+        say!("yoke: not blocking this Stop again; the agent was already kept working once by a Yoke failure");
+        return None;
+    }
+    denial
 }
 
 fn now() -> i64 {
@@ -187,10 +217,40 @@ struct HookState {
     cap: usize,
     persisted: bool,
     row: DecisionRecord,
+    /// Whether stdin has been consumed, so that a failure before that can still read it.
+    input_read: bool,
+    /// The first policy load finished, so the mode is known from state, not from the record.
+    policy_loaded: bool,
+    /// The project key and mode to write to the mode record after a successful run.
+    remember: Option<(String, Mode)>,
+}
+
+/// Agents end a hook that outlives its timeout, or that the user interrupts, with a signal. The
+/// gates run in their own process groups, so without this they would outlive the hook and keep
+/// running (a test suite, for example) after the agent has moved on. SIGKILL cannot be caught,
+/// so it still leaves them behind.
+fn stop_gates_on_termination() {
+    extern "C" fn terminate(signal: libc::c_int) {
+        // Only async-signal-safe work: atomics, kill(2) and _exit(2).
+        yoke_core::engine::kill_running_groups();
+        // SAFETY: _exit is async-signal-safe and ends the process without running destructors.
+        unsafe { libc::_exit(128 + signal) };
+    }
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: the handler above is async-signal-safe. A handler, unlike a blocked signal
+        // mask, is reset by exec, so the gates start with their normal signal behavior.
+        unsafe {
+            libc::signal(
+                signal,
+                terminate as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            )
+        };
+    }
 }
 
 /// Hook errors never escape into ordinary CLI stdout.
 pub fn run(event: &str, agent: Agent) -> i32 {
+    stop_gates_on_termination();
     // Redaction compiles its patterns on first use, about a millisecond of CPU that otherwise
     // sits on the critical path at the decision write. A helper thread compiles them now,
     // while this thread opens the state database and loads the policy; the first redaction
@@ -217,11 +277,14 @@ pub fn run(event: &str, agent: Agent) -> i32 {
             gates: serde_json::json!([]),
             payload: String::new(),
         },
+        input_read: false,
+        policy_loaded: false,
+        remember: None,
     };
     if let Some(kind) = kind.filter(|kind| kind.is_blocking()) {
         watchdog(agent, kind);
     }
-    let result = evaluate(event, agent, &mut state);
+    let result = contain(|| evaluate(event, agent, &mut state));
     // Holding this until the process exits keeps a late watchdog from answering a second time.
     let mut answered = ANSWERED.lock().unwrap_or_else(PoisonError::into_inner);
     *answered = true;
@@ -230,7 +293,13 @@ pub fn run(event: &str, agent: Agent) -> i32 {
             .map(|output| writeln!(std::io::stdout().lock(), "{output}"))
             .transpose()
         {
-            Ok(_) => 0,
+            Ok(_) => {
+                // After the answer is out; a hook that read its policy knows the mode for sure.
+                if let (Some(home), Some((key, mode))) = (&state.home, &state.remember) {
+                    mode_cache::remember(home, key, *mode, now());
+                }
+                0
+            }
             Err(error) => fail(
                 &mut state,
                 agent,
@@ -242,9 +311,69 @@ pub fn run(event: &str, agent: Agent) -> i32 {
     }
 }
 
+/// The payload from stdin: at most `INPUT_CAP + 1` bytes, so a larger one is seen as too large.
+/// The rest of an oversized payload is read and dropped, because an agent that is still writing
+/// would otherwise get a broken pipe instead of Yoke's answer. Stdin is consumed only once.
+fn read_input(consumed: &mut bool) -> Result<Vec<u8>> {
+    *consumed = true;
+    let mut stdin = std::io::stdin().lock();
+    let mut bytes = Vec::new();
+    (&mut stdin)
+        .take(INPUT_CAP + 1)
+        .read_to_end(&mut bytes)
+        .context("read hook payload")?;
+    if bytes.len() as u64 > INPUT_CAP {
+        let _ = std::io::copy(
+            &mut (&mut stdin).take(INPUT_DRAIN_CAP),
+            &mut std::io::sink(),
+        );
+    }
+    Ok(bytes)
+}
+
+/// Turn a panic into an error. A hook that panics exits 101 without printing anything, which an
+/// agent reads as "no answer" and lets the action through; as an error it is denied in enforce
+/// mode and recorded like any other failure.
+fn contain<T>(work: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".into());
+        Err(anyhow::anyhow!("internal error: {message}"))
+    })
+}
+
+/// Where a session starts, as far as one event can tell: the project directory Claude Code
+/// names in `CLAUDE_PROJECT_DIR` when it is a usable absolute directory, else `fallback` (the
+/// directory the event reports). Only the first event of a session uses this; after that the
+/// stored anchor decides.
+fn start_directory(agent: Agent, fallback: &Path) -> PathBuf {
+    let named = (agent == Agent::Claude)
+        .then(|| std::env::var_os("CLAUDE_PROJECT_DIR"))
+        .flatten()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .and_then(|path| path.canonicalize().ok())
+        .filter(|path| path.is_dir());
+    named.unwrap_or_else(|| fallback.to_path_buf())
+}
+
 fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<Value>> {
-    let home = commands::home()?;
+    // A HOME that settings files inject must not move Yoke's state, trust and logs elsewhere.
+    let home = crate::bypass::hook_home()?;
     state.home = Some(home.clone());
+    // An old empty state file means earlier trust approvals are gone, and Yoke starts over with
+    // its defaults; a fresh one is another hook creating the database right now.
+    let was_empty = std::fs::metadata(home.join(".yoke/state.db")).is_ok_and(|file| {
+        file.len() == 0
+            && file
+                .modified()
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > Duration::from_secs(10))
+    });
     state.store = Some(match commands::open_store(&home) {
         Ok(store) => store,
         Err(error) => {
@@ -252,56 +381,87 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
                 format!("writable state unavailable ({error:#}); opening read-only state")
             })?;
             let detail = format!("{error:#}");
-            eprintln!(
+            say!(
                 "yoke: {}; retrying trusted policy using read-only state; audit and memory writes may be unavailable; {}",
                 redact(&format!("writable state unavailable: {detail}")),
-                newer_state_hint(&detail).unwrap_or(
-                    "check free disk space and filesystem permissions in your own terminal"
-                )
+                state_hint(&detail)
             );
             store
         }
     });
+    if was_empty {
+        warn_logged(
+            &home,
+            "state.db was empty (0 bytes), so earlier trust approvals, history and memory are not available; if you had approved a policy, review it and run `yoke trust` again in your own terminal (docs/troubleshooting.md)",
+        );
+    }
     let store = state.store.as_ref().expect("opened above");
     let process_cwd = std::env::current_dir().context("resolve hook working directory")?;
     state.row.project = process_cwd.display().to_string();
-    // Resolve mode before reading malformed input so enforce-mode errors still deny.
-    let mut loaded = config::load_trusted(store, &process_cwd, &home)?;
+    // Resolve mode before reading malformed input so enforce-mode errors still deny. The
+    // session's start directory is not known before the payload is read, so this uses the
+    // project directory the agent names, else the directory the hook runs in.
+    let hint = start_directory(agent, &process_cwd);
+    let mut loaded = config::load_trusted(store, &hint, &home)?;
+    state.policy_loaded = true;
+    state.remember = mode_cache::project_key(&hint).map(|key| (key, loaded.config.mode));
     state.mode = Some(loaded.config.mode);
     publish(state.mode);
     state.row.mode = loaded.config.mode.as_str().into();
     state.cap = loaded.config.log.payload_cap;
-    let mut bytes = Vec::new();
-    std::io::stdin()
-        .take(INPUT_CAP + 1)
-        .read_to_end(&mut bytes)
-        .context("read hook payload")?;
+    let bytes = read_input(&mut state.input_read)?;
     state.row.payload = String::from_utf8_lossy(&bytes).into_owned();
     ensure!(
         bytes.len() <= INPUT_CAP as usize,
-        "hook payload exceeds 1 MiB"
+        "hook payload exceeds 1 MiB, more than Yoke can check; ask the agent to use smaller tool inputs, for example a large file written in several smaller edits"
     );
-    let raw: Value = serde_json::from_slice(&bytes).context("parse hook JSON object")?;
+    // Some producers put a byte order mark in front of the JSON; it carries no meaning here.
+    let raw: Value = serde_json::from_slice(strip_bom(&bytes)).context("parse hook JSON object")?;
     let ev: AgentEvent = serde_json::from_value(raw.clone()).context("parse hook event fields")?;
     state.row.session_id = ev.session_id.clone();
     state.row.tool = ev.tool_name.clone();
-    if ev.cwd.is_some() {
-        state.mode = None;
-        publish(state.mode);
-        state.row.mode = "unknown".into();
-    }
+    STOP_ACTIVE.store(stop_hook_active(&raw), Ordering::SeqCst);
     let cwd = match ev.cwd.as_deref() {
         Some(path) => {
             let path = PathBuf::from(path);
             ensure!(path.is_absolute(), "hook cwd must be absolute");
-            path.canonicalize().context("resolve payload cwd")?
+            match path.canonicalize() {
+                Ok(path) => path,
+                // The reported directory can vanish under a session (renamed, or a removed
+                // worktree). The policy this hook started under still governs the event, so
+                // the agent is not denied every tool call because of a missing directory.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => process_cwd.clone(),
+                Err(error) => return Err(error).context("resolve payload cwd"),
+            }
         }
         None => process_cwd.clone(),
     };
-    // Agents send the directory the hook already runs in; its policy was loaded above.
-    if ev.cwd.is_some() && cwd != process_cwd {
-        loaded = config::load_trusted(store, &cwd, &home)?;
+    // The project is fixed where the session started, not where this event says it is: a
+    // directory the agent can change must not decide whether the trusted policy applies. The
+    // payload cwd only picks a trusted nested policy at or below that start directory.
+    // Until the policy of a different anchor or directory loads, the mode is unknown.
+    let mut anchor = trust::session_anchor(
+        store,
+        agent.as_str(),
+        &ev.session_id,
+        &start_directory(agent, &cwd),
+    )?;
+    if !anchor.dir.is_dir() {
+        // The project directory was renamed or removed under the session. Gates cannot run
+        // there, so the event is governed by the directory it reports, as before anchoring.
+        anchor = trust::session_anchor(store, agent.as_str(), "", &cwd)?;
     }
+    if anchor.dir != hint || cwd != hint || loaded.project_root != anchor.root {
+        state.mode = None;
+        publish(state.mode);
+        state.row.mode = "unknown".into();
+    }
+    let trust::EventPolicy {
+        loaded: policy,
+        policy_root,
+        ignored,
+    } = trust::load_for_event(store, &anchor, &cwd, &home)?;
+    loaded = policy;
     state.mode = Some(loaded.config.mode);
     publish(state.mode);
     state.row.mode = loaded.config.mode.as_str().into();
@@ -361,6 +521,7 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
         &EvaluationContext {
             cwd: cwd.clone(),
             project: loaded.project_root.clone(),
+            policy_root,
             home: home.clone(),
         },
     );
@@ -425,24 +586,29 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
         }
         output = wire::context(agent, kind, &context);
     }
+    if kind != EventKind::SessionStart
+        && !ignored.is_empty()
+        && store
+            .claim_interval(IGNORED_CONFIG_NOTICE, state.row.ts, IGNORED_CONFIG_INTERVAL)
+            .unwrap_or(false)
+    {
+        if let Err(error) = notifications::sync_for_hook(store, &loaded, state.row.ts) {
+            warn_advisory(&home, "notification sync failed", &error);
+        }
+    }
     if kind == EventKind::SessionStart {
         let (now, days) = (state.row.ts, loaded.config.log.retention_days);
-        let pruned = store
-            .claim_interval(RETENTION_ATTEMPT, now, RETENTION_INTERVAL)
-            .and_then(|claimed| {
-                claimed
-                    .then(|| store.prune_history(now, days, RETENTION_BUDGET))
-                    .transpose()
-            });
-        if let Err(error) = pruned {
-            warn_advisory(&home, "retention cleanup failed", &error);
+        // Retention is queued here and run by the background worker that `tick` starts below,
+        // so a session never waits for deletes.
+        if let Err(error) = crate::retention::schedule(store, now, days) {
+            warn_advisory(&home, "retention scheduling failed", &error);
         }
         for status in loaded
             .snapshots
             .iter()
             .filter(|snapshot| snapshot.stale || (!snapshot.trusted && snapshot.exists))
         {
-            eprintln!(
+            say!(
                 "yoke: config snapshot {} is {}; inspect yoke config",
                 status.file.display(),
                 if status.trusted {
@@ -454,6 +620,11 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
         }
         if let Err(error) = schedule_update(store, &home, state.row.ts) {
             warn_advisory(&home, "update check scheduling failed", &error);
+        }
+        // The statusline only counts materialized rows, so this is what lets it flag a new
+        // untrusted or stale configuration; the bounded call never sleeps.
+        if let Err(error) = notifications::sync_for_hook(store, &loaded, now) {
+            warn_advisory(&home, "notification sync failed", &error);
         }
         if loaded.config.memory.digest && !ev.session_id.is_empty() {
             // Facts of sessions whose end hook never ran are digested now; `tick` starts the worker.
@@ -561,18 +732,112 @@ pub(crate) fn newer_state_hint(detail: &str) -> Option<&'static str> {
     )
 }
 
+/// The next step for a state problem, chosen by what the error says. Every hook that cannot read
+/// its policy denies, so the message has to say how to get unblocked, not only that it failed.
+pub(crate) fn state_hint(detail: &str) -> &'static str {
+    if let Some(hint) = newer_state_hint(detail) {
+        return hint;
+    }
+    let has = |needles: &[&str]| needles.iter().any(|needle| detail.contains(needle));
+    if has(&["HOME is not set", "HOME must be an absolute path"]) {
+        "set HOME to your account's absolute home directory in the environment the agent starts with"
+    } else if has(&["is not a regular file"]) {
+        "~/.yoke/state.db is not a regular file: in your own terminal move it aside (do not delete anything you need), then restart the agent and run `yoke trust` again"
+    } else if has(&["not a database", "disk image is malformed"]) {
+        "~/.yoke/state.db is damaged: in your own terminal move it and its -wal and -shm files aside (do not delete them), restart the agent, then run `yoke trust` again to approve your policy (docs/troubleshooting.md)"
+    } else if has(&["trusted snapshot hash mismatch"]) {
+        "the trusted record named above is damaged: review that file and run `yoke trust` (`yoke trust --global` for the global file) in your own terminal to replace it"
+    } else if has(&["database is locked", "database is busy"]) {
+        "another process holds ~/.yoke/state.db locked: find it with `lsof ~/.yoke/state.db`, or wait for it to finish and retry"
+    } else if has(&["disk is full", "No space left"]) {
+        "free disk space in your own terminal"
+    } else {
+        "check free disk space and filesystem permissions in your own terminal"
+    }
+}
+
+fn strip_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
+}
+
+fn stop_hook_active(raw: &Value) -> bool {
+    raw.get("stop_hook_active").and_then(Value::as_bool) == Some(true)
+}
+
+/// A failure before the payload was read still needs to know whether this Stop is a repeat.
+fn learn_stop_flag(state: &mut HookState) {
+    if state.input_read {
+        return;
+    }
+    if let Ok(bytes) = read_input(&mut state.input_read) {
+        if let Ok(raw) = serde_json::from_slice::<Value>(strip_bom(&bytes)) {
+            STOP_ACTIVE.store(stop_hook_active(&raw), Ordering::SeqCst);
+        }
+    }
+}
+
+/// What the record of the last known mode says, when a failure left the mode unknown because the
+/// state could not be read. A failure after the first policy load is not a state problem.
+fn recall_mode(state: &HookState, agent: Agent) -> Option<mode_cache::Recall> {
+    if state.mode.is_some() || state.policy_loaded {
+        return None;
+    }
+    let home = state.home.as_ref()?;
+    let cwd = std::env::current_dir().ok()?;
+    let key = mode_cache::project_key(&start_directory(agent, &cwd))?;
+    Some(mode_cache::recall(home, &key))
+}
+
+fn ago(seconds: i64) -> String {
+    match seconds.max(0) {
+        s if s < 3600 => format!("{} min", s / 60),
+        s if s < 2 * 86_400 => format!("{} h", s / 3600),
+        s => format!("{} days", s / 86_400),
+    }
+}
+
 fn fail(state: &mut HookState, agent: Agent, kind: Option<EventKind>, detail: &str) -> i32 {
+    let recalled = recall_mode(state, agent);
+    // The last known mode is observe: that promised to block nothing, so nothing is blocked.
+    let observed_before = match recalled {
+        Some(mode_cache::Recall::Observe(stamp)) => Some(stamp),
+        _ => None,
+    };
+    if observed_before.is_some() {
+        state.mode = Some(Mode::Observe);
+        state.row.mode = "observe".into();
+    }
+    let record_note = match &recalled {
+        Some(mode_cache::Recall::Enforce) => {
+            "the last known mode for this project is enforce; ".to_owned()
+        }
+        Some(mode_cache::Recall::Unusable(why)) => {
+            format!("the record of the last known mode cannot be used ({why}); ")
+        }
+        _ => String::new(),
+    };
     let unavailable = if state.mode.is_none() {
         format!(
-            "trusted policy unavailable; unread gates cannot be bypassed automatically; {}; ",
-            newer_state_hint(detail)
-                .unwrap_or("check free disk space and filesystem permissions in your own terminal")
+            "trusted policy unavailable; unread gates cannot be bypassed automatically; {record_note}{}; ",
+            state_hint(detail)
         )
     } else {
         String::new()
     };
-    let reason = redact(&format!("yoke error: {detail}; {unavailable}for an explicit bypass, restart your coding agent from your own terminal with YOKE_OFF=1 in its environment; setting it inside a blocked tool command cannot bypass that tool's pre-hook"));
-    eprintln!("{reason}");
+    let reason = if let Some(stamp) = observed_before {
+        redact(&format!(
+            "yoke error: {detail}; Yoke cannot read its state, so this call was allowed on the last known mode for this project, observe (recorded {} ago), which blocks nothing; {}",
+            ago(now() - stamp),
+            state_hint(detail)
+        ))
+    } else if state.mode == Some(Mode::Observe) {
+        redact(&format!(
+            "yoke error: {detail}; observe mode, so nothing was blocked"
+        ))
+    } else {
+        redact(&format!("yoke error: {detail}; {unavailable}for an explicit bypass, a human runs yoke pause in their own terminal and follows what it prints; nothing set inside a blocked tool command can bypass that tool's pre-hook"))
+    };
+    say!("{reason}");
     state.row.outcome = "error".into();
     state.row.reason = Some(reason.clone());
     if state.mode.is_none() {
@@ -591,24 +856,30 @@ fn fail(state: &mut HookState, agent: Agent, kind: Option<EventKind>, detail: &s
             .as_ref()
             .map(|store| store.record_decision(&state.row, state.cap))
     };
-    if !matches!(persisted, Some(Ok(()))) {
+    if observed_before.is_some() || !matches!(persisted, Some(Ok(()))) {
         let suffix = match persisted {
             Some(Err(error)) => format!("; decision persistence failed: {error:#}"),
             _ => String::new(),
         };
         if let Some(home) = &state.home {
             if let Err(error) = append_error(home, &format!("{reason}{suffix}")) {
-                eprintln!(
+                say!(
                     "yoke: error.log fallback failed: {}",
                     redact(&error.to_string())
                 );
             }
         } else {
-            eprintln!("yoke: error.log unavailable because home directory could not be resolved");
+            say!("yoke: error.log unavailable because home directory could not be resolved");
         }
     }
     // An unavailable store cannot establish observe mode. Do not silently bypass enforcement.
     if state.mode != Some(Mode::Observe) {
+        if kind == Some(EventKind::Stop) {
+            learn_stop_flag(state);
+            if once_per_stop(EventKind::Stop, Some(reason.clone())).is_none() {
+                return 0;
+            }
+        }
         if let Some(output) = kind.and_then(|kind| wire::deny(agent, kind, &reason)) {
             if writeln!(std::io::stdout().lock(), "{output}").is_err() {
                 return 2;
@@ -625,8 +896,7 @@ fn warn_advisory(home: &Path, operation: &str, error: &anyhow::Error) {
         home,
         &format!(
             "{operation}: {error:#}; trusted gate decision preserved; {}",
-            newer_state_hint(&format!("{error:#}"))
-                .unwrap_or("check free disk space and filesystem permissions in your own terminal")
+            state_hint(&format!("{error:#}"))
         ),
     );
 }
@@ -642,9 +912,9 @@ fn warn_usage_ingestion(home: &Path, error: &anyhow::Error) {
 
 fn warn_logged(home: &Path, message: &str) {
     let reason = redact(message);
-    eprintln!("yoke: {reason}");
+    say!("yoke: {reason}");
     if let Err(error) = append_error(home, &reason) {
-        eprintln!(
+        say!(
             "yoke: error.log fallback failed: {}",
             redact(&error.to_string())
         );
@@ -653,11 +923,13 @@ fn warn_logged(home: &Path, message: &str) {
 
 /// The only writer of error.log entries: every line starts with a Unix timestamp.
 pub(crate) fn append_error(home: &Path, reason: &str) -> Result<()> {
-    std::fs::create_dir_all(home.join(".yoke"))?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(home.join(".yoke/error.log"))?;
+    yoke_core::private::create_dir_all(&home.join(".yoke"))?;
+    let path = home.join(".yoke/error.log");
+    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > ERROR_LOG_CAP) {
+        // One older generation is kept; a failure that repeats on every tool call stays bounded.
+        let _ = std::fs::rename(&path, home.join(".yoke/error.log.1"));
+    }
+    let mut file = yoke_core::private::open_append(&path)?;
     let stamp = now();
     let entry: String = redact(reason)
         .lines()
@@ -675,17 +947,14 @@ pub(crate) fn diagnostic(message: &str) {
     {
         return;
     }
-    eprintln!("{}", redact(message));
+    say!("{}", redact(message));
 }
 
 fn schedule_update(store: &Store, home: &Path, timestamp: i64) -> Result<()> {
     if !store.claim_interval(UPDATE_ATTEMPT, timestamp, UPDATE_INTERVAL)? {
         return Ok(());
     }
-    let errors = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(home.join(".yoke/error.log"))?;
+    let errors = yoke_core::private::open_append(&home.join(".yoke/error.log"))?;
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(["update", "--check"])
@@ -727,5 +996,34 @@ mod tests {
             310,
             "the override can only shorten"
         );
+    }
+
+    #[test]
+    fn a_panic_becomes_an_error_instead_of_ending_the_hook_without_an_answer() {
+        let outcome: Result<()> = contain(|| panic!("boom {}", 7));
+        let message = format!("{:#}", outcome.unwrap_err());
+        assert!(
+            message.contains("internal error") && message.contains("boom 7"),
+            "{message}"
+        );
+        assert_eq!(contain(|| Ok(3)).unwrap(), 3);
+    }
+
+    #[test]
+    fn error_log_moves_aside_once_it_passes_its_cap() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".yoke");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("error.log"),
+            vec![b'x'; ERROR_LOG_CAP as usize + 1],
+        )
+        .unwrap();
+        append_error(home.path(), "fresh failure").unwrap();
+        let older = std::fs::metadata(dir.join("error.log.1")).unwrap();
+        assert_eq!(older.len(), ERROR_LOG_CAP + 1);
+        let log = std::fs::read_to_string(dir.join("error.log")).unwrap();
+        assert_eq!(log.lines().count(), 1);
+        assert!(log.ends_with(" fresh failure\n"), "{log}");
     }
 }

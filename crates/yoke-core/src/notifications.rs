@@ -22,7 +22,10 @@ const CHECK_CURSOR: &str = "notifications.check_run_id";
 const DETAIL_CAP: usize = 600;
 const EVENT_KINDS: &str = "'hook_error','observe_would_deny','check_failed'";
 /// Row ids per write transaction, so a hook never waits long for the write lock.
-const BATCH_IDS: i64 = 2_000;
+const BATCH_IDS: i64 = 20_000;
+/// The window of one hook, which has no time budget: 2,000 ids cost a few milliseconds, while a
+/// 20,000-id window made the session-start hook that took it wait over 100 ms.
+const HOOK_BATCH_IDS: i64 = 2_000;
 /// Work per call; a large backlog after an upgrade drains over several calls.
 const BUDGET: Duration = Duration::from_millis(250);
 /// Windows per table per call, so a call is bounded even on a machine fast enough to beat the
@@ -65,8 +68,18 @@ pub struct HelpTopic {
     pub steps: &'static [&'static str],
     /// Exact commands; placeholders such as `<slug>` are written in angle brackets.
     pub commands: &'static [&'static str],
-    /// Section of `docs/troubleshooting.md` with the same guidance.
+    /// Full URL of the section of `docs/troubleshooting.md` with the same guidance; an installed
+    /// machine has no `docs/` directory, so a repository path would lead nowhere.
     pub doc: &'static str,
+}
+
+macro_rules! troubleshooting {
+    ($anchor:literal) => {
+        concat!(
+            "https://github.com/mrx-arafat/yoke/blob/main/docs/troubleshooting.md",
+            $anchor
+        )
+    };
 }
 
 pub const HELP: &[HelpTopic] = &[
@@ -85,7 +98,7 @@ pub const HELP: &[HelpTopic] = &[
             "yoke trust --global",
             "yoke config",
         ],
-        doc: "docs/troubleshooting.md#failures-are-logged-but-actions-continue",
+        doc: troubleshooting!("#failures-are-logged-but-actions-continue"),
     },
     HelpTopic {
         id: "stale-trust",
@@ -97,7 +110,7 @@ pub const HELP: &[HelpTopic] = &[
             "If it is not intended, restore the file. A deleted file cannot be trusted; the trusted snapshot keeps applying meanwhile.",
         ],
         commands: &["yoke config", "yoke trust", "yoke trust --global"],
-        doc: "docs/troubleshooting.md#configuration-changed-after-it-was-trusted",
+        doc: troubleshooting!("#configuration-changed-after-it-was-trusted"),
     },
     HelpTopic {
         id: "untrusted-config",
@@ -109,7 +122,7 @@ pub const HELP: &[HelpTopic] = &[
             "Agents cannot trust configuration: trust needs an interactive terminal outside an agent tool process.",
         ],
         commands: &["yoke trust", "yoke trust --global", "yoke config"],
-        doc: "docs/troubleshooting.md#configuration-is-not-trusted",
+        doc: troubleshooting!("#configuration-is-not-trusted"),
     },
     HelpTopic {
         id: "plan-recovery",
@@ -127,7 +140,7 @@ pub const HELP: &[HelpTopic] = &[
             "yoke plan cancel <slug> --reason <why>",
             "yoke plan reassign <slug> --session <session-id>",
         ],
-        doc: "docs/troubleshooting.md#a-plan-cannot-complete",
+        doc: troubleshooting!("#a-plan-cannot-complete"),
     },
     HelpTopic {
         id: "check-failed",
@@ -144,7 +157,7 @@ pub const HELP: &[HelpTopic] = &[
             "yoke plan check <slug> --agent <claude|codex>",
             "yoke plan resume <slug>",
         ],
-        doc: "docs/troubleshooting.md#a-plan-cannot-complete",
+        doc: troubleshooting!("#a-plan-cannot-complete"),
     },
     HelpTopic {
         id: "hooks-disabled",
@@ -159,7 +172,7 @@ pub const HELP: &[HelpTopic] = &[
             "In Codex, trust new or changed hooks with /hooks.",
         ],
         commands: &["yoke health", "yoke install --dry-run", "yoke install"],
-        doc: "docs/troubleshooting.md#hooks-are-disabled-or-missing",
+        doc: troubleshooting!("#hooks-are-disabled-or-missing"),
     },
     HelpTopic {
         id: "hook-error",
@@ -169,10 +182,10 @@ pub const HELP: &[HelpTopic] = &[
             "Read the recent errors.",
             "Check free disk space and permissions for ~/.yoke. Never delete state.db or its WAL files.",
             "Fix the cause, then retry the action.",
-            "For an explicit temporary bypass, restart the agent from your own terminal with YOKE_OFF=1, for example YOKE_OFF=1 claude. Setting it inside a blocked tool command cannot bypass that hook.",
+            "For an explicit temporary bypass, a human runs yoke pause in their own terminal. It prints a private token to start the agent with, for example YOKE_OFF=<token> claude, and yoke pause --for 30m skips every hook for a limited time. Nothing set inside a blocked tool command can bypass that hook.",
         ],
         commands: &["yoke log --outcome error --limit 10", "yoke health"],
-        doc: "docs/troubleshooting.md#a-hook-error-blocked-work",
+        doc: troubleshooting!("#a-hook-error-blocked-work"),
     },
 ];
 
@@ -222,7 +235,20 @@ pub enum Target {
 /// History is read in short transactions within a time budget; returns true when older
 /// decisions or check runs are still waiting for a later call.
 pub fn sync(store: &Store, loaded: &LoadedConfig, now: i64) -> Result<bool> {
-    sync_bounded(store, loaded, now, BATCH_IDS, BUDGET)
+    sync_bounded(store, loaded, now, BATCH_IDS, BUDGET, PAUSE)
+}
+
+/// `sync` for a hook: one window per table and no pause, so the hook stays in milliseconds and
+/// never sleeps. Older history drains over later hooks and `yoke notifications` runs.
+pub fn sync_for_hook(store: &Store, loaded: &LoadedConfig, now: i64) -> Result<bool> {
+    sync_bounded(
+        store,
+        loaded,
+        now,
+        HOOK_BATCH_IDS,
+        Duration::ZERO,
+        Duration::ZERO,
+    )
 }
 
 fn sync_bounded(
@@ -231,15 +257,17 @@ fn sync_bounded(
     now: i64,
     batch: i64,
     budget: Duration,
+    pause: Duration,
 ) -> Result<bool> {
     let start = Instant::now();
+    let pace = Pace { budget, pause };
     let mut pending = drain(
         store,
         DECISION_CURSOR,
         "decisions",
         batch,
         start,
-        budget,
+        pace,
         decisions,
     )?;
     pending |= drain(
@@ -248,7 +276,7 @@ fn sync_bounded(
         "check_runs",
         batch,
         start,
-        budget,
+        pace,
         |tx, from, to| checks(tx, from, to, now),
     )?;
     store.transaction(|tx| {
@@ -265,8 +293,15 @@ fn sync_bounded(
     Ok(pending)
 }
 
-/// Apply `batch` ids at a time, one transaction each after a `PAUSE`, until caught up, over
-/// budget, or at `MAX_WINDOWS`.
+/// How a call spaces its windows: stop after `budget`, and wait `pause` before each one.
+#[derive(Clone, Copy)]
+struct Pace {
+    budget: Duration,
+    pause: Duration,
+}
+
+/// Apply `batch` ids at a time, one transaction each after the pace's pause, until caught up,
+/// over budget, or at `MAX_WINDOWS`.
 /// At least one batch runs per call, so every call makes progress.
 fn drain(
     store: &Store,
@@ -274,7 +309,7 @@ fn drain(
     table: &str,
     batch: i64,
     start: Instant,
-    budget: Duration,
+    pace: Pace,
     mut apply: impl FnMut(&Transaction<'_>, i64, i64) -> Result<()>,
 ) -> Result<bool> {
     for _ in 0..MAX_WINDOWS {
@@ -283,7 +318,7 @@ fn drain(
         if from == max {
             return Ok(false);
         }
-        std::thread::sleep(PAUSE);
+        std::thread::sleep(pace.pause);
         let more = store.transaction(|tx| {
             let (from, max) = window(tx, cursor, table)?;
             if from == max {
@@ -297,7 +332,7 @@ fn drain(
         if !more {
             return Ok(false);
         }
-        if start.elapsed() >= budget {
+        if start.elapsed() >= pace.budget {
             return Ok(true);
         }
     }
@@ -359,6 +394,35 @@ pub fn unread_count(store: &Store, project: &Path) -> Result<i64> {
         params![project.identity, project.legacy],
         |row| row.get(0),
     )?)
+}
+
+/// Unread count for a status line, which knows a session or a project path but has no trusted
+/// configuration to resolve a root from: the global ones plus the session's recorded project, or
+/// the given path when the session is unknown. Reads only.
+pub fn unread_for_status(
+    store: &Store,
+    session: Option<&str>,
+    project: Option<&str>,
+) -> Result<i64> {
+    let recorded: Option<String> = match session {
+        Some(id) => store
+            .connection()
+            .query_row(
+                "SELECT project FROM sessions WHERE id=?1",
+                [redact(id)],
+                |row| row.get(0),
+            )
+            .optional()?,
+        None => None,
+    };
+    match recorded.as_deref().or(project) {
+        Some(project) => unread_count(store, Path::new(project)),
+        None => Ok(store.connection().query_row(
+            "SELECT count(*) FROM notifications WHERE project='' AND state='unread'",
+            [],
+            |row| row.get(0),
+        )?),
+    }
 }
 
 /// Human acknowledgement; returns how many unread notifications changed. Every listed id
@@ -542,10 +606,13 @@ fn advance(tx: &Transaction<'_>, key: &str, from: i64, to: i64) -> Result<()> {
 // `+outcome` keeps SQLite on the rowid range instead of scanning every row with that outcome.
 const HOOK_ERRORS_SQL: &str = "SELECT project,event,mode,coalesce(reason,''),count(*),min(ts),max(ts) FROM decisions
              WHERE id>?1 AND id<=?2 AND +outcome='error' GROUP BY project,event,mode,coalesce(reason,'')";
-// A single max() makes SQLite read the bare columns from the newest matching row.
-const WOULD_DENY_SQL: &str = "SELECT project,count(*),max(id),ts,event,coalesce(tool,''),coalesce(reason,''),
-             (SELECT min(ts) FROM decisions f WHERE f.id>?1 AND f.id<=?2 AND +f.project=d.project AND +f.outcome='would_deny')
-             FROM decisions d WHERE id>?1 AND id<=?2 AND +outcome='would_deny' GROUP BY project";
+// One pass over the id range; the newest row of each project joins back for the bare columns.
+// A correlated min() per project would rescan the whole window once for every project.
+const WOULD_DENY_SQL: &str =
+    "SELECT g.project,g.n,d.id,d.ts,d.event,coalesce(d.tool,''),coalesce(d.reason,''),g.first
+             FROM (SELECT project,count(*) AS n,max(id) AS last_id,min(ts) AS first FROM decisions
+                   WHERE id>?1 AND id<=?2 AND +outcome='would_deny' GROUP BY project) g
+             JOIN decisions d ON d.id=g.last_id";
 
 fn decisions(tx: &Transaction<'_>, from: i64, to: i64) -> Result<()> {
     let errors = {

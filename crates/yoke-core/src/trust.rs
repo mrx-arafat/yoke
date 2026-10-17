@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 use crate::config::{Config, LoadedConfig};
 use crate::store::{Store, TrustRow};
 
+mod anchor;
+pub use anchor::{load_for_event, session_anchor, EventPolicy, SessionAnchor};
+
 #[derive(Debug, Serialize)]
 pub struct SnapshotStatus {
     pub scope: String,
@@ -140,6 +143,7 @@ fn prepare_snapshot(
     config: bool,
 ) -> Result<PendingSnapshot> {
     let bytes = read_regular_file(file)?;
+    let intact = |row: &TrustRow| sha256(row.content.as_bytes()) == row.sha256;
     let sha256 = sha256(&bytes);
     let content =
         String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", file.display()))?;
@@ -150,7 +154,11 @@ fn prepare_snapshot(
     } else {
         validate_knowledge(&content)?;
     }
-    let previous = snapshot(store, scope, root, file)?.map(|row| row.content);
+    // A damaged record is shown as having no previous text: it can still be replaced.
+    let previous = store
+        .get_trust(scope, path_key(root)?, path_key(file)?)?
+        .filter(intact)
+        .map(|row| row.content);
     Ok(PendingSnapshot {
         file: file.into(),
         sha256,
@@ -161,20 +169,40 @@ fn prepare_snapshot(
 
 /// Load only persisted snapshots; on-disk config is inspected solely for staleness.
 pub fn load_trusted(store: &Store, cwd: &Path, home: &Path) -> Result<LoadedConfig> {
+    let cwd = canonical_directory(cwd)?;
+    let identity = policy_root(store, &cwd)?;
+    Ok(load_policy(store, &cwd, &identity, &cwd, home)?.loaded)
+}
+
+/// The trusted policy for one event, and the directory it was read from.
+///
+/// `identity` is the project the memory, plans and Stop guard are keyed by; it never follows
+/// `event`. The policy is the nearest trusted `yoke.toml` on the way up from `event`, but only
+/// while `event` is at or below `anchor`: an event that reports a directory outside the
+/// anchor (another tree, a symlink out of the project) picks no policy of its own.
+/// A nearer `yoke.toml` that no human trusted never replaces a trusted one above it; it is
+/// listed among the snapshots so the user is told why its settings do not apply.
+fn load_policy(
+    store: &Store,
+    anchor: &Path,
+    identity: &Path,
+    event: &Path,
+    home: &Path,
+) -> Result<EventPolicy> {
     let home = canonical_directory(home)?;
-    let root = project_root(store, cwd)?;
+    let (policy, ignored) = select_policy(store, anchor, identity, event)?;
     let mut loaded = LoadedConfig {
         config: Config::default(),
         origins: Config::default_origins(),
-        project_root: root.clone(),
+        project_root: identity.to_path_buf(),
         snapshots: Vec::new(),
         knowledge: None,
     };
     for (scope, root, file) in [
         ("global", &home, home.join(".yoke/config.toml")),
-        ("project", &root, root.join("yoke.toml")),
+        ("project", &policy, policy.join("yoke.toml")),
     ] {
-        let row = snapshot(store, scope, root, &file)?;
+        let row = trusted_row(store, scope, root, &file)?;
         loaded.snapshots.push(status(scope, &file, row.as_ref()));
         if let Some(row) = row {
             let config = Config::parse(&row.content)
@@ -182,8 +210,8 @@ pub fn load_trusted(store: &Store, cwd: &Path, home: &Path) -> Result<LoadedConf
             loaded.config.merge_from(config, &file, &mut loaded.origins);
         }
     }
-    let knowledge_file = root.join(".yoke/knowledge.md");
-    let row = snapshot(store, "project", &root, &knowledge_file)?;
+    let knowledge_file = policy.join(".yoke/knowledge.md");
+    let row = trusted_row(store, "project", &policy, &knowledge_file)?;
     loaded
         .snapshots
         .push(status("project", &knowledge_file, row.as_ref()));
@@ -191,11 +219,73 @@ pub fn load_trusted(store: &Store, cwd: &Path, home: &Path) -> Result<LoadedConf
         validate_knowledge(&row.content)?;
         loaded.knowledge = Some(row.content);
     }
-    Ok(loaded)
+    for file in &ignored {
+        loaded.snapshots.push(status("project", file, None));
+    }
+    Ok(EventPolicy {
+        loaded,
+        policy_root: policy,
+        ignored,
+    })
+}
+
+/// The directory whose trusted `yoke.toml` governs `event`, and the untrusted `yoke.toml` files
+/// that sit nearer to it. With no trusted file on the way up the project is the policy root, so
+/// only the global policy applies.
+fn select_policy(
+    store: &Store,
+    anchor: &Path,
+    identity: &Path,
+    event: &Path,
+) -> Result<(PathBuf, Vec<PathBuf>)> {
+    let event = event.canonicalize().ok().filter(|path| path.is_dir());
+    let start = event
+        .as_deref()
+        .filter(|event| event.starts_with(anchor))
+        .unwrap_or(anchor);
+    let mut nearer = Vec::new();
+    for dir in start.ancestors() {
+        let file = dir.join("yoke.toml");
+        if trusted_row(store, "project", dir, &file)?.is_some() {
+            return Ok((dir.into(), nearer));
+        }
+        if fs::symlink_metadata(&file).is_ok() {
+            nearer.push(file);
+        }
+    }
+    // Below the project root only: files above it are not part of this project.
+    nearer.retain(|file| file.starts_with(identity) && file != &identity.join("yoke.toml"));
+    Ok((identity.into(), nearer))
 }
 
 /// Canonical project identity survives deletion of the trusted config on disk.
 pub fn project_root(store: &Store, cwd: &Path) -> Result<PathBuf> {
+    discover_root(cwd, home_directory().as_deref(), |root, file| {
+        Ok(store
+            .get_trust("project", path_key(root)?, path_key(file)?)?
+            .is_some())
+    })
+}
+
+/// Where `yoke init` writes: the root of the project that `cwd` already belongs to, from the
+/// files on disk alone, so it needs no state database.
+pub fn config_home(cwd: &Path) -> Result<PathBuf> {
+    discover_root(cwd, home_directory().as_deref(), |_, _| Ok(false))
+}
+
+fn home_directory() -> Option<PathBuf> {
+    crate::config::home().ok()?.canonicalize().ok()
+}
+
+/// The nearest directory above `cwd` that holds a `yoke.toml` or has a trusted one on record,
+/// else the repository root, else `cwd`. A repository in the home directory is a dotfiles
+/// setup, not a project: counting it would make every directory below `home` that is not a
+/// repository itself one project, with one shared memory and log.
+fn discover_root(
+    cwd: &Path,
+    home: Option<&Path>,
+    trusted: impl Fn(&Path, &Path) -> Result<bool>,
+) -> Result<PathBuf> {
     let cwd = canonical_directory(cwd)?;
     let mut repository = None;
     for root in cwd.ancestors() {
@@ -207,18 +297,29 @@ pub fn project_root(store: &Store, cwd: &Path) -> Result<PathBuf> {
                 return Err(error).with_context(|| format!("discovering {}", file.display()))
             }
         };
-        if on_disk
-            || store
-                .get_trust("project", path_key(root)?, path_key(&file)?)?
-                .is_some()
-        {
+        if on_disk || trusted(root, &file)? {
             return Ok(root.into());
         }
-        if repository.is_none() && root.join(".git").exists() {
+        if repository.is_none() && Some(root) != home && root.join(".git").exists() {
             repository = Some(root.to_path_buf());
         }
     }
     Ok(repository.unwrap_or(cwd))
+}
+
+/// The project whose trusted policy governs `cwd`. A `yoke.toml` nearer to `cwd` that no human
+/// trusted never shadows the policy of a trusted project above it: a file an agent or a
+/// checkout dropped into a subdirectory must not switch the gates off. With no trusted project
+/// on the way up this is the nearest `yoke.toml`, as for `yoke trust`.
+fn policy_root(store: &Store, cwd: &Path) -> Result<PathBuf> {
+    let canonical = canonical_directory(cwd)?;
+    for root in canonical.ancestors() {
+        let file = root.join("yoke.toml");
+        if trusted_row(store, "project", root, &file)?.is_some() {
+            return Ok(root.into());
+        }
+    }
+    project_root(store, &canonical)
 }
 
 fn snapshot(store: &Store, scope: &str, root: &Path, file: &Path) -> Result<Option<TrustRow>> {
@@ -226,11 +327,57 @@ fn snapshot(store: &Store, scope: &str, root: &Path, file: &Path) -> Result<Opti
     if let Some(row) = &row {
         ensure!(
             sha256(row.content.as_bytes()) == row.sha256,
-            "trusted snapshot hash mismatch for {}",
-            file.display()
+            "trusted snapshot hash mismatch for {}; its record in the state database was changed or damaged, so review the file and run yoke trust{} in your own terminal to replace it",
+            file.display(),
+            if scope == "global" { " --global" } else { "" }
         );
     }
     Ok(row)
+}
+
+/// The snapshot that applies to `file`: its own, else the one approved for the repository a
+/// linked worktree belongs to when the worktree holds those exact bytes.
+fn trusted_row(store: &Store, scope: &str, root: &Path, file: &Path) -> Result<Option<TrustRow>> {
+    match snapshot(store, scope, root, file)? {
+        Some(row) => Ok(Some(row)),
+        None if scope == "project" => inherited(store, root, file),
+        None => Ok(None),
+    }
+}
+
+/// `git worktree add` makes a directory with its own copy of a committed yoke.toml, which would
+/// start untrusted and run without its gates. A human already approved that file for the
+/// repository, so its approved bytes apply in every linked worktree until a human trusts the
+/// worktree's own file. Editing or deleting the worktree's copy changes nothing, exactly as
+/// for any trusted file, so the gates cannot be switched off from inside a worktree.
+/// Nothing is written.
+fn inherited(store: &Store, root: &Path, file: &Path) -> Result<Option<TrustRow>> {
+    let Some(main) = main_worktree(root) else {
+        return Ok(None);
+    };
+    let Ok(relative) = file.strip_prefix(root) else {
+        return Ok(None);
+    };
+    snapshot(store, "project", &main, &main.join(relative))
+}
+
+/// The main worktree's root when `root` is a linked worktree, read from the files git leaves
+/// behind (`.git` names a gitdir whose `commondir` leads back to the main repository).
+fn main_worktree(root: &Path) -> Option<PathBuf> {
+    let text = |file: PathBuf| {
+        read_regular_file(&file)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+    };
+    let link = text(root.join(".git"))?;
+    let admin = root.join(link.strip_prefix("gitdir:")?.trim());
+    let common = admin
+        .join(text(admin.join("commondir"))?.trim())
+        .canonicalize()
+        .ok()?;
+    (common.file_name()? == ".git")
+        .then(|| common.parent().map(Path::to_path_buf))
+        .flatten()
 }
 
 fn status(scope: &str, file: &Path, row: Option<&TrustRow>) -> SnapshotStatus {
@@ -276,9 +423,16 @@ fn read_regular_file(file: &Path) -> Result<Vec<u8>> {
     }
     #[cfg(not(unix))]
     anyhow::bail!("safe trust file opening is unavailable on this platform");
-    let opened = options
-        .open(file)
-        .with_context(|| format!("opening {}", file.display()))?;
+    let opened = match options.open(file) {
+        Ok(opened) => opened,
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => anyhow::bail!(
+            "{} is a symbolic link; Yoke trusts only regular files, so replace the link with a copy of the file",
+            file.display()
+        ),
+        Err(error) => {
+            return Err(error).with_context(|| format!("opening {}", file.display()))
+        }
+    };
     let metadata = opened
         .metadata()
         .with_context(|| format!("reading {}", file.display()))?;
@@ -489,6 +643,116 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_in_the_home_directory_does_not_make_everything_below_it_one_project() {
+        let f = Fixture::new();
+        let home = f.home.canonicalize().unwrap();
+        fs::create_dir(home.join(".git")).unwrap();
+        let notes = home.join("notes");
+        fs::create_dir(&notes).unwrap();
+        let none = |_: &Path, _: &Path| Ok(false);
+        assert_eq!(discover_root(&notes, Some(&home), none).unwrap(), notes);
+        // A repository of its own below the home directory is still the project.
+        let repo = home.join("code/proj");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir(repo.join("src")).unwrap();
+        assert_eq!(
+            discover_root(&repo.join("src"), Some(&home), none).unwrap(),
+            repo
+        );
+    }
+
+    #[test]
+    fn a_linked_worktree_applies_the_policy_approved_for_its_repository_until_trusted_itself() {
+        let f = Fixture::new();
+        let approved = "mode='enforce'";
+        fs::write(f.project.join("yoke.toml"), approved).unwrap();
+        prepare_project(&f.store, &f.project)
+            .unwrap()
+            .commit(&f.store)
+            .unwrap();
+        // The shape `git worktree add` leaves: a `.git` file naming a gitdir whose commondir
+        // leads back to the main repository.
+        let main = f.project.canonicalize().unwrap();
+        let admin = main.join(".git/worktrees/wt");
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let worktree = f.temp.path().join("wt");
+        fs::create_dir(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+
+        fs::write(worktree.join("yoke.toml"), approved).unwrap();
+        let loaded = load_trusted(&f.store, &worktree, &f.home).unwrap();
+        assert_eq!(loaded.project_root, worktree.canonicalize().unwrap());
+        assert_eq!(loaded.config.mode, Mode::Enforce);
+        assert!(loaded.snapshots.iter().any(|s| s.trusted && !s.stale));
+
+        // Editing or deleting the worktree's copy must not switch the gates off: the approved
+        // bytes keep applying, flagged stale like any trusted file that changed on disk.
+        fs::write(worktree.join("yoke.toml"), "mode='observe'").unwrap();
+        let loaded = load_trusted(&f.store, &worktree, &f.home).unwrap();
+        assert_eq!(loaded.config.mode, Mode::Enforce);
+        assert!(loaded.snapshots.iter().any(|s| s.trusted && s.stale));
+        fs::remove_file(worktree.join("yoke.toml")).unwrap();
+        assert_eq!(
+            load_trusted(&f.store, &worktree, &f.home)
+                .unwrap()
+                .config
+                .mode,
+            Mode::Enforce
+        );
+
+        // A human who trusts the worktree's own file replaces the inherited policy.
+        fs::write(worktree.join("yoke.toml"), "mode='observe'").unwrap();
+        prepare_project(&f.store, &worktree)
+            .unwrap()
+            .commit(&f.store)
+            .unwrap();
+        let loaded = load_trusted(&f.store, &worktree, &f.home).unwrap();
+        assert_eq!(loaded.config.mode, Mode::Observe);
+    }
+
+    #[test]
+    fn a_damaged_record_can_be_replaced_and_a_symlinked_config_is_explained() {
+        let f = Fixture::new();
+        let file = f.project.join("yoke.toml");
+        let approved = "\u{feff}mode='enforce'\r\n";
+        fs::write(&file, approved).unwrap();
+        prepare_project(&f.store, &f.project)
+            .unwrap()
+            .commit(&f.store)
+            .unwrap();
+        assert_eq!(f.load().config.mode, Mode::Enforce);
+        // The record's text no longer matches its hash: hooks cannot read the policy, and the
+        // error names the command that repairs it.
+        f.store
+            .connection()
+            .execute(
+                "UPDATE trust SET content='mode=\"observe\"' WHERE scope='project'",
+                [],
+            )
+            .unwrap();
+        let error = load_trusted(&f.store, &f.project, &f.home).unwrap_err();
+        assert!(format!("{error:#}").contains("run yoke trust"), "{error:#}");
+        // Trusting again replaces it instead of failing on the damaged previous text.
+        let repair = prepare_project(&f.store, &f.project).unwrap();
+        assert_eq!(repair.snapshots[0].previous, None);
+        assert_eq!(repair.snapshots[0].content, approved);
+        repair.commit(&f.store).unwrap();
+        assert_eq!(f.load().config.mode, Mode::Enforce);
+
+        fs::remove_file(&file).unwrap();
+        let target = f.project.join("real.toml");
+        fs::write(&target, approved).unwrap();
+        std::os::unix::fs::symlink(&target, &file).unwrap();
+        let error = prepare_project(&f.store, &f.project).unwrap_err();
+        assert!(format!("{error:#}").contains("symbolic link"), "{error:#}");
+    }
+
+    #[test]
     fn nearest_project_boundary_and_canonical_identity_are_respected() {
         let f = Fixture::new();
         fs::write(f.project.join("yoke.toml"), "mode='enforce'").unwrap();
@@ -498,7 +762,21 @@ mod tests {
             .unwrap();
         let nested = f.project.join("nested");
         fs::create_dir(&nested).unwrap();
-        fs::write(nested.join("yoke.toml"), "mode='enforce'").unwrap();
+        fs::write(nested.join("yoke.toml"), "mode='observe'").unwrap();
+        // A file nobody trusted must not shadow the policy a human approved for the project.
+        let loaded = load_trusted(&f.store, &nested, &f.home).unwrap();
+        assert_eq!(loaded.project_root, f.project.canonicalize().unwrap());
+        assert_eq!(loaded.config.mode, Mode::Enforce);
+        let ignored = nested.canonicalize().unwrap().join("yoke.toml");
+        assert!(loaded
+            .snapshots
+            .iter()
+            .any(|s| s.file == ignored && s.exists && !s.trusted));
+        // Once a human trusts the nested file it is a project of its own.
+        prepare_project(&f.store, &nested)
+            .unwrap()
+            .commit(&f.store)
+            .unwrap();
         let loaded = load_trusted(&f.store, &nested, &f.home).unwrap();
         assert_eq!(loaded.project_root, nested.canonicalize().unwrap());
         assert_eq!(loaded.config.mode, Mode::Observe);

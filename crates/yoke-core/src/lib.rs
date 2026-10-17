@@ -10,6 +10,7 @@ pub mod memory;
 pub mod notifications;
 pub mod plan;
 pub mod preset;
+pub mod private;
 pub mod quota;
 pub mod redact;
 pub mod review;

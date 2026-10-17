@@ -93,9 +93,46 @@ fn exit_message(what: &str, status: std::process::ExitStatus) -> String {
     }
 }
 
-fn fetch(what: &str, url: &str, limit: usize) -> Result<Vec<u8>> {
-    ensure!(url.starts_with("https://"), "update requires HTTPS");
-    let mut command = Command::new("curl");
+/// Where curl is looked for before falling back to the `PATH` lookup, so a `curl` that a
+/// project or shell startup file put early on `PATH` is not run with the user's rights.
+pub(super) const CURL_PATHS: [&str; 4] = [
+    "/usr/bin/curl",
+    "/bin/curl",
+    "/usr/local/bin/curl",
+    "/opt/homebrew/bin/curl",
+];
+
+/// The first of `candidates` that is a file, else `curl` for the `PATH` lookup.
+pub(super) fn curl_program(candidates: &[&str]) -> std::path::PathBuf {
+    candidates
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| "curl".into())
+}
+
+/// Whether `YOKE_CURL` may name the curl to run: dev and test builds, and builds made with
+/// `--features honor-home-env`, so tests can fake the transport. The shipped binary ignores it,
+/// so a settings file cannot swap the program that downloads the executable hooks run.
+pub(super) const fn honours_curl_override(debug_build: bool, feature: bool) -> bool {
+    debug_build || feature
+}
+
+/// `requested` (the `YOKE_CURL` value) when overrides are honoured and it is not empty, else the
+/// first fixed location that exists.
+pub(super) fn select_curl(
+    candidates: &[&str],
+    requested: Option<std::ffi::OsString>,
+    honoured: bool,
+) -> std::path::PathBuf {
+    match requested.filter(|path| honoured && !path.is_empty()) {
+        Some(path) => path.into(),
+        None => curl_program(candidates),
+    }
+}
+
+pub(super) fn curl_command(program: &std::path::Path, url: &str, limit: usize) -> Command {
+    let mut command = Command::new(program);
     // No `--fail`: its exit 22 hides the HTTP status. `--write-out` appends the status instead.
     command.args([
         "--disable",
@@ -105,6 +142,7 @@ fn fetch(what: &str, url: &str, limit: usize) -> Result<Vec<u8>> {
         "=https",
         "--proto-redir",
         "=https",
+        "--tlsv1.2",
         "--max-redirs",
         "3",
         "--connect-timeout",
@@ -122,6 +160,17 @@ fn fetch(what: &str, url: &str, limit: usize) -> Result<Vec<u8>> {
         "--url",
         url,
     ]);
+    command
+}
+
+fn fetch(what: &str, url: &str, limit: usize) -> Result<Vec<u8>> {
+    ensure!(url.starts_with("https://"), "update requires HTTPS");
+    let program = select_curl(
+        &CURL_PATHS,
+        std::env::var_os("YOKE_CURL"),
+        honours_curl_override(cfg!(debug_assertions), cfg!(feature = "honor-home-env")),
+    );
+    let mut command = curl_command(&program, url, limit);
     let bytes = collect(
         what,
         &mut command,

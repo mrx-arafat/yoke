@@ -53,6 +53,11 @@ impl Fixture {
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CODEX_HOME")
             .env_remove("YOKE_OFF")
+            // Installing and uninstalling refuse an agent's process, so tests cannot inherit it.
+            .env_remove("CLAUDECODE")
+            .env_remove("CLAUDE_CODE_CHILD_SESSION")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SESSION_ID")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -206,18 +211,67 @@ fn malformed_payload_and_store_failure_follow_mode_and_fallback_rules() {
 }
 
 #[test]
-fn off_exits_before_parse_or_state_and_trust_has_no_agent_bypass() {
+fn off_needs_the_install_token_or_a_pause_and_agents_cannot_trust_or_reinstall() {
     let f = Fixture::new();
-    let off_home = f.home.join("does-not-exist");
-    let output = f
-        .command(&["run-hook", "--unknown"])
-        .env("YOKE_OFF", "1")
-        .env("HOME", &off_home)
-        .output()
-        .unwrap();
-    success(&output);
-    assert!(output.stdout.is_empty() && output.stderr.is_empty());
-    assert!(!off_home.exists());
+    f.snapshot("mode='enforce'\n[[gate]]\nname='review'\non='PreToolUse'\naction='deny'\nmatch_tool='Bash'\nmessage='review required'");
+    let token = "ab".repeat(32);
+    fs::write(f.home.join(".yoke/off-token"), format!("{token}\n")).unwrap();
+    let denies = |output: &Output| {
+        success(output);
+        serde_json::from_slice::<Value>(&output.stdout)
+            .is_ok_and(|result| result["hookSpecificOutput"]["permissionDecision"] == "deny")
+    };
+    let hook_with = |off: Option<&str>| {
+        let mut command = f.command(&["run-hook", "--agent", "claude", "PreToolUse"]);
+        if let Some(off) = off {
+            command.env("YOKE_OFF", off);
+        }
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload().to_string().as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    // The old value, a guess and no value at all leave the gate in force.
+    for off in [Some("1"), Some("true"), Some(&token[1..]), None] {
+        assert!(denies(&hook_with(off)), "{off:?}");
+    }
+    let refusals = fs::read_to_string(f.home.join(".yoke/error.log")).unwrap();
+    assert_eq!(
+        refusals
+            .matches("YOKE_OFF is set but does not match")
+            .count(),
+        3
+    );
+    // The token skips the hook before it reads the payload, the configuration or the database.
+    let decisions = f
+        .store()
+        .decisions(&DecisionFilter::default())
+        .unwrap()
+        .len();
+    let skipped = hook_with(Some(&token));
+    success(&skipped);
+    assert!(skipped.stdout.is_empty() && skipped.stderr.is_empty());
+    assert_eq!(
+        f.store()
+            .decisions(&DecisionFilter::default())
+            .unwrap()
+            .len(),
+        decisions
+    );
+    assert!(fs::read_to_string(f.home.join(".yoke/error.log"))
+        .unwrap()
+        .contains("YOKE_OFF matched the bypass token"));
+    // A pause skips every hook until it ends.
+    let pause = f.home.join(".yoke/paused-until");
+    fs::write(&pause, "99999999999\n").unwrap();
+    assert!(hook_with(None).stdout.is_empty());
+    fs::write(&pause, "1\n").unwrap();
+    assert!(denies(&hook_with(None)));
+
     let refused = f
         .command(&["trust"])
         .env("CODEX_THREAD_ID", "test-agent")
@@ -225,9 +279,19 @@ fn off_exits_before_parse_or_state_and_trust_has_no_agent_bypass() {
         .unwrap();
     assert_eq!(refused.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&refused.stdout).contains("human outside an agent"));
+    for args in [&["uninstall"][..], &["install"], &["update"], &["pause"]] {
+        let refused = f.command(args).env("CLAUDECODE", "1").output().unwrap();
+        assert_eq!(refused.status.code(), Some(1), "{args:?}");
+    }
+    let dry = f
+        .command(&["install", "--agent", "claude", "--dry-run"])
+        .env("CLAUDECODE", "1")
+        .output()
+        .unwrap();
+    success(&dry);
+    assert!(!f.home.join(".claude").exists());
     let flag = f.run(&["trust", "--yes"], "trust\n");
     assert_eq!(flag.status.code(), Some(2));
-    assert!(!f.home.join(".yoke/state.db").exists());
 }
 
 #[test]
@@ -724,7 +788,7 @@ fn stop_with_transcript_over_a_usage_bound_keeps_the_policy_decision() {
 }
 
 #[test]
-fn session_start_prunes_expired_history_in_a_bounded_pass() {
+fn session_start_queues_retention_and_a_background_job_prunes_expired_history() {
     let f = Fixture::new();
     f.snapshot("[log]\nretention_days=1");
     // History at ts=1 is older than any retention window. Retention must keep a pinned
@@ -752,6 +816,17 @@ fn session_start_prunes_expired_history_in_a_bounded_pass() {
         let rows = statement.query_map([], |row| row.get(0)).unwrap();
         rows.collect::<rusqlite::Result<_>>().unwrap()
     };
+    // The hook only queues the pass; the background worker it starts deletes the history.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while ids("SELECT count(*) FROM jobs WHERE kind='retention' AND state='succeeded'") != vec![1]
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        ids("SELECT count(*) FROM jobs WHERE kind='retention' AND state='succeeded'"),
+        vec![1]
+    );
     assert_eq!(ids("SELECT count(*) FROM decisions WHERE ts<2"), vec![0]);
     assert_eq!(ids("SELECT count(*) FROM facts WHERE ts<2"), vec![0]);
     assert_eq!(ids("SELECT pinned FROM memories WHERE id=1"), vec![1]);
@@ -765,6 +840,16 @@ fn session_start_prunes_expired_history_in_a_bounded_pass() {
         .unwrap();
     assert_eq!(fresh.len(), 1, "{fresh:?}");
     assert_eq!(fresh[0].outcome, "allow");
+    // The hourly claim throttles the pass: a second session start in the same hour queues nothing.
+    success(&f.hook(
+        "claude",
+        "SessionStart",
+        json!({"session_id":"again","hook_event_name":"SessionStart"}),
+    ));
+    assert_eq!(
+        ids("SELECT count(*) FROM jobs WHERE kind='retention'"),
+        vec![1]
+    );
 }
 
 #[test]
@@ -781,7 +866,8 @@ fn daily_update_child_is_check_only_off_and_throttled() {
     for _ in 0..2 {
         let mut child = f
             .command(&["run-hook", "SessionStart"])
-            .env("PATH", &bin)
+            // The updater runs curl from a fixed system path, so PATH cannot supply the fake.
+            .env("YOKE_CURL", &curl)
             .spawn()
             .unwrap();
         child
@@ -860,7 +946,10 @@ fn completed_plan_reopens_when_its_tree_changes_and_a_fresh_check_completes_it_a
     .unwrap();
     success(&f.run(&["plan", "start", "journey", "--session", "journey"], ""));
     let check = || {
-        let output = f.run(&["plan", "check", "journey", "--agent", "codex"], "");
+        let output = f.run(
+            &["plan", "check", "journey", "--agent", "codex", "--json"],
+            "",
+        );
         success(&output);
         serde_json::from_slice::<Value>(&output.stdout).unwrap()
     };
@@ -1107,6 +1196,7 @@ fn background_children_write_only_timestamped_error_log_lines() {
     let mut child = f
         .command(&["run-hook", "SessionStart"])
         .env("PATH", &bin)
+        .env("YOKE_CURL", bin.join("curl"))
         .spawn()
         .unwrap();
     child
@@ -1214,7 +1304,10 @@ fn started_plan(f: &Fixture, check: &str) {
 }
 
 fn check_anchor_plan(f: &Fixture) -> Value {
-    let output = f.run(&["plan", "check", "anchor", "--agent", "codex"], "");
+    let output = f.run(
+        &["plan", "check", "anchor", "--agent", "codex", "--json"],
+        "",
+    );
     success(&output);
     let summary: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(summary["plan"]["state"], "done", "{summary}");

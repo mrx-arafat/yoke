@@ -1,14 +1,15 @@
 //! Bounded local transcript accounting. Costs are estimates, never subscription bills.
 use std::collections::BTreeMap;
-use std::fs::{Metadata, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
     quota::{self, Quota},
@@ -19,6 +20,8 @@ use crate::{
 /// The most transcript bytes one import counts: the newest ones.
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_ATTEMPTS: usize = 3;
+/// How much of each end of the counted part of a transcript identifies it between imports.
+const ANCHOR_BYTES: u64 = 4096;
 
 #[derive(Debug, Serialize)]
 pub struct UsageSummary {
@@ -304,11 +307,100 @@ fn partial_key(agent: &str, session: &str) -> String {
 
 const PARTIAL_PREFIX: &str = "usage.partial.";
 
+fn cursor_key(agent: &str, session: &str) -> String {
+    format!("usage.cursor.{agent}.{session}")
+}
+
+/// What reading a transcript carries from one line to the next.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ParseState {
+    /// Codex: the cumulative counters of the last count.
+    previous: [i64; 4],
+    /// Codex: false while the older part is skipped and no count has set `previous` yet.
+    baselined: bool,
+    /// Codex: the model of the latest turn.
+    model: String,
+    /// Codex: the number of samples taken so far.
+    ordinal: u64,
+}
+
+impl ParseState {
+    fn new() -> Self {
+        Self {
+            previous: [0; 4],
+            baselined: true,
+            model: "unknown".to_owned(),
+            ordinal: 0,
+        }
+    }
+}
+
+/// How far an import got in a transcript, so the next one reads only what was appended. It
+/// resumes only the same file, still holding the bytes already counted; anything else is read
+/// again from its start.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Cursor {
+    dev: u64,
+    ino: u64,
+    /// The end of the last line counted.
+    offset: u64,
+    /// SHA-256 of the first and the last [`ANCHOR_BYTES`] before `offset`, which tells a
+    /// transcript rewritten in place from one that only grew.
+    anchor: String,
+    state: ParseState,
+}
+
+impl Cursor {
+    fn resumes(&self, file: &mut File, metadata: &Metadata) -> bool {
+        self.dev == metadata.dev()
+            && self.ino == metadata.ino()
+            && self.offset <= metadata.len()
+            && anchor(file, self.offset).is_ok_and(|found| found == self.anchor)
+    }
+}
+
+fn anchor(file: &mut File, offset: u64) -> Result<String> {
+    let span = offset.min(ANCHOR_BYTES);
+    let mut hash = Sha256::new();
+    let mut window = Vec::new();
+    for from in [0, offset - span] {
+        window.clear();
+        file.seek(SeekFrom::Start(from))?;
+        file.by_ref().take(span).read_to_end(&mut window)?;
+        hash.update(&window);
+    }
+    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// An unparseable cursor is ignored, which only costs a read from the start.
+fn load_cursor(connection: &rusqlite::Connection, key: &str) -> Result<Option<Cursor>> {
+    let value: Option<String> = connection
+        .query_row("SELECT value FROM kv WHERE key=?1", [key], |row| row.get(0))
+        .optional()?;
+    Ok(value.and_then(|value| serde_json::from_str(&value).ok()))
+}
+
+fn has_samples(connection: &rusqlite::Connection, agent: &str, session: &str) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM usage_samples WHERE agent=?1 AND session_id=?2)",
+        params![agent, session],
+        |row| row.get(0),
+    )?)
+}
+
 struct Snapshot {
     observed: Fingerprint,
+    /// The transcript's size when it was opened.
+    size: u64,
     samples: BTreeMap<String, Sample>,
     quota: Option<QuotaSeen>,
+    /// The part skipped by this read, if any; for a resumed read the commit adds it to the
+    /// skipped part already recorded.
     partial: Option<PartialImport>,
+    /// The cursor this read resumed from; `None` when the transcript was read from its start.
+    base: Option<Cursor>,
+    /// Where the next import resumes.
+    next: Cursor,
 }
 
 /// The accounting fields of one transcript line. Everything else, including tool results and
@@ -348,10 +440,12 @@ struct Payload {
     rate_limits: Value,
 }
 
-/// Import a complete bounded JSONL snapshot atomically. No message content is persisted.
-/// A transcript over the bound is counted from its newest bytes, and the skipped part is
-/// recorded as a [`PartialImport`]. Valid snapshots without usage are no-ops, returning no
-/// newly imported summaries.
+/// Import a bounded JSONL snapshot atomically. No message content is persisted.
+/// A transcript already imported is resumed at the byte where the last import stopped, so a
+/// Stop reads only what was appended; a truncated or replaced one is read again from its
+/// start. A read of more than the bound is counted from its newest bytes, and the skipped
+/// part is recorded as a [`PartialImport`]. Valid snapshots without usage are no-ops,
+/// returning no newly imported summaries.
 /// A snapshot is only committed while the transcript is still the file it was read from,
 /// so an importer that lost a race can never overwrite a newer or replaced transcript.
 pub fn ingest(
@@ -378,9 +472,19 @@ fn ingest_bounded(
     );
     let session = identifier(session)?;
     let project = identifier(project)?;
+    let cursor_key = cursor_key(agent, &session);
     for _ in 0..MAX_ATTEMPTS {
-        let snapshot = read_snapshot(agent, &session, transcript, limit)?;
-        if snapshot.samples.is_empty() {
+        let mut cursor = load_cursor(store.connection(), &cursor_key)?;
+        if cursor.is_some() && !has_samples(store.connection(), agent, &session)? {
+            // The samples the cursor counted are gone, and resuming would skip them for good.
+            cursor = None;
+        }
+        let snapshot = read_snapshot_from(agent, &session, transcript, limit, cursor.as_ref())?;
+        if snapshot.base.as_ref() == Some(&snapshot.next) && snapshot.quota.is_none() {
+            // Nothing was appended since the last import.
+            return summaries(store, Some(&project), Some(&session));
+        }
+        if snapshot.samples.is_empty() && snapshot.base.is_none() {
             // Early lifecycle events may precede token counters. Do not erase an
             // earlier import when the current snapshot contains no accounting data.
             if let Some(seen) = &snapshot.quota {
@@ -395,7 +499,14 @@ fn ingest_bounded(
     bail!("usage transcript kept changing during import")
 }
 
-fn read_snapshot(agent: &str, session: &str, transcript: &Path, limit: u64) -> Result<Snapshot> {
+/// Read the transcript from `resume` when that cursor still fits the file, else from its start.
+fn read_snapshot_from(
+    agent: &str,
+    session: &str,
+    transcript: &Path,
+    limit: u64,
+    resume: Option<&Cursor>,
+) -> Result<Snapshot> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -404,32 +515,40 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path, limit: u64) -> R
     let metadata = file.metadata()?;
     ensure!(metadata.is_file(), "transcript must be a regular file");
     let observed = fingerprint(&metadata);
+    let base = resume
+        .filter(|cursor| cursor.resumes(&mut file, &metadata))
+        .cloned();
+    let from = base.as_ref().map_or(0, |cursor| cursor.offset);
+    let mut state = base
+        .as_ref()
+        .map_or_else(ParseState::new, |cursor| cursor.state.clone());
     // Past the bound only the newest bytes are read, from the first line that starts inside
     // them; `take` stops at the size seen now, so a growing file is caught by the commit check.
     let size = metadata.len();
-    let start = size.saturating_sub(limit);
-    if start > 0 {
-        file.seek(SeekFrom::Start(start - 1))?;
-    }
-    let mut reader = BufReader::new(file.take(size - start.saturating_sub(1)));
+    let start = from.max(size.saturating_sub(limit));
+    let seek_to = if start > from { start - 1 } else { from };
+    file.seek(SeekFrom::Start(seek_to))?;
+    let mut reader = BufReader::new(file.take(size - seek_to));
+    let mut pos = seek_to;
     let mut bytes = Vec::new();
     let mut skipped = 0;
-    if start > 0 {
+    if start > from {
         // The byte before `start` ends a line, or the line it belongs to is dropped.
-        skipped = start - 1 + reader.read_until(b'\n', &mut bytes)? as u64;
+        let read = reader.read_until(b'\n', &mut bytes)? as u64;
+        pos += read;
+        skipped = start - from - 1 + read;
+        state.baselined = false;
     }
-    let mut baselined = skipped == 0;
     let mut samples = BTreeMap::<String, Sample>::new();
-    let mut previous = [0i64; 4];
     let mut quota = None;
-    let mut model = "unknown".to_owned();
-    let mut ordinal = 0u64;
     loop {
         bytes.clear();
-        if reader.read_until(b'\n', &mut bytes)? == 0 {
+        let read = reader.read_until(b'\n', &mut bytes)?;
+        if read == 0 {
             break;
         }
         if bytes.iter().all(u8::is_ascii_whitespace) {
+            pos += read as u64;
             continue;
         }
         let row: Line = match serde_json::from_slice(&bytes) {
@@ -439,6 +558,7 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path, limit: u64) -> R
             Err(_) if !bytes.ends_with(b"\n") => break,
             Err(error) => return Err(error).context("malformed usage transcript JSON"),
         };
+        pos += read as u64;
         if agent == "claude" {
             let message = row.message.unwrap_or_default();
             if row.kind != "assistant" || message.usage.is_null() {
@@ -481,7 +601,7 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path, limit: u64) -> R
                 }
             }
             if row.kind == "turn_context" {
-                model = identifier(payload.model.as_str().unwrap_or("unknown"))?;
+                state.model = identifier(payload.model.as_str().unwrap_or("unknown"))?;
             }
             if row.kind != "event_msg" || payload.kind != "token_count" {
                 continue;
@@ -506,13 +626,13 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path, limit: u64) -> R
             ];
             // Counters are cumulative, so with the older part skipped the first count only sets
             // the baseline; counting it would date everything before it to this moment.
-            if !baselined {
-                baselined = true;
-                previous = current;
+            if !state.baselined {
+                state.baselined = true;
+                state.previous = current;
                 continue;
             }
             // Codex repeats a token count without new usage.
-            if current == previous {
+            if current == state.previous {
                 continue;
             }
             // The total restarts from zero on a new conversation segment, such as after a
@@ -520,16 +640,15 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path, limit: u64) -> R
             // the last turn's usage while an earlier total existed. Either starts a new
             // segment counted from zero: samples before it stay, and only usage since the
             // restart is added, so re-importing the file yields the same samples.
+            let previous = state.previous;
             let restarted = current.iter().zip(previous).any(|(n, before)| *n < before)
                 || (previous != [0; 4] && last_turn(&payload.info) == Some(current));
-            if restarted {
-                previous = [0; 4];
-            }
+            let previous = if restarted { [0; 4] } else { previous };
             let mut delta = [0; 4];
             for index in 0..4 {
                 delta[index] = current[index] - previous[index];
             }
-            previous = current;
+            state.previous = current;
             let cached = delta[2]
                 .checked_add(delta[3])
                 .context("cache counters overflow")?;
@@ -540,13 +659,13 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path, limit: u64) -> R
             // OpenAI input totals include both cache reads and cache writes.
             // https://developers.openai.com/api/docs/guides/prompt-caching
             delta[0] -= cached;
-            ordinal += 1;
+            state.ordinal += 1;
             // Local Codex token_count lacks authoritative service-tier metadata.
             // Keep tokens, explicitly leave cost unknown.
             samples.insert(
-                format!("total-{ordinal}"),
+                format!("total-{}", state.ordinal),
                 Sample {
-                    model: model.clone(),
+                    model: state.model.clone(),
                     counts: delta,
                     cost: None,
                     ts: timestamp(&row.timestamp),
@@ -554,8 +673,10 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path, limit: u64) -> R
             );
         }
     }
+    let mut file = reader.into_inner().into_inner();
     Ok(Snapshot {
         observed,
+        size,
         samples,
         quota,
         partial: (skipped > 0).then_some(PartialImport {
@@ -563,6 +684,14 @@ fn read_snapshot(agent: &str, session: &str, transcript: &Path, limit: u64) -> R
             skipped_bytes: skipped,
             limit_bytes: limit,
         }),
+        next: Cursor {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            offset: pos,
+            anchor: anchor(&mut file, pos)?,
+            state,
+        },
+        base,
     })
 }
 
@@ -583,23 +712,62 @@ fn commit_snapshot(
         if current.ok() != Some(snapshot.observed) {
             return Ok(false);
         }
-        // Replace only this explicitly imported session, retaining other sessions.
-        tx.execute("DELETE FROM usage_samples WHERE agent=?1 AND session_id=?2", params![agent, session])?;
+        let cursor_key = cursor_key(agent, session);
+        match &snapshot.base {
+            // Another import moved the cursor after this one read it, so this one is stale.
+            Some(base) if load_cursor(tx, &cursor_key)?.as_ref() != Some(base) => {
+                return Ok(false)
+            }
+            // A resumed read adds to the stored samples; the session's project still follows
+            // the latest import, as it does when the samples are replaced.
+            Some(_) => {
+                tx.execute("UPDATE usage_samples SET project=?3 WHERE agent=?1 AND session_id=?2 AND project<>?3", params![agent, session, project])?;
+            }
+            // Replace only this explicitly imported session, retaining other sessions.
+            None => {
+                tx.execute("DELETE FROM usage_samples WHERE agent=?1 AND session_id=?2", params![agent, session])?;
+            }
+        }
         for (key, sample) in &snapshot.samples {
-            tx.execute("INSERT INTO usage_samples(agent,session_id,project,record_key,model,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_nano_usd,ts) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,unixepoch(?11))",
+            tx.execute("INSERT INTO usage_samples(agent,session_id,project,record_key,model,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_nano_usd,ts) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,unixepoch(?11))
+                ON CONFLICT(agent,session_id,record_key) DO UPDATE SET project=excluded.project,model=excluded.model,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens,cost_nano_usd=excluded.cost_nano_usd,ts=excluded.ts",
                 params![agent, session, project, key, sample.model, sample.counts[0], sample.counts[1], sample.counts[2], sample.counts[3], sample.cost, sample.ts])?;
         }
         if let Some(seen) = &snapshot.quota {
             record_quota(tx, seen)?;
         }
-        // A complete import clears an earlier partial marker, as when a transcript is replaced.
+        // A read from the start clears an earlier partial marker, as when a transcript is
+        // replaced. A resumed read keeps it, adds what it skipped and follows the file's size.
         let key = partial_key(agent, session);
-        match &snapshot.partial {
-            Some(partial) => tx.execute("INSERT INTO kv(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, serde_json::to_string(partial)?])?,
-            None => tx.execute("DELETE FROM kv WHERE key=?1", [key])?,
+        let marker = match &snapshot.base {
+            None => snapshot.partial.clone(),
+            Some(_) => {
+                let before: Option<PartialImport> = tx
+                    .query_row("SELECT value FROM kv WHERE key=?1", [&key], |row| row.get::<_, String>(0))
+                    .optional()?
+                    .and_then(|value| serde_json::from_str(&value).ok());
+                let known = || snapshot.partial.iter().chain(before.iter());
+                known().next().map(|first| PartialImport {
+                    transcript_bytes: snapshot.size,
+                    skipped_bytes: known().map(|p| p.skipped_bytes).sum(),
+                    limit_bytes: first.limit_bytes,
+                })
+            }
         };
+        match marker {
+            Some(marker) => put_kv(tx, &key, &serde_json::to_string(&marker)?)?,
+            None => {
+                tx.execute("DELETE FROM kv WHERE key=?1", [key])?;
+            }
+        }
+        put_kv(tx, &cursor_key, &serde_json::to_string(&snapshot.next)?)?;
         Ok(true)
     })
+}
+
+fn put_kv(tx: &rusqlite::Connection, key: &str, value: &str) -> Result<()> {
+    tx.execute("INSERT INTO kv(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])?;
+    Ok(())
 }
 
 /// Merge a transcript's newest quota reading into the state. SQLite dates it so the one
@@ -780,7 +948,9 @@ pub struct AgentTotals {
 pub fn partial_imports(store: &Store) -> Result<BTreeMap<(String, String), PartialImport>> {
     let mut query = store
         .connection()
-        .prepare("SELECT key,value FROM kv WHERE key LIKE 'usage.partial.%' LIMIT 1000")?;
+        // GLOB, unlike LIKE, is case-sensitive and so can use the key's index; `kv` also holds
+        // a cursor per imported session.
+        .prepare("SELECT key,value FROM kv WHERE key GLOB 'usage.partial.*' LIMIT 1000")?;
     let rows = query.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
@@ -998,13 +1168,13 @@ mod tests {
             commit_snapshot(&store, "claude", "s", "/project", &path, snapshot).unwrap()
         };
         std::fs::write(&path, format!("{}\n", message("m1", 10))).unwrap();
-        let older = read_snapshot("claude", "s", &path, MAX_BYTES).unwrap();
+        let older = read_snapshot_from("claude", "s", &path, MAX_BYTES, None).unwrap();
         std::fs::write(
             &path,
             format!("{}\n{}\n", message("m1", 10), message("m2", 20)),
         )
         .unwrap();
-        let newer = read_snapshot("claude", "s", &path, MAX_BYTES).unwrap();
+        let newer = read_snapshot_from("claude", "s", &path, MAX_BYTES, None).unwrap();
         assert!(commit(&newer));
         assert!(!commit(&older), "the older snapshot must not be written");
         assert_eq!(
@@ -1438,5 +1608,164 @@ mod tests {
             (200, 0)
         );
         assert_eq!(partial_imports(&store).unwrap().len(), 1);
+    }
+
+    /// A Claude row padded so a few rows span more than the 4 KiB ends an import checks.
+    fn padded_row(id: &str, input: u64) -> String {
+        json!({"type":"assistant","sessionId":"s","message":{"id":id,"model":"unknown","content":"x".repeat(6000),"usage":{"input_tokens":input,"output_tokens":1}}}).to_string()
+    }
+
+    fn input_tokens(store: &Store) -> u64 {
+        summaries(store, None, Some("s")).unwrap()[0].input_tokens
+    }
+
+    #[test]
+    fn an_import_reads_only_what_was_appended_since_the_last_one() {
+        use std::os::unix::fs::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        let lines = [
+            padded_row("m1", 1),
+            padded_row("m2", 2),
+            padded_row("m3", 4),
+        ];
+        std::fs::write(
+            &path,
+            lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
+        )
+        .unwrap();
+        ingest(&store, "claude", "s", "/project", &path).unwrap();
+        // Break a line that is already counted, away from both ends of the file. A read from
+        // the start rejects it; an import that resumes never looks at it again.
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all_at(b"X", lines[0].len() as u64 + 1).unwrap();
+        // The final copy of a message streamed earlier replaces it, even across imports.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            format!("{}\n{}\n", padded_row("m3", 16), padded_row("m4", 8)).as_bytes(),
+        )
+        .unwrap();
+        ingest(&store, "claude", "s", "/project", &path).unwrap();
+        assert_eq!(input_tokens(&store), 1 + 2 + 16 + 8);
+        assert!(partial_imports(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn two_imports_resuming_from_the_same_cursor_count_the_new_lines_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        let lines: Vec<String> = [100, 250, 400]
+            .iter()
+            .map(|input| codex_count("2026-10-16T09:00:00Z", *input, 1.0, true).to_string())
+            .collect();
+        std::fs::write(&path, format!("{}\n{}\n", lines[0], lines[1])).unwrap();
+        ingest(&store, "codex", "s", "/project", &path).unwrap();
+        let cursor = load_cursor(store.connection(), &cursor_key("codex", "s")).unwrap();
+        std::fs::write(
+            &path,
+            lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
+        )
+        .unwrap();
+        let read = || read_snapshot_from("codex", "s", &path, MAX_BYTES, cursor.as_ref()).unwrap();
+        let (first, second) = (read(), read());
+        let commit = |snapshot: &Snapshot| {
+            commit_snapshot(&store, "codex", "s", "/project", &path, snapshot).unwrap()
+        };
+        assert!(commit(&first));
+        assert!(!commit(&second), "the cursor moved, so this read is stale");
+        assert_eq!(input_tokens(&store), 400);
+    }
+
+    #[test]
+    fn a_truncated_or_replaced_transcript_is_counted_again_from_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        let write = |ids: &[(&str, u64)]| {
+            let text: String = ids
+                .iter()
+                .map(|(id, input)| format!("{}\n", padded_row(id, *input)))
+                .collect();
+            std::fs::write(&path, text).unwrap();
+        };
+        write(&[("m1", 1), ("m2", 2), ("m3", 4)]);
+        ingest(&store, "claude", "s", "/project", &path).unwrap();
+        // Rewritten in place and longer, so only its first bytes tell it is another file.
+        write(&[("n1", 10), ("n2", 20), ("n3", 40), ("n4", 80)]);
+        ingest(&store, "claude", "s", "/project", &path).unwrap();
+        assert_eq!(input_tokens(&store), 150);
+        // A new file at the same path, longer again.
+        let moved = dir.path().join("moved.jsonl");
+        let text: String = (1..=5)
+            .map(|i| format!("{}\n", padded_row(&format!("p{i}"), 100 * i)))
+            .collect();
+        std::fs::write(&moved, text).unwrap();
+        std::fs::rename(&moved, &path).unwrap();
+        ingest(&store, "claude", "s", "/project", &path).unwrap();
+        assert_eq!(input_tokens(&store), 1500);
+        // Shorter than what was already read.
+        write(&[("q1", 7)]);
+        ingest(&store, "claude", "s", "/project", &path).unwrap();
+        assert_eq!(input_tokens(&store), 7);
+        // The stored samples are gone while the file is unchanged: resuming would skip them.
+        store
+            .connection()
+            .execute("DELETE FROM usage_samples", [])
+            .unwrap();
+        ingest(&store, "claude", "s", "/project", &path).unwrap();
+        assert_eq!(input_tokens(&store), 7);
+    }
+
+    #[test]
+    fn more_than_the_bound_appended_at_once_keeps_earlier_usage_and_notes_what_was_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        let rows: Vec<String> = (1..=11)
+            .map(|i| {
+                json!({"type":"assistant","sessionId":"s","message":{"id":format!("m{i:02}"),"model":"unknown","usage":{"input_tokens":1000 + i,"output_tokens":1}}}).to_string()
+            })
+            .collect();
+        let line = rows[0].len() as u64 + 1;
+        let limit = 3 * line + 10;
+        let write = |count: usize| {
+            let text: String = rows[..count].iter().map(|l| format!("{l}\n")).collect();
+            std::fs::write(&path, text).unwrap();
+        };
+        write(2);
+        ingest_bounded(&store, "claude", "s", "/project", &path, limit).unwrap();
+        assert!(partial_imports(&store).unwrap().is_empty());
+        // Eight lines arrive at once: the newest three are counted, the five before them are not,
+        // and the two lines counted earlier stay.
+        write(10);
+        ingest_bounded(&store, "claude", "s", "/project", &path, limit).unwrap();
+        assert_eq!(input_tokens(&store), 1001 + 1002 + 1008 + 1009 + 1010);
+        let key = ("claude".to_owned(), "s".to_owned());
+        assert_eq!(
+            partial_imports(&store).unwrap()[&key],
+            PartialImport {
+                transcript_bytes: 10 * line,
+                skipped_bytes: 5 * line,
+                limit_bytes: limit
+            }
+        );
+        // A small append afterwards is counted whole, and the note follows the file's size.
+        write(11);
+        ingest_bounded(&store, "claude", "s", "/project", &path, limit).unwrap();
+        assert_eq!(input_tokens(&store), 5030 + 1011);
+        assert_eq!(
+            partial_imports(&store).unwrap()[&key],
+            PartialImport {
+                transcript_bytes: 11 * line,
+                skipped_bytes: 5 * line,
+                limit_bytes: limit
+            }
+        );
     }
 }

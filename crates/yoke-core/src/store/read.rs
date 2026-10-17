@@ -46,6 +46,20 @@ pub struct StatusSnapshot {
     pub latest_version: Option<String>,
 }
 
+/// What one session's recorded decisions amount to, for a status line.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SessionCounts {
+    /// Tool actions that passed, rewritten ones included.
+    pub allowed: i64,
+    /// Actions an enforcing Yoke would have denied, recorded in observe mode.
+    pub would_deny: i64,
+    /// Denied or blocked in enforce mode, Stop included.
+    pub blocked: i64,
+    pub errors: i64,
+    /// Time of the newest decision, with its event and tool.
+    pub last: Option<(i64, String, Option<String>)>,
+}
+
 impl Store {
     /// Cursor pagination uses insertion order; limit is capped at 10,000.
     pub fn decision_page(
@@ -152,6 +166,105 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Counts for one session from the session index, newest decision included.
+    pub fn session_counts(&self, session: &str) -> Result<SessionCounts> {
+        let session = redact(session);
+        let (allowed, would_deny, blocked, errors) = self.connection.query_row(
+            "SELECT coalesce(sum(outcome IN ('allow','rewrite') AND event='pre_tool_use'),0),
+                    coalesce(sum(outcome='would_deny'),0),
+                    coalesce(sum(outcome='deny'),0),
+                    coalesce(sum(outcome='error'),0)
+             FROM decisions WHERE session_id=?1",
+            [&session],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let last = self
+            .connection
+            .query_row(
+                "SELECT ts,event,tool FROM decisions WHERE session_id=?1 ORDER BY ts DESC,id DESC LIMIT 1",
+                [&session],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        Ok(SessionCounts {
+            allowed,
+            would_deny,
+            blocked,
+            errors,
+            last,
+        })
+    }
+
+    /// The project a session was recorded under.
+    pub fn session_project(&self, session: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT project FROM sessions WHERE id=?1",
+                [redact(session)],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Seconds since the last hook decision of a session that has not ended, or since it started
+    /// when it has none; `None` for a session no hook recorded or one that ended.
+    pub fn session_silence(&self, session: &str, now: i64) -> Result<Option<i64>> {
+        let row: Option<(i64, Option<i64>)> = self
+            .connection
+            .query_row(
+                "SELECT started_at,(SELECT MAX(ts) FROM decisions WHERE session_id=sessions.id)
+                 FROM sessions WHERE id=?1 AND ended_at IS NULL",
+                [redact(session)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(started, last)| now.saturating_sub(last.unwrap_or(started))))
+    }
+
+    /// Sessions of `project` that have not ended, started within `max_age` seconds, and have
+    /// recorded no hook decision for at least `silent` seconds, as (id, agent, seconds silent).
+    pub fn silent_sessions(
+        &self,
+        project: &str,
+        now: i64,
+        (silent, max_age): (i64, i64),
+    ) -> Result<Vec<(String, String, i64)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id,agent,?2-last FROM (
+                 SELECT s.id AS id,s.agent AS agent,
+                        COALESCE((SELECT MAX(ts) FROM decisions WHERE session_id=s.id),s.started_at) AS last
+                 FROM sessions s WHERE s.project=?1 AND s.ended_at IS NULL AND s.started_at>=?3)
+             WHERE ?2-last>=?4 ORDER BY last DESC LIMIT 5",
+        )?;
+        let rows = statement.query_map(
+            params![project, now, now.saturating_sub(max_age), silent],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Whether a trusted configuration applies to `directory`: the global one, or one whose
+    /// project root is the directory or contains it. A trusted knowledge file alone sets no
+    /// policy.
+    pub fn policy_trusted(&self, directory: Option<&str>) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM trust WHERE file NOT LIKE '%knowledge.md' AND (scope='global'
+                 OR (scope='project' AND (root=?1 OR substr(?1,1,length(root)+1)=root||'/'))))",
+            [directory],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Facts of `project` that no digest has turned into memories yet.
+    pub fn pending_fact_count(&self, project: &str) -> Result<i64> {
+        Ok(self.connection.query_row(
+            "SELECT count(*) FROM facts WHERE project=?1 AND digested=0",
+            [project],
+            |row| row.get(0),
+        )?)
     }
 
     /// Compare values on the same persistent connection to notice other writers.

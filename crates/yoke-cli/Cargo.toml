@@ -27,6 +27,13 @@ toml_edit.workspace = true
 pulldown-cmark.workspace = true
 libc.workspace = true
 
+[features]
+# Makes a hook honour HOME even when it differs from the account's home. Dev and test builds
+# (debug assertions on) already do. Build an optimized binary for an isolated run with
+# `--features honor-home-env`. Never enable it in release.yml or the installer: the shipped
+# binary ignores an injected HOME so a settings file cannot move Yoke's state.
+honor-home-env = []
+
 [dev-dependencies]
 rusqlite.workspace = true
 

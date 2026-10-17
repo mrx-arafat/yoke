@@ -28,7 +28,8 @@ struct Item<'a> {
     doc: &'static str,
 }
 
-/// The CLI step that inspects a notification's subject.
+/// The CLI step that inspects a notification's subject, or for configuration the human step that
+/// settles it: `yoke trust` refuses agents and is run after reviewing the file with `yoke config`.
 pub(crate) fn next_command(notification: &Notification) -> String {
     match notification.kind.as_str() {
         "hook_error" => "yoke log --outcome error --limit 10".into(),
@@ -36,6 +37,11 @@ pub(crate) fn next_command(notification: &Notification) -> String {
         "plan_waiting" | "plan_stalled" | "check_failed" => {
             format!("yoke plan status {}", notification.subject)
         }
+        // The global configuration has an empty project.
+        "config_stale" | "config_untrusted" if notification.project.is_empty() => {
+            "yoke trust --global".into()
+        }
+        "config_stale" | "config_untrusted" => "yoke trust".into(),
         _ => "yoke config".into(),
     }
 }
@@ -152,6 +158,19 @@ mod tests {
                 crate::Cli::try_parse_from(args).is_ok(),
                 "help command does not parse: {command}"
             );
+        }
+    }
+
+    #[test]
+    fn config_notifications_point_a_human_at_the_matching_trust_command() {
+        for kind in ["config_stale", "config_untrusted"] {
+            let global = sample(kind);
+            assert_eq!(super::next_command(&global), "yoke trust --global");
+            let project = yoke_core::notifications::Notification {
+                project: "/work/demo".into(),
+                ..sample(kind)
+            };
+            assert_eq!(super::next_command(&project), "yoke trust");
         }
     }
 

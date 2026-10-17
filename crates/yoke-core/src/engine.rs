@@ -18,8 +18,14 @@ pub use process::{execute_bounded, kill_running_groups, ProcessOutput};
 /// Paths supplied by the hook integration, independent of the process cwd.
 #[derive(Debug, Clone)]
 pub struct EvaluationContext {
+    /// The directory the event reports. The agent chooses it, so it is data (`YOKE_CWD`),
+    /// never where a trusted command is resolved.
     pub cwd: PathBuf,
+    /// The project the session belongs to (`YOKE_PROJECT`).
     pub project: PathBuf,
+    /// The directory the trusted `yoke.toml` was read from. Gate commands run here, so a
+    /// relative command means the same file whichever directory the agent works in.
+    pub policy_root: PathBuf,
     pub home: PathBuf,
 }
 
@@ -84,6 +90,11 @@ struct CheckResult {
     timed_out: bool,
 }
 
+/// A NUL byte cannot be put in an environment variable and would stop the gate from starting.
+fn env_text(value: &str) -> String {
+    value.replace('\0', "")
+}
+
 fn run_gate(
     gate: &Gate,
     kind: EventKind,
@@ -94,15 +105,15 @@ fn run_gate(
     command
         .arg("-c")
         .arg(&gate.run)
-        .current_dir(&ctx.cwd)
+        .current_dir(&ctx.policy_root)
         .env("YOKE_EVENT", format!("{kind:?}"))
-        .env("YOKE_GATE", &gate.name)
+        .env("YOKE_GATE", env_text(&gate.name))
         .env(
             "YOKE_TOOL_NAME",
-            ev.tool_name.as_deref().unwrap_or_default(),
+            env_text(ev.tool_name.as_deref().unwrap_or_default()),
         )
         .env("YOKE_TOOL_INPUT", ev.tool_input.to_string())
-        .env("YOKE_SESSION", &ev.session_id)
+        .env("YOKE_SESSION", env_text(&ev.session_id))
         .env("YOKE_CWD", &ctx.cwd)
         .env("YOKE_PROJECT", &ctx.project);
     let output = execute_bounded(
@@ -110,7 +121,30 @@ fn run_gate(
         &[],
         Duration::from_secs(gate.timeout),
         OUTPUT_CAP,
-    )?;
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            // The same errno means a missing shell or a missing working directory.
+            let what = if ctx.policy_root.is_dir() {
+                format!("shell '{}' was not found", gate.shell.as_deref().unwrap_or("sh"))
+            } else {
+                format!(
+                    "working directory {} does not exist",
+                    ctx.policy_root.display()
+                )
+            };
+            io::Error::new(error.kind(), what)
+        } else if error.kind() == io::ErrorKind::ArgumentListTooLong {
+            // The tool input travels in the environment, and the system caps its size (about
+            // 128 KiB per variable on Linux, 1 MiB for the whole environment on macOS).
+            io::Error::other(format!(
+                "the tool input is too large ({} KiB) to pass to a check gate; ask the agent to use smaller tool inputs",
+                ev.tool_input.to_string().len() / 1024
+            ))
+        } else {
+            error
+        }
+    })?;
     let reason = if output.timed_out {
         Some(format!(
             "gate '{}' timed out after {}s",
@@ -153,6 +187,7 @@ pub fn evaluate(cfg: &Config, kind: EventKind, ev: &AgentEvent) -> Outcome {
             ev,
             &EvaluationContext {
                 project: cwd.clone(),
+                policy_root: cwd.clone(),
                 cwd,
                 home,
             },
@@ -212,7 +247,11 @@ pub fn evaluate_with_context(
         match gate.action {
             GateAction::Rewrite => {
                 if gate.require_command.as_deref().is_none_or(|command| {
-                    command_available(command, &ctx.cwd, std::env::var_os("PATH").as_deref())
+                    command_available(
+                        command,
+                        &ctx.policy_root,
+                        std::env::var_os("PATH").as_deref(),
+                    )
                 }) {
                     rewrites.push(gate);
                 }
@@ -467,6 +506,7 @@ mod tests {
         EvaluationContext {
             cwd: root.into(),
             project: root.into(),
+            policy_root: root.into(),
             home: root.into(),
         }
     }
@@ -668,6 +708,40 @@ mod tests {
         assert!(out.blocked());
         assert!(out.error);
         assert_eq!(out.gates[0].result, "error");
+        // The reason names what is missing, not just an errno.
+        assert!(
+            out.reasons[0].contains("missing-shell"),
+            "{:?}",
+            out.reasons
+        );
+        let mut gone = cfg.clone();
+        gone.gates[0].shell = None;
+        let mut context = context(root.path());
+        context.policy_root = root.path().join("deleted");
+        let out = evaluate_with_context(&gone, EventKind::PreToolUse, &bash_event("ls"), &context);
+        assert!(
+            out.reasons[0].contains("working directory"),
+            "{:?}",
+            out.reasons
+        );
+    }
+
+    #[test]
+    fn a_gate_resolves_relative_commands_in_the_policy_root_not_the_event_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().canonicalize().unwrap();
+        let sub = project.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        // The project's own check fails; a passing look-alike sits where the agent works.
+        std::fs::write(project.join("check.sh"), "exit 1").unwrap();
+        std::fs::write(sub.join("check.sh"), "exit 0").unwrap();
+        let cfg =
+            Config::parse("[[gate]]\nname = 'lint'\non = 'pre_tool_use'\nrun = 'sh check.sh'\n")
+                .unwrap();
+        let mut ctx = context(&project);
+        ctx.cwd = sub.clone();
+        let out = evaluate_with_context(&cfg, EventKind::PreToolUse, &bash_event("ls"), &ctx);
+        assert!(out.blocked(), "{:?}", out.reasons);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 /// Bounded byte tails and execution evidence from one child process.
@@ -19,17 +19,37 @@ pub struct ProcessOutput {
 }
 
 /// Process groups started here that may still be running, so a process that has to exit
-/// early can stop them first instead of leaving them orphaned.
-static RUNNING_GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// early can stop them first instead of leaving them orphaned. A fixed table of atomics, not a
+/// locked list: a signal handler reads it, and a handler may only use async-signal-safe calls.
+/// More concurrent groups than slots are simply not tracked (gates run one after another).
+static RUNNING_GROUPS: [AtomicI32; 64] = [const { AtomicI32::new(0) }; 64];
 
-/// Kill every process group `execute_bounded` started that has not been reaped yet.
+fn track_group(group: i32) {
+    for slot in &RUNNING_GROUPS {
+        if slot
+            .compare_exchange(0, group, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+fn untrack_group(group: i32) {
+    for slot in &RUNNING_GROUPS {
+        let _ = slot.compare_exchange(group, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
+/// Kill every process group `execute_bounded` started that has not been reaped yet. Uses only
+/// atomics and kill(2), so a signal handler may call it.
 pub fn kill_running_groups() {
-    let mut groups = RUNNING_GROUPS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    for group in groups.drain(..) {
-        // SAFETY: each id is a private process group created by `execute_bounded`.
-        unsafe { libc::kill(-group, libc::SIGKILL) };
+    for slot in &RUNNING_GROUPS {
+        let group = slot.swap(0, Ordering::SeqCst);
+        if group > 0 {
+            // SAFETY: each id is a private process group created by `execute_bounded`.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+        }
     }
 }
 
@@ -40,11 +60,7 @@ impl ChildGroup {
         if self.1 {
             return Ok(());
         }
-        let group = self.0.id() as i32;
-        RUNNING_GROUPS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|running| *running != group);
+        untrack_group(self.0.id() as i32);
         // SAFETY: spawn creates a private process group whose id is the child's pid.
         if unsafe { libc::kill(-(self.0.id() as i32), libc::SIGKILL) } == -1 {
             let error = io::Error::last_os_error();
@@ -80,18 +96,21 @@ fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
     Ok(())
 }
 
+/// Read what is waiting; true when anything was read, so a busy child is polled again at once.
 fn drain(
     pipe: &mut impl Read,
     tail: &mut Vec<u8>,
     cap: usize,
     truncated: &mut bool,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let mut buffer = [0; 8192];
+    let mut read_any = false;
     // Bound each poll so continuous output cannot starve input or deadline checks.
     for _ in 0..8 {
         match pipe.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
+                read_any = true;
                 tail.extend_from_slice(&buffer[..n]);
                 if tail.len() > cap {
                     tail.drain(..tail.len() - cap);
@@ -103,7 +122,7 @@ fn drain(
             Err(e) => return Err(e),
         }
     }
-    Ok(())
+    Ok(read_any)
 }
 
 /// Execute with concurrent nonblocking input/output and a private process group.
@@ -130,10 +149,7 @@ pub fn execute_bounded(
             .spawn()?,
         false,
     );
-    RUNNING_GROUPS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(child.0.id() as i32);
+    track_group(child.0.id() as i32);
     let mut stdout = child.0.stdout.take().expect("piped stdout");
     let mut stderr = child.0.stderr.take().expect("piped stderr");
     let mut stdin = child.0.stdin.take();
@@ -152,13 +168,13 @@ pub fn execute_bounded(
         ms: 0,
     };
     loop {
-        drain(
+        let mut busy = drain(
             &mut stdout,
             &mut out.stdout,
             output_cap,
             &mut out.stdout_truncated,
         )?;
-        drain(
+        busy |= drain(
             &mut stderr,
             &mut out.stderr,
             output_cap,
@@ -176,7 +192,10 @@ pub fn execute_bounded(
                         "child stdin stopped accepting input",
                     ))
                 }
-                Ok(n) => written += n,
+                Ok(n) => {
+                    written += n;
+                    busy = true;
+                }
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -187,13 +206,13 @@ pub fn execute_bounded(
         }
         if let Some(status) = child.0.try_wait()? {
             child.terminate()?;
-            drain(
+            let _ = drain(
                 &mut stdout,
                 &mut out.stdout,
                 output_cap,
                 &mut out.stdout_truncated,
             )?;
-            drain(
+            let _ = drain(
                 &mut stderr,
                 &mut out.stderr,
                 output_cap,
@@ -209,7 +228,11 @@ pub fn execute_bounded(
             out.timed_out = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(5));
+        // A child that keeps writing is read again at once; sleeping every round would cap its
+        // output at about 12 MB/s and make a verbose test suite wait on Yoke.
+        if !busy {
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
     out.ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     Ok(out)

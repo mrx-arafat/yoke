@@ -326,6 +326,8 @@ const DOWNS: &[&str] = &[
     include_str!("010-jobs-recall.down.sql"),
     include_str!("011-notifications.down.sql"),
     include_str!("012-usage-time.down.sql"),
+    include_str!("013-scale-indexes.down.sql"),
+    include_str!("014-session-anchors.down.sql"),
 ];
 
 #[test]
@@ -464,5 +466,31 @@ fn last_close_leaves_an_empty_persistent_wal_that_readers_still_open() -> Result
     }
     let reader = Store::open_read_only(&path)?;
     assert_eq!(reader.decisions(&DecisionFilter::default())?.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn read_only_open_without_sidecars_names_the_way_back_and_creates_nothing() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("state.db");
+    drop(Store::open(&path)?);
+    // Another SQLite client's last close checkpoints the WAL and deletes both sidecars.
+    for sidecar in ["state.db-wal", "state.db-shm"] {
+        std::fs::remove_file(directory.path().join(sidecar))?;
+    }
+    let error = Store::open_read_only(&path).err().expect("no sidecars");
+    let missing = error
+        .downcast_ref::<MissingSidecars>()
+        .expect("typed error");
+    assert_eq!(missing.missing, ["state.db-wal", "state.db-shm"]);
+    assert!(
+        format!("{error:#}").contains("yoke log --limit 1"),
+        "{error:#}"
+    );
+    // SQLite alone would have left a zero-byte state.db-wal behind.
+    let files: Vec<_> = std::fs::read_dir(directory.path())?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<_>>()?;
+    assert_eq!(files, ["state.db"]);
     Ok(())
 }

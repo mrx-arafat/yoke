@@ -255,3 +255,49 @@ fn statusline_treats_an_empty_state_file_like_missing_state() {
         0
     );
 }
+
+#[test]
+fn session_start_raises_the_unread_count_that_the_statusline_shows() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // A project file nobody trusted yet is the notification a new user needs to see.
+    std::fs::write(project.join("yoke.toml"), "mode = \"observe\"\n").unwrap();
+    let run = |args: &[&str], stdin: String| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_yoke"))
+            .args(args)
+            .env("HOME", &home)
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .env_remove("YOKE_OFF")
+            .env("NO_COLOR", "1")
+            .current_dir(&project)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let session = serde_json::json!({"session_id": "s1", "cwd": project}).to_string();
+    run(
+        &["run-hook", "--agent", "claude", "SessionStart"],
+        session.clone(),
+    );
+    assert_eq!(
+        run(&["statusline"], session).trim(),
+        "yoke observe (no trusted policy) | allowed 0 \u{b7} would-deny 0 | ! 1 unread"
+    );
+}

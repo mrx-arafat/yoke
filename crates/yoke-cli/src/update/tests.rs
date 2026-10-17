@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 const TARGET: &str = "aarch64-apple-darwin";
 const OLD: &[u8] = b"#!/bin/sh\nprintf old";
 const NEW: &[u8] = b"#!/bin/sh\nprintf new";
+/// As long as `NEW`, so the fixture's asset sizes stay right, and it fails when run.
+const UNRUNNABLE: &[u8] = b"#!/bin/sh\nexit 7    ";
 
 fn fixture() -> (Release, Vec<u8>) {
     let name = format!("yoke-{TARGET}");
@@ -62,13 +64,17 @@ fn replaces_local_executable_only_after_checksum_validation() {
 
 #[test]
 fn download_and_checksum_failures_preserve_old_executable_and_leave_no_stage() {
-    for failure in ["checksum", "download", "short", "filename"] {
+    for failure in ["checksum", "download", "short", "filename", "unrunnable"] {
         let temp = tempfile::tempdir().unwrap();
         let executable = old_executable(temp.path());
         let (release, checksum) = fixture();
         let mut fetch = |url: &str, _: usize| {
             if url.ends_with(".sha256") {
                 let mut bytes = checksum.clone();
+                if failure == "unrunnable" {
+                    bytes =
+                        format!("{:x}  yoke-{TARGET}\n", Sha256::digest(UNRUNNABLE)).into_bytes();
+                }
                 if failure == "checksum" {
                     bytes[0] = if bytes[0] == b'0' { b'1' } else { b'0' };
                 }
@@ -81,6 +87,8 @@ fn download_and_checksum_failures_preserve_old_executable_and_leave_no_stage() {
                 bail!("fixture network failure")
             } else if failure == "short" {
                 Ok(vec![0])
+            } else if failure == "unrunnable" {
+                Ok(UNRUNNABLE.to_vec())
             } else {
                 Ok(NEW.to_vec())
             }
@@ -264,4 +272,51 @@ fn curl_results_become_specific_messages_without_leaking_curl_exit_codes() {
             .to_string();
         assert!(message.contains(expected), "{message}");
     }
+}
+
+#[test]
+fn curl_runs_from_a_fixed_path_and_never_negotiates_below_tls_1_2() {
+    let temp = tempfile::tempdir().unwrap();
+    let curl = temp.path().join("curl");
+    fs::write(&curl, "").unwrap();
+    let candidates = ["/nonexistent/curl", curl.to_str().unwrap()];
+
+    assert_eq!(transport::curl_program(&candidates), curl);
+    // With none of the fixed locations present, the PATH lookup is the last resort.
+    assert_eq!(
+        transport::curl_program(&["/nonexistent/curl"]),
+        Path::new("curl")
+    );
+    assert!(transport::CURL_PATHS
+        .iter()
+        .all(|path| Path::new(path).is_absolute()));
+
+    let command = transport::curl_command(&curl, "https://example.invalid/a", 10);
+    let args: Vec<_> = command.get_args().collect();
+    assert_eq!(command.get_program(), curl.as_os_str());
+    assert!(args.contains(&std::ffi::OsStr::new("--tlsv1.2")));
+}
+
+#[test]
+fn yoke_curl_names_the_transport_only_in_dev_and_test_builds() {
+    let fixed = ["/bin/sh"];
+    let requested = || Some(std::ffi::OsString::from("/tmp/fake-curl"));
+
+    // The shipped configuration (no debug assertions, no feature) ignores the override.
+    assert!(!transport::honours_curl_override(false, false));
+    assert_eq!(
+        transport::select_curl(&fixed, requested(), false),
+        Path::new("/bin/sh")
+    );
+    // Dev and test builds, and the feature build, honour it; an empty value never counts.
+    assert!(transport::honours_curl_override(true, false));
+    assert!(transport::honours_curl_override(false, true));
+    assert_eq!(
+        transport::select_curl(&fixed, requested(), true),
+        Path::new("/tmp/fake-curl")
+    );
+    assert_eq!(
+        transport::select_curl(&fixed, Some("".into()), true),
+        Path::new("/bin/sh")
+    );
 }

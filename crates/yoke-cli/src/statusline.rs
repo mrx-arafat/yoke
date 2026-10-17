@@ -1,18 +1,120 @@
-//! Read-only status refresh; external wrapping is explicit and bounded. The one write is the
-//! agent's reported quota, merged into a small file beside the state when that directory exists.
+//! Read-only status refresh; external wrapping is explicit and bounded.
+//!
+//! A paint never waits: it reads the agent's callback, one read-only pass over the state
+//! database, a few small files, and prints. Anything slow (a git status, a health check) comes
+//! from a cache beside the state, refreshed by a detached child, and is left out when absent.
+//! The writes are the agent's reported quota and those caches, all in the state directory and
+//! only when it already exists.
 use std::io::{IsTerminal, Read};
-use std::path::Path;
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{ensure, Context, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 use yoke_core::engine::execute_bounded;
+use yoke_core::notifications;
 use yoke_core::quota;
-use yoke_core::store::{StatusSnapshot, Store};
+use yoke_core::store::Store;
 use yoke_core::timefmt;
 
+mod cache;
+mod git;
+mod line;
+
+use line::{Facts, Look};
+
 const INPUT_CAP: usize = 64 * 1024;
+/// Optional facts (git, health) are skipped once a paint has used this long.
+const OPTIONAL_BUDGET: Duration = Duration::from_millis(30);
+const HEALTH_FILE: &str = "statusline-health.json";
+const HEALTH_FRESH: i64 = 60;
+const HEALTH_SHOWN: i64 = 3_600;
+/// A detached refresh ends itself after this long, whatever it is waiting for.
+const CHILD_LIMIT: Duration = Duration::from_secs(5);
+/// Columns assumed when the terminal cannot be asked.
+const DEFAULT_WIDTH: usize = 120;
+
+/// How much the statusline shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Style {
+    /// One line.
+    #[default]
+    Compact,
+    /// The same line plus a second line with the model, last event and both quota resets.
+    Detailed,
+}
+
+/// How a paint looks and what it may touch; tests build it explicitly.
+#[derive(Clone, Debug)]
+struct Settings {
+    look: Look,
+    git: bool,
+    health: bool,
+}
+
+impl Settings {
+    /// `NO_COLOR` (any non-empty value) turns colors off and `YOKE_ASCII=1` limits the line to
+    /// 7-bit characters. `YOKE_STATUSLINE_WIDTH` overrides the detected width.
+    fn from_env(style: Style) -> Self {
+        let var =
+            |name: &str| std::env::var_os(name).map(|value| value.to_string_lossy().into_owned());
+        Self::from_vars(style, &var, terminal_size)
+    }
+
+    /// `from_env` with the variables and the terminal given, so every option is testable.
+    fn from_vars(
+        style: Style,
+        var: &dyn Fn(&str) -> Option<String>,
+        terminal: fn() -> Option<usize>,
+    ) -> Self {
+        let width = ["YOKE_STATUSLINE_WIDTH", "COLUMNS"]
+            .into_iter()
+            .filter_map(var)
+            .find_map(|value| value.trim().parse::<usize>().ok().filter(|n| *n > 0))
+            .or_else(terminal);
+        Self {
+            look: Look {
+                color: var("NO_COLOR").is_none_or(|value| value.is_empty()),
+                ascii: var("YOKE_ASCII").is_some_and(|value| !value.is_empty() && value != "0"),
+                detailed: style == Style::Detailed,
+                width: width.unwrap_or(DEFAULT_WIDTH),
+            },
+            git: true,
+            health: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn plain() -> Self {
+        Self {
+            look: Look {
+                color: false,
+                ascii: false,
+                detailed: false,
+                width: 0,
+            },
+            git: false,
+            health: false,
+        }
+    }
+}
+
+/// Columns of the terminal the agent runs in. The callback's stdout is a pipe to the agent, so
+/// ask the controlling terminal, then an inherited stream.
+fn terminal_size() -> Option<usize> {
+    let tty = std::fs::File::open("/dev/tty").ok();
+    let descriptors = tty.iter().map(AsRawFd::as_raw_fd).chain([2, 0]);
+    for fd in descriptors {
+        // SAFETY: `winsize` is plain data and TIOCGWINSZ only writes into it.
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ as _, &mut size) } == 0 && size.ws_col > 0 {
+            return Some(usize::from(size.ws_col));
+        }
+    }
+    None
+}
 
 fn clean(text: &str, limit: usize) -> String {
     text.chars()
@@ -38,53 +140,134 @@ fn context_percentage(payload: &Value) -> Option<f64> {
     (used <= size).then_some(used as f64 * 100.0 / size as f64)
 }
 
-fn render(snapshot: Option<&StatusSnapshot>, payload: &Value) -> String {
-    let mut fields = vec![match snapshot.and_then(|s| s.mode.as_deref()) {
-        Some(mode) => format!("yoke {}", clean(mode, 24)),
-        None => "yoke (no data yet)".into(),
-    }];
-    if let Some(snapshot) = snapshot {
-        if let Some(plan) = snapshot.plan_slug.as_deref() {
-            fields.push(format!(
-                "{}:{}",
-                clean(plan, 64),
-                clean(snapshot.plan_state.as_deref().unwrap_or("unknown"), 24)
-            ));
-        }
-        if snapshot.plan_state.as_deref() == Some("stalled") {
-            fields.push("! stalled".into());
-        } else if snapshot.recent_deny {
-            fields.push("! recent deny".into());
-        }
-        if let Some(latest) = snapshot.latest_version.as_deref() {
-            if let (Ok(latest_version), Ok(current)) = (
-                crate::update::version(latest),
-                crate::update::version(env!("CARGO_PKG_VERSION")),
-            ) {
-                if latest_version > current {
-                    fields.push(format!("update {latest}"));
-                }
-            }
-        }
-    }
-    if let Some(percent) = context_percentage(payload) {
-        fields.push(format!("ctx {percent:.0}%"));
-    }
-    fields.join(" | ")
-}
-
 /// The line to paint, and a diagnostic for stderr when part of the input could not be used.
 struct Rendered {
+    /// One line, or two joined by a newline in the detailed style.
     line: String,
     warning: Option<String>,
 }
 
-fn refresh(home: &Path, input: &[u8], wrap: Option<&str>) -> Result<Rendered> {
-    let now: i64 = SystemTime::now()
+fn unix_now() -> Result<i64> {
+    Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)?
         .as_secs()
-        .try_into()?;
-    refresh_at(home, input, wrap, now, timefmt::utc_offset_secs(now))
+        .try_into()?)
+}
+
+fn refresh(home: &Path, input: &[u8], wrap: Option<&str>, settings: &Settings) -> Result<Rendered> {
+    let now = unix_now()?;
+    refresh_at(
+        home,
+        input,
+        wrap,
+        now,
+        timefmt::utc_offset_secs(now),
+        settings,
+    )
+}
+
+/// A newer release than this one, from the version the daily check recorded.
+fn newer_release(latest: Option<&str>) -> Option<String> {
+    let latest = latest?;
+    let (latest_version, current) = (
+        crate::update::version(latest).ok()?,
+        crate::update::version(env!("CARGO_PKG_VERSION")).ok()?,
+    );
+    (latest_version > current).then(|| latest.to_owned())
+}
+
+/// What the callback itself carries: model, cost, duration, lines, context and quota.
+fn from_payload(facts: &mut Facts, payload: &Value, home: &Path, now: i64) {
+    facts.model = payload["model"]["display_name"]
+        .as_str()
+        .or_else(|| payload["model"]["id"].as_str())
+        .map(str::to_owned);
+    let cost = &payload["cost"];
+    facts.cost_usd = cost["total_cost_usd"].as_f64();
+    facts.duration_ms = cost["total_duration_ms"].as_u64();
+    let (added, removed) = (
+        cost["total_lines_added"].as_u64(),
+        cost["total_lines_removed"].as_u64(),
+    );
+    facts.lines =
+        (added.is_some() || removed.is_some()).then(|| (added.unwrap_or(0), removed.unwrap_or(0)));
+    facts.context = context_percentage(payload);
+    if let Some(reading) = quota::Quota::from_claude(payload, now) {
+        // The line shows what this callback carries. The record feeds `yoke usage`, which has no
+        // callback of its own, so a failed write only leaves it showing an older observed time.
+        let _ = quota::record_file(&quota::claude_file(home), &reading, now);
+        facts.quota = reading.windows;
+    }
+}
+
+/// Yoke's own facts, from one read-only pass over the state database. The snapshot is required;
+/// the rest degrade to absent, with the first failure reported on stderr rather than in the bar.
+fn from_state(
+    facts: &mut Facts,
+    store: &Store,
+    (session, project, dir): (Option<&str>, Option<&str>, &Path),
+    now: i64,
+) -> Result<Option<String>> {
+    let snapshot = store.status_snapshot(session, project, now)?;
+    facts.mode = snapshot.mode;
+    facts.plan = snapshot.plan_slug.zip(snapshot.plan_state);
+    facts.recent_deny = snapshot.recent_deny;
+    facts.update = newer_release(snapshot.latest_version.as_deref());
+    let mut failure = None;
+    let mut note = |what: &str, error: anyhow::Error| {
+        failure.get_or_insert_with(|| format!("{what}: {error:#}"));
+    };
+    // Session ids identify the project even when the status callback runs in a subdirectory.
+    let recorded = match session.map(|id| store.session_project(id)).transpose() {
+        Ok(recorded) => recorded.flatten(),
+        Err(error) => {
+            note("session lookup failed", error);
+            None
+        }
+    };
+    let known_session = recorded.is_some();
+    let project = recorded.as_deref().or(project);
+    // A session no hook has recorded yet still belongs to the project that contains its directory.
+    match store.policy_trusted(project.or(dir.to_str())) {
+        Ok(trusted) => facts.trusted = Some(trusted),
+        Err(error) => note("trust lookup failed", error),
+    }
+    if let Some(session) = session.filter(|_| known_session) {
+        match store.session_counts(session) {
+            Ok(counts) => facts.counts = Some(counts),
+            Err(error) => note("decision counts failed", error),
+        }
+    }
+    // An older schema has no notifications table; the line paints without the field then.
+    facts.unread = notifications::unread_for_status(store, session, project).unwrap_or(0);
+    Ok(failure)
+}
+
+/// The directory the session works in, which is where git is asked and never anywhere else.
+fn working_dir(payload: &Value, fallback: &Path) -> PathBuf {
+    [&payload["workspace"]["current_dir"], &payload["cwd"]]
+        .into_iter()
+        .filter_map(Value::as_str)
+        .map(PathBuf::from)
+        .find(|dir| dir.is_absolute())
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
+/// The first problem `yoke health` would report, as the last background check found it. A stale
+/// or missing answer starts a detached refresh and is not waited for.
+fn cached_problem(home: &Path, dir: &Path, now: i64) -> Option<String> {
+    let key = dir.to_string_lossy();
+    let entry = cache::load(home, HEALTH_FILE, &key);
+    let age = entry.as_ref().and_then(|entry| entry.age(now));
+    let busy = entry.as_ref().is_some_and(|entry| entry.in_flight(now));
+    let shown = age
+        .filter(|age| *age <= HEALTH_SHOWN)
+        .and(entry.as_ref())
+        .and_then(|entry| entry.value["problem"].as_str().map(str::to_owned));
+    if age.is_none_or(|age| age > HEALTH_FRESH) && !busy {
+        let _ = cache::refresh(home, HEALTH_FILE, &key, entry, now, "--refresh-health", dir);
+    }
+    shown
 }
 
 /// `refresh` with the clock and time zone given, so the time-dependent fields are testable.
@@ -94,11 +277,13 @@ fn refresh_at(
     wrap: Option<&str>,
     now: i64,
     offset_secs: i64,
+    settings: &Settings,
 ) -> Result<Rendered> {
+    let started = Instant::now();
     ensure!(input.len() <= INPUT_CAP, "statusline input exceeds 64 KiB");
     // The agent repaints this line constantly, so input Yoke cannot read still gets the line
     // from recorded state, and the reason goes to stderr instead of into the prompt bar.
-    let (payload, warning) = if input.iter().all(u8::is_ascii_whitespace) {
+    let (payload, mut warning) = if input.iter().all(u8::is_ascii_whitespace) {
         (Value::Null, None)
     } else {
         match serde_json::from_slice(input) {
@@ -123,7 +308,6 @@ fn refresh_at(
     };
     let cwd = std::env::current_dir()?;
     let session = payload["session_id"].as_str();
-    // Session ids identify the project even when the status callback runs in a subdirectory.
     let project = if session.is_some() {
         None
     } else {
@@ -132,71 +316,137 @@ fn refresh_at(
             .or_else(|| payload["cwd"].as_str())
             .or_else(|| cwd.to_str())
     };
-    let snapshot = store
-        .as_ref()
-        .map(|store| store.status_snapshot(session, project, now))
-        .transpose()?;
-    let mut line = render(snapshot.as_ref(), &payload);
-    if let Some(reading) = quota::Quota::from_claude(&payload, now) {
-        // The line shows what this callback carries. The record feeds `yoke usage`, which has no
-        // callback of its own, so a failed write only leaves it showing an older observed time.
-        let _ = quota::record_file(&quota::claude_file(home), &reading, now);
-        if let Some(field) = reading.status_field(now, offset_secs) {
-            line.push_str(" | ");
-            line.push_str(&field);
+    let dir = working_dir(&payload, &cwd);
+    let mut facts = Facts::default();
+    from_payload(&mut facts, &payload, home, now);
+    facts.session = session.map(str::to_owned);
+    if let Some(store) = &store {
+        let failure = from_state(&mut facts, store, (session, project, &dir), now)?;
+        warning = warning.or(failure);
+    }
+    if settings.git && started.elapsed() < OPTIONAL_BUDGET {
+        facts.branch = git::status(home, &dir, now);
+    }
+    if settings.health && store.is_some() && started.elapsed() < OPTIONAL_BUDGET {
+        facts.problem = cached_problem(home, &dir, now);
+    }
+    // A pause, a YOKE_OFF in this environment or a silent session outrank the cached check.
+    if let Some(problem) = crate::bypass::live_problem(home, store.as_ref(), session, now) {
+        facts.problem = Some(problem);
+    }
+    let wrapped = wrap.map(|wrap| run_wrapper(wrap, input)).transpose()?;
+    let mut look = settings.look.clone();
+    if let Some(wrapped) = wrapped.as_ref().filter(|wrapped| !wrapped.is_empty()) {
+        // Reserve room for the wrapped command's output so the line as a whole still fits;
+        // width 0 means no limit and stays that way.
+        if look.width > 0 {
+            look.width = look
+                .width
+                .saturating_sub(wrapped.chars().count() + 3)
+                .max(1);
         }
     }
-    if let Some(wrap) = wrap {
-        ensure!(
-            std::env::var_os("YOKE_STATUSLINE_WRAPPED").is_none(),
-            "recursive statusline wrapper refused"
-        );
-        ensure!(
-            !wrap.trim().is_empty() && wrap.len() <= 4096 && !wrap.contains('\0'),
-            "invalid statusline wrapper"
-        );
-        let output = execute_bounded(
-            Command::new("/bin/sh")
-                .arg("-c")
-                .arg(wrap)
-                .env("YOKE_OFF", "1")
-                .env("YOKE_STATUSLINE_WRAPPED", "1"),
-            input,
-            Duration::from_millis(250),
-            4096,
-        )?;
-        ensure!(
-            output.success && !output.timed_out,
-            "statusline wrapper failed or exceeded 250 ms"
-        );
-        ensure!(
-            !output.stdout_truncated,
-            "statusline wrapper output exceeds 4096 bytes"
-        );
-        let wrapped = clean(&String::from_utf8_lossy(&output.stdout), 512);
-        if !wrapped.trim().is_empty() {
-            line.push_str(" | ");
-            line.push_str(wrapped.trim());
-        }
+    let mut lines = line::render(&facts, &look, now, offset_secs);
+    if let Some(wrapped) = wrapped.filter(|wrapped| !wrapped.is_empty()) {
+        lines[0].push_str(" | ");
+        lines[0].push_str(&wrapped);
     }
-    Ok(Rendered { line, warning })
+    Ok(Rendered {
+        line: lines.join("\n"),
+        warning,
+    })
 }
 
-fn render_stdin(wrap: Option<&str>) -> Result<Rendered> {
+/// Run the user's own statusline command with the callback's input, under a hard limit.
+fn run_wrapper(wrap: &str, input: &[u8]) -> Result<String> {
+    ensure!(
+        std::env::var_os("YOKE_STATUSLINE_WRAPPED").is_none(),
+        "recursive statusline wrapper refused"
+    );
+    ensure!(
+        !wrap.trim().is_empty() && wrap.len() <= 4096 && !wrap.contains('\0'),
+        "invalid statusline wrapper"
+    );
+    let output = execute_bounded(
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(wrap)
+            .env("YOKE_OFF", "1")
+            .env("YOKE_STATUSLINE_WRAPPED", "1"),
+        input,
+        Duration::from_millis(250),
+        4096,
+    )?;
+    ensure!(
+        output.success && !output.timed_out,
+        "statusline wrapper failed or exceeded 250 ms"
+    );
+    ensure!(
+        !output.stdout_truncated,
+        "statusline wrapper output exceeds 4096 bytes"
+    );
+    Ok(clean(&String::from_utf8_lossy(&output.stdout), 512)
+        .trim()
+        .to_owned())
+}
+
+fn render_stdin(wrap: Option<&str>, style: Style) -> Result<Rendered> {
     let mut input = Vec::new();
     if !std::io::stdin().is_terminal() {
         std::io::stdin()
             .take((INPUT_CAP + 1) as u64)
             .read_to_end(&mut input)?;
     }
-    refresh(&crate::commands::home()?, &input, wrap)
+    refresh(
+        &crate::commands::home()?,
+        &input,
+        wrap,
+        &Settings::from_env(style),
+    )
 }
 
-/// Consume the callback's EOF-terminated input, read existing state, print one line.
-/// The agent paints stdout in its prompt bar, so diagnostics go to stderr only, and a failure
-/// prints nothing there rather than the usual `error:` and `help:` block.
-pub fn run(wrap: Option<&str>) -> Result<()> {
-    match render_stdin(wrap) {
+/// The detached children `cache::refresh` starts: no input, no output, one fact each.
+fn refresh_child(git_dir: Option<&Path>, health_dir: Option<&Path>) -> Result<()> {
+    // A refresh that hangs, on a stalled filesystem for instance, must not outlive the guard
+    // that lets the next paint start another one.
+    std::thread::spawn(|| {
+        std::thread::sleep(CHILD_LIMIT);
+        std::process::exit(0)
+    });
+    let home = crate::commands::home()?;
+    let now = unix_now()?;
+    if let Some(dir) = git_dir {
+        git::refresh(&home, dir, now)?;
+    }
+    if let Some(dir) = health_dir {
+        let problem = crate::health::first_problem()?;
+        cache::save(
+            &home,
+            HEALTH_FILE,
+            &dir.to_string_lossy(),
+            cache::Entry {
+                at: now,
+                started: 0,
+                value: json!({ "problem": problem }),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Consume the callback's EOF-terminated input, read existing state, print one line (two in the
+/// detailed style). The agent paints stdout in its prompt bar, so diagnostics go to stderr only,
+/// and a failure prints nothing there rather than the usual `error:` and `help:` block.
+pub fn run(
+    wrap: Option<&str>,
+    style: Style,
+    refresh_git: Option<&Path>,
+    refresh_health: Option<&Path>,
+) -> Result<()> {
+    if refresh_git.is_some() || refresh_health.is_some() {
+        return refresh_child(refresh_git, refresh_health);
+    }
+    match render_stdin(wrap, style) {
         Ok(rendered) => {
             println!("{}", rendered.line);
             if let Some(warning) = rendered.warning {
@@ -212,167 +462,4 @@ pub fn run(wrap: Option<&str>) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    /// The wrapper has a fixed 250 ms budget that a loaded host can miss once; a wrapper that
-    /// really cannot finish fails every attempt.
-    fn refresh_wrapped(home: &Path, input: &[u8], wrap: &str) -> String {
-        let mut last = None;
-        for _ in 0..10 {
-            match refresh(home, input, Some(wrap)) {
-                Ok(rendered) => return rendered.line,
-                Err(error) if error.to_string().contains("exceeded 250 ms") => last = Some(error),
-                Err(error) => panic!("{error:#}"),
-            }
-        }
-        panic!("the wrapper missed its 250 ms budget 10 times: {last:?}");
-    }
-
-    #[test]
-    fn absent_state_does_not_create_database_and_wrapper_receives_identical_stdin() {
-        let home = tempfile::tempdir().unwrap();
-        let input = br#"{ "context_window": {"used_percentage": 42} }"#;
-        let line = refresh_wrapped(home.path(), input, "cat");
-        assert_eq!(
-            line,
-            format!(
-                "yoke (no data yet) | ctx 42% | {}",
-                String::from_utf8_lossy(input)
-            )
-        );
-        assert!(!home.path().join(".yoke").exists());
-        assert!(refresh(home.path(), b"{}", Some("sleep 2")).is_err());
-        assert!(refresh(home.path(), &[b' '; INPUT_CAP + 1], None).is_err());
-    }
-
-    #[test]
-    fn unreadable_json_still_paints_the_recorded_state_line_and_warns_separately() {
-        let home = tempfile::tempdir().unwrap();
-        let rendered = refresh(home.path(), b"not json", None).unwrap();
-        assert_eq!(rendered.line, "yoke (no data yet)");
-        let warning = rendered.warning.unwrap();
-        assert!(
-            warning.starts_with("invalid statusline JSON: "),
-            "{warning}"
-        );
-        assert!(!home.path().join(".yoke").exists());
-    }
-
-    #[test]
-    fn existing_wal_state_is_read_without_changes_and_missing_shm_is_not_created() {
-        fn files(directory: &Path) -> std::collections::BTreeMap<std::ffi::OsString, Vec<u8>> {
-            std::fs::read_dir(directory)
-                .unwrap()
-                .map(|entry| {
-                    let entry = entry.unwrap();
-                    (entry.file_name(), std::fs::read(entry.path()).unwrap())
-                })
-                .collect()
-        }
-        let home = tempfile::tempdir().unwrap();
-        let directory = home.path().join(".yoke");
-        std::fs::create_dir(&directory).unwrap();
-        // Hooks truncate the WAL when the last connection closes, so build the state in a
-        // scratch directory, copy the live main file with its sidecars while a second
-        // connection still holds the WAL open, and read that copy with no connection open.
-        let scratch = home.path().join("scratch");
-        std::fs::create_dir(&scratch).unwrap();
-        let store = Store::open(scratch.join("state.db")).unwrap();
-        store
-            .set_kv(crate::update::LATEST_VERSION_KEY, "v999.0.0")
-            .unwrap();
-        let holder = rusqlite::Connection::open(scratch.join("state.db")).unwrap();
-        let rows: i64 = holder
-            .query_row("SELECT count(*) FROM kv", [], |row| row.get(0))
-            .unwrap();
-        assert!(rows > 0);
-        for name in ["state.db", "state.db-wal", "state.db-shm"] {
-            std::fs::copy(scratch.join(name), directory.join(name)).unwrap();
-        }
-        drop(store);
-        drop(holder);
-        let before = files(&directory);
-        assert!(before.contains_key(std::ffi::OsStr::new("state.db-shm")));
-        assert!(!before[std::ffi::OsStr::new("state.db-wal")].is_empty());
-        assert_eq!(
-            refresh(home.path(), b"{}", None).unwrap().line,
-            "yoke (no data yet) | update v999.0.0"
-        );
-        assert_eq!(files(&directory), before);
-
-        // Only this disposable fixture's sidecar is removed. A callback must
-        // surface unavailable state rather than recreate the WAL index.
-        std::fs::remove_file(directory.join("state.db-shm")).unwrap();
-        let before = files(&directory);
-        assert!(refresh(home.path(), b"{}", None).is_err());
-        assert_eq!(files(&directory), before);
-    }
-
-    #[test]
-    fn quota_renders_from_the_payload_and_is_recorded_only_inside_existing_state() {
-        // 2026-10-16 10:00 UTC, a Friday; the weekly window resets the following Monday.
-        const NOW: i64 = 1_792_144_800;
-        let input = json!({
-            "context_window": {"used_percentage": 6},
-            "rate_limits": {
-                "five_hour": {"used_percentage": 8, "resets_at": NOW + 3_600},
-                "seven_day": {"used_percentage": 63, "resets_at": NOW + 3 * 86_400}
-            }
-        })
-        .to_string();
-        let line = "yoke (no data yet) | ctx 6% | 5h 8% · 7d 63% (resets Mon 10:00)";
-        let home = tempfile::tempdir().unwrap();
-        assert_eq!(
-            refresh_at(home.path(), input.as_bytes(), None, NOW, 0)
-                .unwrap()
-                .line,
-            line
-        );
-        assert!(!home.path().join(".yoke").exists());
-
-        std::fs::create_dir(home.path().join(".yoke")).unwrap();
-        assert_eq!(
-            refresh_at(home.path(), input.as_bytes(), None, NOW, 0)
-                .unwrap()
-                .line,
-            line
-        );
-        let saved = quota::read_file(&quota::claude_file(home.path()), "claude")
-            .unwrap()
-            .unwrap();
-        assert_eq!((saved.observed_at, saved.windows.len()), (NOW, 2));
-        assert!(!home.path().join(".yoke/state.db").exists());
-
-        // A payload without limits renders nothing extra and leaves the record alone.
-        assert_eq!(
-            refresh_at(home.path(), b"{}", None, NOW + 1, 0)
-                .unwrap()
-                .line,
-            "yoke (no data yet)"
-        );
-    }
-
-    #[test]
-    fn renders_snapshot_alerts_context_and_only_newer_valid_updates() {
-        let mut snapshot = StatusSnapshot {
-            mode: Some("enforce".into()),
-            plan_slug: Some("demo\nplan".into()),
-            plan_state: Some("stalled".into()),
-            recent_deny: true,
-            latest_version: Some("v999.0.0".into()),
-        };
-        let line = render(
-            Some(&snapshot),
-            &json!({"context_window":{"used_percentage":75}}),
-        );
-        assert_eq!(
-            line,
-            "yoke enforce | demoplan:stalled | ! stalled | update v999.0.0 | ctx 75%"
-        );
-        snapshot.latest_version = Some("../bad".into());
-        assert!(!render(Some(&snapshot), &json!({})).contains("update"));
-        assert!(context_percentage(&json!({"context_window":{"used_percentage":101}})).is_none());
-    }
-}
+mod tests;

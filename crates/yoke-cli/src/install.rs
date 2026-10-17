@@ -51,6 +51,8 @@ pub struct InstallOptions {
     pub agents: Vec<Agent>,
     pub dry_run: bool,
     pub statusline: Statusline,
+    /// The statusline style asked for; without one, a Yoke line keeps its style.
+    pub statusline_style: Option<crate::statusline::Style>,
 }
 
 const CLAUDE_MANAGED_DIR: &str = if cfg!(target_os = "macos") {
@@ -84,6 +86,7 @@ pub fn options(home: &Path, executable: PathBuf, agents: Vec<Agent>) -> Result<I
         agents,
         dry_run: false,
         statusline: Statusline::Off,
+        statusline_style: None,
     })
 }
 
@@ -254,7 +257,11 @@ fn read_receipt(options: &InstallOptions, agent: Agent) -> Result<Option<Receipt
     if let Some(owned) = &receipt.statusline {
         ensure!(agent == Agent::Claude, "invalid statusline receipt agent");
         ensure!(
-            statusline::build(&receipt.executable, owned.before.clone())? == *owned,
+            statusline::build(
+                &receipt.executable,
+                owned.before.clone(),
+                owned.after["command"].as_str().map(statusline::style_of),
+            )? == *owned,
             "invalid owned statusline in installation receipt"
         );
     }
@@ -405,6 +412,7 @@ fn prepare(options: &InstallOptions, agent: Agent, warnings: &mut Vec<String>) -
     let statusline = if agent == Agent::Claude {
         statusline::apply(
             options.statusline,
+            options.statusline_style,
             &options.executable,
             &mut value,
             warnings,
@@ -548,13 +556,14 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
                             &mut report,
                             FileChange {
                                 path: receipt.hooks.path.clone(),
-                                before: current,
+                                before: current.clone(),
                                 after,
                             },
                         );
                     }
                 } else if let Some(owned) = statusline::apply(
                     options.statusline,
+                    options.statusline_style,
                     &options.executable,
                     &mut value,
                     &mut report.warnings,
@@ -567,7 +576,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
                         &mut report,
                         FileChange {
                             path: receipt.hooks.path.clone(),
-                            before: current,
+                            before: current.clone(),
                             after,
                         },
                     );
@@ -580,6 +589,40 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
                         &baseline,
                     )?);
                     receipt.statusline = Some(owned);
+                    receipt_changed = true;
+                }
+                // The user now asks for another style of the line Yoke already owns, and has
+                // not edited it since.
+                let restyled = match (&receipt.statusline, options.statusline_style) {
+                    (Some(owned), Some(style))
+                        if options.statusline != Statusline::Off
+                            && value.get("statusLine") == Some(&owned.after) =>
+                    {
+                        statusline::restyle(&options.executable, owned, style)?
+                    }
+                    _ => None,
+                };
+                if let Some(restyled) = restyled {
+                    value["statusLine"] = restyled.after.clone();
+                    let after = Some(json::render(planned.as_deref().unwrap_or("{}"), &value)?);
+                    report
+                        .changes
+                        .retain(|file| file.path != receipt.hooks.path);
+                    change(
+                        &mut report,
+                        FileChange {
+                            path: receipt.hooks.path.clone(),
+                            before: current,
+                            after,
+                        },
+                    );
+                    let mut baseline = settings(receipt.hooks.after.as_deref())?;
+                    baseline["statusLine"] = restyled.after.clone();
+                    receipt.hooks.after = Some(json::render(
+                        receipt.hooks.after.as_deref().unwrap_or("{}"),
+                        &baseline,
+                    )?);
+                    receipt.statusline = Some(restyled);
                     receipt_changed = true;
                 }
             }

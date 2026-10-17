@@ -101,10 +101,11 @@ pub(super) fn backup(state_dir: &Path, changes: &[FileChange]) -> Result<()> {
         return Ok(());
     }
     let root = state_dir.join("backups");
-    fs::create_dir_all(&root)?;
+    yoke_core::private::create_dir_all(&root)?;
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let backup = tempfile::Builder::new()
         .prefix(&format!("{timestamp}-"))
+        .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
         .tempdir_in(&root)?
         .keep();
     for (index, change) in changes.iter().enumerate() {
@@ -127,7 +128,7 @@ pub(super) struct Lock {
 
 impl Lock {
     pub(super) fn acquire(state_dir: &Path) -> Result<Self> {
-        fs::create_dir_all(state_dir)?;
+        yoke_core::private::create_dir_all(state_dir)?;
         let path = state_dir.join("install.lock");
         let mut file = OpenOptions::new().write(true).create_new(true).open(&path)
             .context("another install/uninstall holds install.lock; after a crash, verify no installer runs before removing the stale lock")?;

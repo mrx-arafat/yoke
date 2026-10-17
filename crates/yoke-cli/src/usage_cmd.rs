@@ -227,6 +227,39 @@ fn cost(totals: &UsageTotals) -> String {
     }
 }
 
+/// Rows under their headings, indented, with each column as wide as its widest cell and two
+/// spaces apart. Columns listed in `right` align right so figures line up.
+fn table(headings: &[&str], rows: &[Vec<String>], right: &[usize]) -> Vec<String> {
+    let header: Vec<String> = headings.iter().map(|h| (*h).to_owned()).collect();
+    let widths: Vec<usize> = (0..header.len())
+        .map(|col| {
+            std::iter::once(&header)
+                .chain(rows)
+                .map(|row| row[col].chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    std::iter::once(&header)
+        .chain(rows)
+        .map(|row| {
+            let cells: Vec<String> = row
+                .iter()
+                .enumerate()
+                .map(|(col, cell)| {
+                    let width = widths[col];
+                    if right.contains(&col) {
+                        format!("{cell:>width$}")
+                    } else {
+                        format!("{cell:<width$}")
+                    }
+                })
+                .collect();
+            format!("  {}", cells.join("  ")).trim_end().to_owned()
+        })
+        .collect()
+}
+
 fn totals_row(totals: &UsageTotals) -> String {
     format!(
         "{},{},{},{},{}",
@@ -253,28 +286,36 @@ fn text(report: &Report) -> String {
             .map_or("missing".to_owned(), |s| s.to_string()),
         report.state.supported
     ));
-    line(format!(
-        "quota[{}]{{agent,window,used,remaining,resets,resets_in,observed}}:",
-        report.quota.len()
-    ));
-    for row in &report.quota {
-        line(format!(
-            "  {},{},{}%,{}%,{},{},{}",
-            row.agent,
-            row.window,
-            quota::percent(row.used_percent),
-            quota::percent(row.remaining_percent),
-            quote(&timefmt::full_time(row.resets_at, offset)),
-            if row.expired {
-                "reset".to_owned()
-            } else {
-                quote(&timefmt::duration_text(row.resets_at - now))
-            },
-            quote(&format!(
-                "{} ago",
-                timefmt::duration_text(now - row.observed_at)
-            )),
-        ));
+    if report.quota.is_empty() {
+        line("quota: none recorded".into());
+    } else {
+        line("quota:".into());
+        let rows: Vec<Vec<String>> = report
+            .quota
+            .iter()
+            .map(|row| {
+                vec![
+                    row.agent.clone(),
+                    row.window.clone(),
+                    format!("{}%", quota::percent(row.used_percent)),
+                    format!("{}%", quota::percent(row.remaining_percent)),
+                    timefmt::full_time(row.resets_at, offset),
+                    if row.expired {
+                        "reset".to_owned()
+                    } else {
+                        timefmt::duration_text(row.resets_at - now)
+                    },
+                    format!("{} ago", timefmt::duration_text(now - row.observed_at)),
+                    row.plan.clone().unwrap_or_else(|| "-".to_owned()),
+                ]
+            })
+            .collect();
+        let headings = [
+            "agent", "window", "used", "left", "resets", "in", "observed", "plan",
+        ];
+        for row in table(&headings, &rows, &[2, 3]) {
+            line(row);
+        }
     }
     let rows = report
         .usage
@@ -479,11 +520,28 @@ mod tests {
         );
 
         let text = text(&report);
+        // Quota reads as an aligned table for people; the structured form is `--json`.
+        let quota_block: Vec<&str> = text
+            .lines()
+            .skip_while(|l| *l != "quota:")
+            .take(5)
+            .collect();
+        assert_eq!(
+            quota_block,
+            [
+                "quota:",
+                "  agent   window  used  left  resets            in      observed   plan",
+                "  claude  5h        8%   92%  2026-10-16 17:00  1h 0m   2m ago     -",
+                "  claude  7d       63%   37%  2026-10-19 16:00  3d 0h   2m ago     -",
+                "  codex   7d       35%   65%  2026-10-22 12:13  5d 20h  1h 0m ago  pro",
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["quota"][2]["plan"],
+            "pro"
+        );
         for expected in [
             "time_zone: \"UTC+06:00\"",
-            "quota[3]{agent,window,used,remaining,resets,resets_in,observed}:",
-            "  claude,5h,8%,92%,\"2026-10-16 17:00\",\"1h 0m\",\"2m ago\"",
-            "  codex,7d,35%,65%,",
             "  claude,today,1500,200,0,0,\"$0.0003\"",
             "  claude,\"recent\",\"app\",\"claude-haiku-5-5\",\"2026-10-16 14:00\",\"1h 30m\",1500,200,0,0,\"$0.0003\",full",
             "  claude,\"older\",\"app\",\"unknown\",\"2026-10-12 14:00\",\"<1m\",70,100,0,0,\"unknown\",\"counted 32.0 MiB of 39.4 MiB\"",
@@ -499,6 +557,7 @@ mod tests {
         let report = collect(home.path(), NOW, 0, 10).unwrap();
         assert!(!report.state.exists && !report.state.usage_available);
         assert!(report.quota.is_empty() && report.sessions.is_empty());
+        assert!(text(&report).contains("\nquota: none recorded\n"));
         let notes = report.notes.join("\n");
         for expected in [
             "No Yoke state exists yet",

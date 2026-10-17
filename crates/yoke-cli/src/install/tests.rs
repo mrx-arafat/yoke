@@ -80,6 +80,7 @@ fn fixture() -> (TempDir, InstallOptions) {
         agents: vec![Agent::Claude, Agent::Codex],
         dry_run: false,
         statusline: Statusline::Off,
+        statusline_style: None,
     };
     (dir, options)
 }
@@ -118,6 +119,14 @@ fn roundtrip_preserves_existing_settings_and_is_idempotent() {
     assert!(install(&options).unwrap().changes.is_empty());
     let backup_root = options.state_dir.join("backups");
     let backup_count = fs::read_dir(&backup_root).unwrap().count();
+    // Backups hold copies of the user's settings, which may carry tokens.
+    let mode = |path: &Path| {
+        std::os::unix::fs::PermissionsExt::mode(&fs::metadata(path).unwrap().permissions()) & 0o777
+    };
+    assert_eq!(mode(&backup_root), 0o700);
+    for entry in fs::read_dir(&backup_root).unwrap() {
+        assert_eq!(mode(&entry.unwrap().path()), 0o700);
+    }
     let dry = InstallOptions {
         dry_run: true,
         ..options
@@ -641,5 +650,80 @@ fn if_absent_adds_the_statusline_only_when_none_is_set_and_never_replaces_one() 
     assert_eq!(
         installed["statusLine"]["command"],
         "'/old/bin/yoke' statusline --wrap 'echo hi'"
+    );
+}
+
+#[test]
+fn the_statusline_style_is_installed_changed_in_place_wrapped_and_restored() {
+    use crate::statusline::Style;
+    let command = |options: &InstallOptions| -> String {
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&options.claude_settings).unwrap()).unwrap();
+        settings["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    // A fresh install of the detailed style, then the same request again changes nothing.
+    let (_dir, mut options) = fixture();
+    options.statusline = Statusline::Wrap;
+    options.statusline_style = Some(Style::Detailed);
+    install(&options).unwrap();
+    assert!(command(&options).ends_with("' statusline --style detailed"));
+    assert!(install(&options).unwrap().changes.is_empty());
+
+    // Asking for the other style restyles Yoke's own line; asking for none leaves it as it is.
+    options.statusline_style = None;
+    assert!(install(&options).unwrap().changes.is_empty());
+    options.statusline_style = Some(Style::Compact);
+    install(&options).unwrap();
+    assert!(command(&options).ends_with("' statusline"));
+    options.statusline_style = Some(Style::Detailed);
+    install(&options).unwrap();
+    assert!(command(&options).ends_with("--style detailed"));
+    // The receipt still validates, so uninstall removes the line it added.
+    uninstall(&options).unwrap();
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(&options.claude_settings).unwrap_or("{}".into()))
+            .unwrap();
+    assert!(settings.get("statusLine").is_none(), "{settings}");
+
+    // A command the user already has is wrapped, and comes back exactly on uninstall.
+    let (_dir, mut options) = fixture();
+    let original = "{\"statusLine\": {\"type\":\"command\",\"command\":\"echo hi\"}}";
+    put(&options.claude_settings, original);
+    options.statusline = Statusline::Wrap;
+    options.statusline_style = Some(Style::Detailed);
+    install(&options).unwrap();
+    assert!(command(&options).contains(" statusline --style detailed --wrap 'echo hi'"));
+    options.statusline_style = Some(Style::Compact);
+    install(&options).unwrap();
+    assert!(command(&options).ends_with("' statusline --wrap 'echo hi'"));
+    uninstall(&options).unwrap();
+    assert_eq!(
+        fs::read_to_string(&options.claude_settings).unwrap(),
+        original
+    );
+
+    // A Yoke line the user wrote by hand is restyled on request and put back by uninstall.
+    let (_dir, mut options) = fixture();
+    let exe = options
+        .executable
+        .display()
+        .to_string()
+        .replace('\'', "'\\''");
+    let by_hand =
+        json!({"statusLine": {"type": "command", "command": format!("'{exe}' statusline")}})
+            .to_string();
+    put(&options.claude_settings, &by_hand);
+    options.statusline = Statusline::Wrap;
+    options.statusline_style = Some(Style::Detailed);
+    install(&options).unwrap();
+    assert!(command(&options).ends_with("--style detailed"));
+    uninstall(&options).unwrap();
+    assert_eq!(
+        fs::read_to_string(&options.claude_settings).unwrap(),
+        by_hand
     );
 }

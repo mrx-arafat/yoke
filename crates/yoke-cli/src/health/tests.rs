@@ -16,6 +16,7 @@ fn fixture() -> (TempDir, install::InstallOptions) {
         agents: vec![install::Agent::Claude, install::Agent::Codex],
         dry_run: false,
         statusline: install::Statusline::Off,
+        statusline_style: None,
     };
     put(&options.executable, "");
     fs::set_permissions(&options.executable, fs::Permissions::from_mode(0o755)).unwrap();
@@ -294,6 +295,40 @@ fn every_unfinished_plan_gets_the_next_step_for_its_state() {
 }
 
 #[test]
+fn a_failing_retention_job_is_reported_until_a_later_one_succeeds() {
+    let (dir, options) = fixture();
+    let root = dir.path();
+    install::install(&options).unwrap();
+    drop(Store::open(root.join(".yoke/state.db")).unwrap());
+    // Held open: the last connection to close removes the -wal and -shm files that
+    // read-only commands need.
+    let db = rusqlite::Connection::open(root.join(".yoke/state.db")).unwrap();
+    let job = |id: i64, state: &str| {
+        db.execute(
+            "INSERT INTO jobs(id,kind,dedupe_key,project,payload,state,attempts,max_attempts,run_after,last_error,created_at,updated_at)
+             VALUES(?1,'retention','retention','','{}',?2,3,3,1,'disk full',1,1)",
+            rusqlite::params![id, state],
+        )
+        .unwrap();
+    };
+    job(1, "dead");
+    let failing = collect(inputs(root, options.clone())).unwrap();
+    assert!(
+        guidance_with(&failing, "Retention cleanup is failing (job 1: disk full)"),
+        "{:?}",
+        failing.guidance
+    );
+    job(2, "succeeded");
+    let recovered = collect(inputs(root, options)).unwrap();
+    drop(db);
+    assert!(
+        !guidance_with(&recovered, "Retention cleanup"),
+        "{:?}",
+        recovered.guidance
+    );
+}
+
+#[test]
 fn a_missing_hook_executable_comes_with_the_repair_command() {
     let (dir, options) = fixture();
     let root = dir.path();
@@ -439,4 +474,69 @@ fn a_statusline_someone_else_pointed_at_yoke_counts_as_installed() {
     put(&options.claude_settings, &settings.to_string());
     let other = collect(inputs(root, options)).unwrap();
     assert!(!agent(&other, "claude").install.statusline);
+}
+
+#[test]
+fn attention_is_explained_and_pending_memory_facts_are_counted() {
+    let (dir, options) = fixture();
+    let root = dir.path();
+    install::install(&options).unwrap();
+    fs::create_dir_all(root.join(".yoke")).unwrap();
+    let store = Store::open(root.join(".yoke/state.db")).unwrap();
+    let canonical = root.canonicalize().unwrap();
+    let project = canonical.to_str().unwrap();
+    let fact = |session: &str, project: &str, now: i64| {
+        yoke_core::memory::record_fact(&store, session, project, "file_write", "Edit: x", now)
+            .unwrap()
+    };
+    fact("a", project, 1);
+    fact("a", project, 2);
+    fact("b", project, 3);
+    // A digested fact and a fact of another project are not this project's backlog.
+    let digested = fact("c", project, 4);
+    fact("d", "/elsewhere", 5);
+    // Yoke's own connection must close last: it leaves the WAL files a read-only open needs.
+    rusqlite::Connection::open(root.join(".yoke/state.db"))
+        .unwrap()
+        .execute("UPDATE facts SET digested=1 WHERE id=?1", [digested])
+        .unwrap();
+    drop(store);
+
+    let report = collect(inputs(root, options)).unwrap();
+
+    let memory = report.memory.as_ref().unwrap();
+    assert_eq!((memory.pending_facts, memory.digest), (3, false));
+    // Observe mode is on by default, so this is the state of a correct fresh install.
+    assert_eq!(report.status, "attention");
+    assert!(
+        report.meaning.contains("nothing is broken"),
+        "{}",
+        report.meaning
+    );
+}
+
+#[test]
+fn a_database_without_wal_files_names_the_way_back_and_is_not_blamed_on_the_disk() {
+    let (dir, options) = fixture();
+    let root = dir.path();
+    install::install(&options).unwrap();
+    drop(Store::open(root.join(".yoke/state.db")).unwrap());
+    // Another SQLite client's last close deletes both sidecars.
+    for sidecar in ["state.db-wal", "state.db-shm"] {
+        fs::remove_file(root.join(".yoke").join(sidecar)).unwrap();
+    }
+
+    let report = collect(inputs(root, options)).unwrap();
+
+    let problem = report
+        .problems
+        .iter()
+        .find(|problem| problem.starts_with("cannot read "))
+        .unwrap_or_else(|| panic!("{:?}", report.problems));
+    assert!(problem.contains("yoke log --limit 1"), "{problem}");
+    assert!(!problem.contains("free disk space"), "{problem}");
+    assert!(
+        !root.join(".yoke/state.db-wal").exists(),
+        "a read-only health check must not create files"
+    );
 }

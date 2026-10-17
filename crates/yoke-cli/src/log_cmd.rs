@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use yoke_core::store::{DecisionFilter, DecisionRecord, Store};
-use yoke_core::{timefmt, trust};
+use yoke_core::{config, timefmt, trust};
 
 use crate::commands::{home, open_store, quote};
 
@@ -14,32 +14,58 @@ const DETAIL_WIDTH: usize = 120;
 /// Tool input fields that say what a tool call acted on, most specific first.
 const TOOL_TARGETS: [&str; 5] = ["command", "cmd", "file_path", "path", "notebook_path"];
 
-pub fn run(
-    project: Option<String>,
-    session: Option<String>,
-    outcome: Option<String>,
-    tool: Option<String>,
-    limit: u16,
-    json: bool,
-) -> Result<()> {
-    if let Some(outcome) = outcome.as_deref().filter(|o| !OUTCOMES.contains(o)) {
+pub struct Args {
+    pub project: Option<String>,
+    pub all: bool,
+    pub session: Option<String>,
+    pub outcome: Option<String>,
+    pub tool: Option<String>,
+    pub limit: u16,
+    pub json: bool,
+}
+
+/// Whose decisions a listing covers.
+enum Scope {
+    All,
+    /// The project asked for with `--project`, or the current one when `explicit` is false.
+    Project {
+        root: String,
+        explicit: bool,
+    },
+}
+
+pub fn run(args: Args) -> Result<()> {
+    if let Some(outcome) = args.outcome.as_deref().filter(|o| !OUTCOMES.contains(o)) {
         bail!(
             "unknown outcome '{outcome}'; use one of {}",
             OUTCOMES.join(", ")
         );
     }
     let store = open_store(&home()?)?;
-    let filtered = project.is_some() || session.is_some() || outcome.is_some() || tool.is_some();
+    let scope = match (&args.project, args.all) {
+        (Some(path), _) => Scope::Project {
+            root: resolve_project(&store, path)?,
+            explicit: true,
+        },
+        // A session id names one session, so it is looked up everywhere unless a project is given.
+        (None, true) => Scope::All,
+        (None, false) if args.session.is_some() => Scope::All,
+        (None, false) => Scope::Project {
+            root: current_project(&store)?,
+            explicit: false,
+        },
+    };
     let records = store.decisions(&DecisionFilter {
-        project: project
-            .map(|path| resolve_project(&store, &path))
-            .transpose()?,
-        session,
-        outcome,
-        tool,
-        limit: usize::from(limit),
+        project: match &scope {
+            Scope::All => None,
+            Scope::Project { root, .. } => Some(root.clone()),
+        },
+        session: args.session.clone(),
+        outcome: args.outcome.clone(),
+        tool: args.tool.clone(),
+        limit: usize::from(args.limit),
     })?;
-    if json {
+    if args.json {
         let mut rows = serde_json::to_value(&records)?;
         for (row, record) in rows.as_array_mut().into_iter().flatten().zip(&records) {
             row["payload_truncated"] = Value::Bool(is_truncated(&record.payload));
@@ -47,16 +73,24 @@ pub fn run(
         println!("{rows}");
         return Ok(());
     }
+    match &scope {
+        Scope::All => println!("project: all"),
+        Scope::Project { root, .. } => println!("project: {}", quote(root)),
+    }
     // Rows from several projects are told apart; a single project would only repeat itself.
     let projects = records.iter().any(|row| row.project != records[0].project);
     let columns = if projects {
-        "time,agent,project,event,tool,outcome,gate,detail"
+        "time,agent,session,project,event,tool,outcome,gate,detail"
     } else {
-        "time,agent,event,tool,outcome,gate,detail"
+        "time,agent,session,event,tool,outcome,gate,detail"
     };
     println!("decisions[{}]{{{columns}}}:", records.len());
     for row in &records {
-        let mut fields = vec![quote(&timefmt::local_time_secs(row.ts)), quote(&row.agent)];
+        let mut fields = vec![
+            quote(&timefmt::local_time_secs(row.ts)),
+            quote(&row.agent),
+            quote(&row.session_id),
+        ];
         if projects {
             fields.push(quote(&row.project));
         }
@@ -69,12 +103,72 @@ pub fn run(
         ]);
         println!("  {}", fields.join(","));
     }
-    if records.is_empty() && filtered {
-        println!("help: \"No decisions match: --tool and --session are exact, case-sensitive matches, and --project takes any path inside a project.\"");
-    } else {
-        println!("help: \"Times are local. Run yoke log --json for stored records (payloads cut at log.payload_cap are flagged payload_truncated); --limit is bounded to 1000.\"");
-    }
+    println!(
+        "help: {}",
+        quote(&help(&store, &scope, &args, records.len()))
+    );
     Ok(())
+}
+
+/// The project of the working directory, found the way every other command finds it.
+fn current_project(store: &Store) -> Result<String> {
+    std::env::current_dir()
+        .map_err(anyhow::Error::from)
+        .and_then(|cwd| trust::project_root(store, &cwd))
+        .map(|root| root.display().to_string())
+        .context("find the current project; use yoke log --all or --project <path>")
+}
+
+/// What to do next: how to widen the scope, and why a listing is empty.
+fn help(store: &Store, scope: &Scope, args: &Args, rows: usize) -> String {
+    let widen = match scope {
+        Scope::Project {
+            explicit: false, ..
+        } => " Only the current project is shown; yoke log --all shows every project.",
+        _ => "",
+    };
+    if rows > 0 {
+        return format!("Times are local. Run yoke log --json for stored records (payloads cut at log.payload_cap are flagged payload_truncated); --limit is bounded to 1000.{widen}");
+    }
+    if let Some(note) = no_gate_note(store, scope, args) {
+        return format!("{note}{widen}");
+    }
+    let filtered = args.session.is_some() || args.outcome.is_some() || args.tool.is_some();
+    match (filtered, scope) {
+        (true, _) => format!("No decisions match: --tool and --session are exact, case-sensitive matches, and --project takes any path inside a project.{widen}"),
+        (false, Scope::All) => "No decisions recorded yet; run yoke health to check that your agents' hooks are installed.".into(),
+        (false, Scope::Project { .. }) => format!("No decisions recorded for this project yet; run yoke health to check that your agents' hooks are installed.{widen}"),
+    }
+}
+
+/// An empty `deny` or `would_deny` listing is read as "nothing was blocked"; when the project has
+/// no trusted gate, the real reason is that none has run.
+fn no_gate_note(store: &Store, scope: &Scope, args: &Args) -> Option<String> {
+    let outcome = args
+        .outcome
+        .as_deref()
+        .filter(|o| matches!(*o, "deny" | "would_deny"))?;
+    let Scope::Project { root, .. } = scope else {
+        return None;
+    };
+    if args.session.is_some() || args.tool.is_some() || !Path::new(root).is_dir() {
+        return None;
+    }
+    let loaded = config::load_trusted(store, Path::new(root), &home().ok()?).ok()?;
+    if !loaded.config.gates.is_empty() {
+        return None;
+    }
+    let untrusted: Vec<String> = loaded
+        .snapshots
+        .iter()
+        .filter(|snapshot| snapshot.exists && !snapshot.trusted)
+        .map(|snapshot| snapshot.file.display().to_string())
+        .collect();
+    Some(if untrusted.is_empty() {
+        format!("No {outcome} decisions, and no gate has run: this project has no trusted gates. Add some with yoke preset add <name> (yoke preset list shows the bundled ones), then a human runs yoke trust in their own terminal.")
+    } else {
+        format!("No {outcome} decisions, and no gate has run: {} is not trusted, so its gates are ignored. Review it and run yoke trust in your own terminal.", untrusted.join(", "))
+    })
 }
 
 /// The project that contains `path`, found the way every other command finds it; a path that is

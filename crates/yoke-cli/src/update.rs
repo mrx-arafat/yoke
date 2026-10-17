@@ -275,9 +275,57 @@ fn replace(executable: &Path, bytes: &[u8]) -> Result<()> {
         .as_file()
         .sync_all()
         .context("syncing staged executable")?;
+    // Closing the write handle first: Linux will not execute a file that is open for writing.
+    let staged = staged.into_temp_path();
+    smoke_test(&staged)?;
     staged
         .persist(executable)
         .map_err(|error| error.error)
         .context("atomically replacing executable")?;
     Ok(())
+}
+
+const SMOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run the staged executable once with `--version`, as `install.sh` does, so a download that
+/// cannot run here (wrong platform, truncated, corrupt) is refused while the installed
+/// executable, which live agent hooks run, is still in place.
+fn smoke_test(staged: &Path) -> Result<()> {
+    let mut command = std::process::Command::new(staged);
+    command
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Another thread forking while the file was open for writing can briefly keep it busy.
+    let mut attempts = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 20 =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            result => break result.context("running the downloaded executable")?,
+        }
+    };
+    let deadline = std::time::Instant::now() + SMOKE_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            ensure!(
+                status.success(),
+                "the downloaded executable failed its --version check ({status}); nothing was changed"
+            );
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "the downloaded executable did not answer --version in time; nothing was changed"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }

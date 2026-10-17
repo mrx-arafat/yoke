@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::redact::{redact, redact_payload, redact_value};
+use crate::redact::{hook_payload, redact, redact_value};
 
 const MIGRATIONS: &[&str] = &[
     include_str!("store/001-core.sql"),
@@ -22,13 +22,66 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/010-jobs-recall.sql"),
     include_str!("store/011-notifications.sql"),
     include_str!("store/012-usage-time.sql"),
+    include_str!("store/013-scale-indexes.sql"),
+    include_str!("store/014-session-anchors.sql"),
 ];
 
 mod read;
-pub use read::{DecisionRow, ProjectSummary, SessionSummary, StatusSnapshot};
+pub use read::{DecisionRow, ProjectSummary, SessionCounts, SessionSummary, StatusSnapshot};
 
 pub struct Store {
     connection: Connection,
+}
+
+/// A database in WAL mode that is read without writing needs its `-wal` and `-shm` files.
+/// Another SQLite client's last close deletes them. SQLite would then fail with error 14 and
+/// leave an empty `-wal` behind, so `Store::open_read_only` checks first and creates nothing.
+#[derive(Debug)]
+pub struct MissingSidecars {
+    pub missing: Vec<String>,
+}
+
+impl std::fmt::Display for MissingSidecars {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the state database is missing {}; another SQLite client deletes these files when it closes the database last. Run `yoke log --limit 1` once to recreate them, then retry",
+            self.missing.join(" and ")
+        )
+    }
+}
+
+impl std::error::Error for MissingSidecars {}
+
+fn check_sidecars(path: &Path) -> Result<()> {
+    use std::io::Read;
+    let mut header = [0u8; 20];
+    // A file too short for a header, or unreadable, is not a WAL database; SQLite reports it.
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Ok(());
+    };
+    // Byte 19 is the read format version: 2 means WAL.
+    if file.read_exact(&mut header).is_err() || header[19] != 2 {
+        return Ok(());
+    }
+    let mut missing = Vec::new();
+    for suffix in ["-wal", "-shm"] {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        let sidecar = std::path::PathBuf::from(name);
+        if !sidecar.exists() {
+            missing.extend(
+                sidecar
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned()),
+            );
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(MissingSidecars { missing }.into())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +151,8 @@ impl Store {
     /// Open existing state without creating files, running migrations, or writing pragmas.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         let path = std::fs::canonicalize(path)?;
+        ensure_regular_file(&path)?;
+        check_sidecars(&path)?;
         let encoded = path
             .as_os_str()
             .as_bytes()
@@ -131,6 +186,12 @@ impl Store {
     /// Open an existing parent directory's database and apply numbered migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        if path != Path::new(":memory:") {
+            ensure_regular_file(path).context("open state database")?;
+            if !path.as_os_str().is_empty() {
+                crate::private::prepare_database(path);
+            }
+        }
         let mut connection = Connection::open(path).context("open state database")?;
         connection.busy_timeout(Duration::from_secs(2))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -183,6 +244,10 @@ impl Store {
         }
         transaction.commit()?;
         connection.pragma_update(None, "foreign_keys", true)?;
+        if path != Path::new(":memory:") && !path.as_os_str().is_empty() {
+            // The sidecars exist now; SQLite gives them the mode of the database.
+            crate::private::tighten_database(path);
+        }
         Ok(Self { connection })
     }
 
@@ -243,7 +308,7 @@ impl Store {
             "INSERT INTO decisions(ts,session_id,agent,project,event,tool,mode,outcome,reason,gates,payload)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![row.ts, session, agent, project, redact(&row.event), row.tool.as_deref().map(redact),
-                row.mode, row.outcome, row.reason.as_deref().map(redact), gates.to_string(), redact_payload(&row.payload, payload_cap)],
+                row.mode, row.outcome, row.reason.as_deref().map(redact), gates.to_string(), hook_payload(&row.payload, payload_cap)],
         )?;
         if row.event == "session_end" {
             transaction.execute(
@@ -255,40 +320,51 @@ impl Store {
     }
 
     pub fn decisions(&self, filter: &DecisionFilter) -> Result<Vec<DecisionRecord>> {
-        let mut statement = self.connection.prepare(
-            "SELECT ts,session_id,agent,project,event,tool,mode,outcome,reason,gates,payload FROM decisions
-             WHERE (?1 IS NULL OR project=?1) AND (?2 IS NULL OR session_id=?2)
-               AND (?3 IS NULL OR outcome=?3) AND (?4 IS NULL OR tool=?4)
-             ORDER BY ts DESC,id DESC LIMIT ?5",
-        )?;
-        let rows = statement.query_map(
-            params![
-                filter.project.as_deref().map(redact),
-                filter.session.as_deref().map(redact),
-                filter.outcome,
-                filter.tool.as_deref().map(redact),
-                filter.limit.min(10_000) as i64
-            ],
-            |row| {
-                let gates: String = row.get(9)?;
-                Ok((
-                    DecisionRecord {
-                        ts: row.get(0)?,
-                        session_id: row.get(1)?,
-                        agent: row.get(2)?,
-                        project: row.get(3)?,
-                        event: row.get(4)?,
-                        tool: row.get(5)?,
-                        mode: row.get(6)?,
-                        outcome: row.get(7)?,
-                        reason: row.get(8)?,
-                        gates: Value::Null,
-                        payload: row.get(10)?,
-                    },
-                    gates,
-                ))
-            },
-        )?;
+        // Only the filters that were given reach SQL. A term like `(?1 IS NULL OR project=?1)`
+        // hides the column from the planner, so every filtered read scanned the whole table.
+        let mut terms = Vec::new();
+        let mut values: Vec<rusqlite::types::Value> = Vec::new();
+        for (column, value) in [
+            ("project", filter.project.as_deref().map(redact)),
+            ("session_id", filter.session.as_deref().map(redact)),
+            ("outcome", filter.outcome.clone()),
+            ("tool", filter.tool.as_deref().map(redact)),
+        ] {
+            if let Some(value) = value {
+                values.push(value.into());
+                terms.push(format!("{column}=?{}", values.len()));
+            }
+        }
+        let scope = if terms.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", terms.join(" AND "))
+        };
+        values.push((filter.limit.min(10_000) as i64).into());
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT ts,session_id,agent,project,event,tool,mode,outcome,reason,gates,payload FROM decisions{scope}
+             ORDER BY ts DESC,id DESC LIMIT ?{}",
+            values.len()
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
+            let gates: String = row.get(9)?;
+            Ok((
+                DecisionRecord {
+                    ts: row.get(0)?,
+                    session_id: row.get(1)?,
+                    agent: row.get(2)?,
+                    project: row.get(3)?,
+                    event: row.get(4)?,
+                    tool: row.get(5)?,
+                    mode: row.get(6)?,
+                    outcome: row.get(7)?,
+                    reason: row.get(8)?,
+                    gates: Value::Null,
+                    payload: row.get(10)?,
+                },
+                gates,
+            ))
+        })?;
         rows.map(|row| {
             let (mut record, gates) = row?;
             record.gates = serde_json::from_str(&gates).context("invalid decision gates JSON")?;
@@ -306,6 +382,19 @@ impl Store {
         now: i64,
         retention_days: u32,
         budget: Duration,
+    ) -> Result<PruneReport> {
+        self.prune_history_paced(now, retention_days, budget, Duration::ZERO)
+    }
+
+    /// `prune_history` for a background worker: sleeps `pause` between batches. SQLite's busy
+    /// handler retries at most every 100 ms, so a longer pause lets a waiting hook take the write
+    /// lock instead of losing every race to back-to-back batches.
+    pub fn prune_history_paced(
+        &self,
+        now: i64,
+        retention_days: u32,
+        budget: Duration,
+        pause: Duration,
     ) -> Result<PruneReport> {
         let cutoff = retention_cutoff(now, retention_days);
         let deadline = std::time::Instant::now() + budget;
@@ -327,6 +416,7 @@ impl Store {
                     complete = false;
                     break 'histories;
                 }
+                std::thread::sleep(pause);
             }
         }
         Ok(PruneReport {
@@ -347,7 +437,7 @@ impl Store {
     /// Memories digested from a pruned fact stay; only their link to it goes.
     fn prune_facts(&self, cutoff: i64) -> Result<usize> {
         // Both statements select the same batch: the order is total and the transaction is exclusive.
-        const BATCH: &str = "SELECT id FROM facts WHERE ts < ?1 ORDER BY id LIMIT ?2";
+        const BATCH: &str = "SELECT id FROM facts WHERE ts < ?1 ORDER BY ts,id LIMIT ?2";
         self.transaction(|tx| {
             // A stale mapping would make re-importing the same fact fail on a local id conflict.
             tx.execute(
@@ -424,7 +514,11 @@ impl Store {
             .optional()?;
         if let Some(previous) = previous {
             let previous: i64 = previous.parse().context("invalid interval timestamp")?;
-            if now.saturating_sub(previous) < interval_secs {
+            // A stamp more than one interval ahead cannot be a claim made on this clock (it was
+            // set back); counting it as expired keeps the task from waiting for the clock to
+            // reach it. A stamp slightly ahead is two processes with skewed clocks.
+            let ahead = previous.saturating_sub(now);
+            if ahead <= interval_secs && now.saturating_sub(previous) < interval_secs {
                 return Ok(false);
             }
         }
@@ -434,8 +528,20 @@ impl Store {
     }
 }
 
+/// A pipe, device or directory where the database should be would make a hook wait on it, or
+/// fail with an error that names nothing. A missing file is fine: opening creates it.
+fn ensure_regular_file(path: &Path) -> Result<()> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if !metadata.is_file() => bail!(
+            "{} is not a regular file; move it aside in your own terminal so that Yoke can create its state database",
+            path.display()
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// Rows one retention statement may delete, which bounds each write transaction.
-const PRUNE_BATCH: usize = 5000;
+const PRUNE_BATCH: usize = 1000;
 
 /// Bytes a restarted WAL is truncated to inside a long-lived connection; the value only has to
 /// be non-negative for the closing checkpoint of a last connection to truncate the WAL to zero.

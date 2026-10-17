@@ -11,6 +11,11 @@ fn yoke(home: &Path, project: &Path, args: &[&str], input: &[u8]) -> Output {
         .env("HOME", home)
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
+        // Installing refuses an agent's process, so a test must not inherit its markers.
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_CHILD_SESSION")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_SESSION_ID")
         .current_dir(project)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

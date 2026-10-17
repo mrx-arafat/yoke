@@ -222,8 +222,12 @@ fn cohorts(connection: &Connection, query: &TrialQuery, bucket: &str) -> Result<
     let mut cohorts = connection
         .prepare(&format!(
             "WITH w AS (SELECT agent,mode,ts,session_id FROM decisions WHERE {WINDOW}),
-             days AS (SELECT agent,mode,strftime('%Y-%m-%d',ts,'unixepoch',?4) AS day,
-                count(DISTINCT strftime('%H',ts,'unixepoch',?4)) AS hours FROM w GROUP BY agent,mode,day)
+             -- A 15-minute slot never straddles a local hour or day: every UTC offset and DST
+             -- change is a multiple of 15 minutes. Formatting the slots instead of every
+             -- decision keeps the cost off the decision count.
+             slots AS (SELECT agent,mode,ts/900 AS slot FROM w GROUP BY agent,mode,ts/900),
+             days AS (SELECT agent,mode,strftime('%Y-%m-%d',slot*900,'unixepoch',?4) AS day,
+                count(DISTINCT strftime('%H',slot*900,'unixepoch',?4)) AS hours FROM slots GROUP BY agent,mode,day)
              SELECT w.agent,w.mode,min(ts),max(ts),count(*),count(DISTINCT session_id),
                 (SELECT count(*) FROM days d WHERE d.agent=w.agent AND d.mode=w.mode),
                 (SELECT coalesce(sum(hours),0) FROM days d WHERE d.agent=w.agent AND d.mode=w.mode),

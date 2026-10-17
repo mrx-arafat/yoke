@@ -81,6 +81,15 @@ pub fn require_human(action: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuse to change how Yoke is installed from an agent's tool process. Unlike `require_human`
+/// this does not need a terminal, so the installer script keeps working from a human's shell.
+pub fn refuse_agent(action: &str) -> Result<()> {
+    if let Some(signal) = guard::agent_process_signal() {
+        bail!("{action} changes how Yoke is installed and cannot run from an agent tool process ({signal}); a human runs yoke {action} in their own terminal");
+    }
+    Ok(())
+}
+
 pub fn confirm(phrase: &str) -> Result<bool> {
     print!("Type {phrase} to confirm: ");
     std::io::stdout().flush()?;
@@ -98,7 +107,17 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
             let (_, loaded) = load_project()?;
             crate::console::run(&home, &loaded.project_root, !no_open, port)
         }
-        Some(Cmd::Statusline { wrap }) => crate::statusline::run(wrap.as_deref()),
+        Some(Cmd::Statusline {
+            wrap,
+            style,
+            refresh_git,
+            refresh_health,
+        }) => crate::statusline::run(
+            wrap.as_deref(),
+            style,
+            refresh_git.as_deref(),
+            refresh_health.as_deref(),
+        ),
         Some(Cmd::Plan { command }) => workflow::run(command),
         Some(Cmd::Review {
             slug,
@@ -120,25 +139,30 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
         Some(Cmd::Preset { command }) => presets::run(command),
         Some(Cmd::Init) => init(),
         Some(Cmd::Trust { global }) => trust(global),
+        Some(Cmd::Pause { duration, clear }) => crate::bypass::pause(duration, clear),
         Some(Cmd::Install {
             agent,
             dry_run,
             statusline,
             statusline_if_absent,
+            style,
         }) => install(
             agent,
             dry_run,
-            if statusline {
-                install::Statusline::Wrap
-            } else if statusline_if_absent {
-                install::Statusline::IfAbsent
-            } else {
-                install::Statusline::Off
-            },
+            (
+                if statusline {
+                    install::Statusline::Wrap
+                } else if statusline_if_absent {
+                    install::Statusline::IfAbsent
+                } else {
+                    install::Statusline::Off
+                },
+                style,
+            ),
             false,
         ),
         Some(Cmd::Uninstall { agent, dry_run }) => {
-            install(agent, dry_run, install::Statusline::Off, true)
+            install(agent, dry_run, (install::Statusline::Off, None), true)
         }
         Some(Cmd::Health { json }) => crate::health::run(json),
         Some(Cmd::Extensions { json }) => crate::extensions::run(json),
@@ -147,16 +171,30 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
             unread,
             json,
         }) => crate::notifications::run(command, unread, json),
-        Some(Cmd::Update { check }) => update::run(check, &open_store(&home()?)?),
+        Some(Cmd::Update { check }) => {
+            if !check {
+                refuse_agent("update")?;
+            }
+            update::run(check, &open_store(&home()?)?)
+        }
         Some(Cmd::Trial { command }) => crate::trial::run(command),
         Some(Cmd::Log {
             project,
+            all,
             session,
             outcome,
             tool,
             limit,
             json,
-        }) => crate::log_cmd::run(project, session, outcome, tool, limit, json),
+        }) => crate::log_cmd::run(crate::log_cmd::Args {
+            project,
+            all,
+            session,
+            outcome,
+            tool,
+            limit,
+            json,
+        }),
         Some(Cmd::RunHook { .. }) => unreachable!("hook dispatch precedes normal commands"),
         other => {
             let home = home()?;
@@ -188,25 +226,37 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
 }
 
 fn init() -> Result<()> {
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open("yoke.toml")
-    {
-        Ok(mut file) => {
-            let directory = std::env::current_dir().ok();
-            let name = directory
-                .as_deref()
-                .and_then(|path| path.file_name())
+    // The project's root, not the current directory: a yoke.toml in a subdirectory would start
+    // a second project with its own trust, memory and log.
+    let directory = std::env::current_dir().context("resolve the working directory")?;
+    let root = trust::config_home(&directory)?;
+    let file = root.join("yoke.toml");
+    let (place, at_root) = if root == directory.canonicalize()? {
+        ("yoke.toml".to_owned(), "")
+    } else {
+        (file.display().to_string(), " at the project root")
+    };
+    match OpenOptions::new().write(true).create_new(true).open(&file) {
+        Ok(mut created) => {
+            let name = root
+                .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("my-project");
-            file.write_all(crate::starter::render(name).as_bytes())?;
-            println!("config: \"Created yoke.toml; it contributes no gates until a human runs yoke trust.\"");
+            created.write_all(crate::starter::render(name).as_bytes())?;
+            println!(
+                "config: {}",
+                quote(&format!(
+                    "Created {place}{at_root}; it contributes no gates until a human runs yoke trust."
+                ))
+            );
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            println!("config: \"yoke.toml already exists; unchanged.\"");
+            println!(
+                "config: {}",
+                quote(&format!("{place} already exists{at_root}; unchanged."))
+            );
         }
-        Err(error) => return Err(error).context("create yoke.toml"),
+        Err(error) => return Err(error).with_context(|| format!("create {place}")),
     }
     Ok(())
 }
@@ -293,6 +343,10 @@ fn config(loaded: &LoadedConfig) -> Result<()> {
     }
     let mut rows = BTreeMap::new();
     flatten("", &serde_json::to_value(&loaded.config)?, &mut rows);
+    println!(
+        "project: {}",
+        quote(&loaded.project_root.display().to_string())
+    );
     println!("config[{}]{{key,value,source}}:", rows.len());
     for (key, value) in rows {
         println!(
@@ -389,9 +443,16 @@ fn trust(global: bool) -> Result<()> {
 fn install(
     agents: Vec<AgentArg>,
     dry_run: bool,
-    statusline: install::Statusline,
+    (statusline, statusline_style): (install::Statusline, Option<crate::statusline::Style>),
     remove: bool,
 ) -> Result<()> {
+    ensure!(
+        statusline_style.is_none() || statusline != install::Statusline::Off,
+        "--style needs --statusline or --statusline-if-absent"
+    );
+    if !dry_run {
+        refuse_agent(if remove { "uninstall" } else { "install" })?;
+    }
     let agents = agents
         .into_iter()
         .map(|agent| match agent {
@@ -402,6 +463,7 @@ fn install(
     let options = install::InstallOptions {
         dry_run,
         statusline,
+        statusline_style,
         ..install::options(&home()?, std::env::current_exe()?, agents)?
     };
     let report = if remove {

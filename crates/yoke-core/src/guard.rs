@@ -14,13 +14,36 @@ use crate::event::{AgentEvent, EventKind};
 
 const HUMAN_ONLY: &str = "this Yoke command is human-only; a human runs it in their own terminal";
 const DATABASE: &str = "agent shell access to state.db is protected";
-const SHELL_WRITE: &str = "agent shell writes inside ~/.yoke are protected";
-const TOOL_WRITE: &str = "agent writes inside ~/.yoke are protected";
-const PATCH_WRITE: &str = "agent patches inside ~/.yoke are protected";
+const SHELL_WRITE: &str = "agent shell writes to Yoke state, agent hook settings and the yoke executable are protected; a human makes that change in their own terminal";
+const TOOL_WRITE: &str = "agent writes to Yoke state, agent hook settings and the yoke executable are protected; a human makes that change in their own terminal";
+const PATCH_WRITE: &str = "agent patches to Yoke state, agent hook settings and the yoke executable are protected; a human makes that change in their own terminal";
+const TOKEN: &str =
+    "the Yoke bypass token is private to the human; a human runs yoke pause in their own terminal";
+
+/// File under `~/.yoke` that holds the per-install bypass token, 0600.
+pub const OFF_TOKEN_FILE: &str = "off-token";
+/// Inline code that names one of these may write a hook registration file or the executable.
+const CODE_MARKERS: &[&str] = &[
+    ".claude/settings",
+    ".codex/hooks.json",
+    ".codex/config.toml",
+    ".local/bin/yoke",
+    ".cargo/bin/yoke",
+];
+/// Commands that only print names or metadata, so naming the token file is harmless.
+const LISTERS: &[&str] = &[
+    "ls", "stat", "file", "tree", "du", "test", "[", "cd", "pushd",
+];
+/// Commands that search every file below the directories they are given.
+const SEARCHERS: &[&str] = &["grep", "egrep", "fgrep", "rg", "ag", "ack"];
+/// Commands that copy a whole directory they are given.
+const COPIERS: &[&str] = &["cp", "rsync", "tar", "zip", "ditto", "scp"];
+/// Commands that put sources into a destination, and so may overwrite `dest/<source name>`.
+const PLACERS: &[&str] = &["cp", "install", "rsync", "mv", "ln"];
 
 /// A human-only `yoke` phrase inside text that an opaque executor may run.
 static HUMAN_PHRASE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|[^a-z0-9_-])yoke[^a-z0-9_-]+(?:trust|console|jobs[^a-z0-9_-]+retry|notifications[^a-z0-9_-]+ack|plan[^a-z0-9_-]+(?:approve|resume|cancel|reassign|accept|resolve|acknowledge))(?:$|[^a-z0-9_-])")
+    Regex::new(r"(?:^|[^a-z0-9_-])yoke[^a-z0-9_-]+(?:trust|console|install|uninstall|pause|jobs[^a-z0-9_-]+retry|notifications[^a-z0-9_-]+ack|plan[^a-z0-9_-]+(?:approve|resume|cancel|reassign|accept|resolve|acknowledge))(?:$|[^a-z0-9_-])")
         .expect("constant human-phrase regex")
 });
 
@@ -119,6 +142,7 @@ const DESTROYERS: &[&str] = &[
 /// Commands that write to their path arguments.
 const WRITERS: &[&str] = &[
     "cp", "install", "rsync", "touch", "mkdir", "truncate", "dd", "tee", "sqlite3", "sqlite",
+    "curl", "wget", "patch",
 ];
 /// Writers whose only written path is the last argument.
 const DESTINATION_ONLY: &[&str] = &["cp", "install", "rsync"];
@@ -129,13 +153,37 @@ pub fn evaluate(kind: EventKind, event: &AgentEvent, home: &Path, cwd: &Path) ->
     if kind != EventKind::PreToolUse {
         return None;
     }
+    let tool = event.tool_name.as_deref().unwrap_or_default();
+    let input = &event.tool_input;
+    // Resolving every protected path costs a few filesystem calls, so skip tools with no path.
+    let relevant = input.get("command").is_some()
+        || input.get("cmd").is_some()
+        || matches!(
+            tool.to_ascii_lowercase().as_str(),
+            "write" | "edit" | "multiedit" | "notebookedit" | "apply_patch" | "read" | "grep"
+        );
+    if !relevant {
+        return None;
+    }
+    evaluate_in(kind, event, home, cwd, &Protected::from_env(home))
+}
+
+fn evaluate_in(
+    kind: EventKind,
+    event: &AgentEvent,
+    home: &Path,
+    cwd: &Path,
+    protected: &Protected,
+) -> Option<String> {
+    if kind != EventKind::PreToolUse {
+        return None;
+    }
     let tool = event
         .tool_name
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
     let input = &event.tool_input;
-    let protected = resolved(&home.join(".yoke"));
     let is_patch = tool == "apply_patch";
     if !is_patch {
         let shell_cwd = ["workdir", "cwd"]
@@ -154,11 +202,11 @@ pub fn evaluate(kind: EventKind, event: &AgentEvent, home: &Path, cwd: &Path) ->
                 args => args.iter().map(|arg| Token::Word((*arg).into())).collect(),
             };
             for text in raw.iter().filter(|text| text.contains("*** Begin Patch")) {
-                if let Some(reason) = patch_denial(text, home, &shell_cwd, &protected) {
+                if let Some(reason) = patch_denial(text, home, &shell_cwd, protected) {
                     return Some(reason);
                 }
             }
-            if let Some(reason) = scan_shell(&tokens, home, &shell_cwd, &protected, 0, false) {
+            if let Some(reason) = scan_shell(&tokens, home, &shell_cwd, protected, 0, false) {
                 return Some(reason);
             }
         }
@@ -167,23 +215,26 @@ pub fn evaluate(kind: EventKind, event: &AgentEvent, home: &Path, cwd: &Path) ->
         tool.as_str(),
         "write" | "edit" | "multiedit" | "notebookedit" | "apply_patch"
     ) {
-        if protected_target(input, home, cwd, &protected) {
+        if protected_target(input, home, cwd, protected) {
             return Some(TOOL_WRITE.into());
         }
         if is_patch {
             let patch = input
                 .as_str()
                 .or_else(|| input.get("command").and_then(Value::as_str));
-            if let Some(reason) = patch.and_then(|patch| patch_denial(patch, home, cwd, &protected))
+            if let Some(reason) = patch.and_then(|patch| patch_denial(patch, home, cwd, protected))
             {
                 return Some(reason);
             }
         }
     }
+    if matches!(tool.as_str(), "read" | "grep") && names_token_target(input, home, cwd, protected) {
+        return Some(TOKEN.into());
+    }
     None
 }
 
-fn patch_denial(patch: &str, home: &Path, cwd: &Path, protected: &Path) -> Option<String> {
+fn patch_denial(patch: &str, home: &Path, cwd: &Path, protected: &Protected) -> Option<String> {
     for line in patch.lines() {
         for prefix in [
             "*** Add File: ",
@@ -192,7 +243,7 @@ fn patch_denial(patch: &str, home: &Path, cwd: &Path, protected: &Path) -> Optio
             "*** Move to: ",
         ] {
             if let Some(path) = line.strip_prefix(prefix) {
-                if is_protected(&expand(path.trim(), home, cwd), home, protected) {
+                if protected.hit(&expand(path.trim(), home, cwd)) {
                     return Some(PATCH_WRITE.into());
                 }
             }
@@ -201,18 +252,35 @@ fn patch_denial(patch: &str, home: &Path, cwd: &Path, protected: &Path) -> Optio
     None
 }
 
-fn protected_target(value: &Value, home: &Path, cwd: &Path, protected: &Path) -> bool {
+fn protected_target(value: &Value, home: &Path, cwd: &Path, protected: &Protected) -> bool {
     match value {
         Value::Object(fields) => fields.iter().any(|(key, value)| {
             (matches!(key.as_str(), "file_path" | "path" | "notebook_path")
                 && value
                     .as_str()
-                    .is_some_and(|path| is_protected(&expand(path, home, cwd), home, protected)))
+                    .is_some_and(|path| protected.hit(&expand(path, home, cwd))))
                 || protected_target(value, home, cwd, protected)
         }),
         Value::Array(values) => values
             .iter()
             .any(|value| protected_target(value, home, cwd, protected)),
+        _ => false,
+    }
+}
+
+/// Whether a Read or Grep path is the bypass token or a directory that holds it.
+fn names_token_target(value: &Value, home: &Path, cwd: &Path, protected: &Protected) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            (matches!(key.as_str(), "file_path" | "path" | "notebook_path")
+                && value.as_str().is_some_and(|path| {
+                    !path.is_empty() && protected.token_within(&expand(path, home, cwd))
+                }))
+                || names_token_target(value, home, cwd, protected)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| names_token_target(value, home, cwd, protected)),
         _ => false,
     }
 }
@@ -372,7 +440,7 @@ fn scan_shell(
     tokens: &[Token],
     home: &Path,
     cwd: &Path,
-    protected: &Path,
+    protected: &Protected,
     depth: usize,
     inherited: bool,
 ) -> Option<String> {
@@ -438,6 +506,9 @@ fn scan_shell(
         };
         let name = basename(first).to_ascii_lowercase();
         let args = &words[1..];
+        if !LISTERS.contains(&name.as_str()) && names_token(&all, &name, home, &cwd, protected) {
+            return Some(TOKEN.into());
+        }
         if first.contains("{}") || first.starts_with('$') {
             opaque_executor = true;
         }
@@ -484,7 +555,15 @@ fn scan_shell(
             "git" if args.iter().any(|word| *word == "config" || *word == "-c") => {
                 opaque_executor = true;
             }
-            _ if EXECUTORS.contains(&name.as_str()) => opaque_executor = true,
+            _ if EXECUTORS.contains(&name.as_str()) => {
+                opaque_executor = true;
+                if args
+                    .iter()
+                    .any(|word| CODE_MARKERS.iter().any(|marker| word.contains(marker)))
+                {
+                    return Some(SHELL_WRITE.into());
+                }
+            }
             _ => {}
         }
         let reach = if DESTROYERS.contains(&name.as_str())
@@ -505,7 +584,15 @@ fn scan_shell(
                 .copied()
                 .filter(|word| !word.starts_with('-'))
                 .collect();
-            if DESTINATION_ONLY.contains(&name.as_str()) {
+            let target_directory = args
+                .iter()
+                .any(|word| *word == "-t" || word.starts_with("--target-directory"));
+            if PLACERS.contains(&name.as_str())
+                && places_over_protected(&paths, target_directory, home, &cwd, protected)
+            {
+                return Some(SHELL_WRITE.into());
+            }
+            if DESTINATION_ONLY.contains(&name.as_str()) && !target_directory {
                 paths = paths.last().copied().into_iter().collect();
             }
             if paths.is_empty() && saw_protected {
@@ -572,9 +659,13 @@ fn pop_wrapper(words: &mut Vec<&str>, value_flags: &[&str]) {
 }
 
 fn human_subcommand(args: &[&str]) -> bool {
+    let dry_run = args.contains(&"--dry-run");
+    let check = args.contains(&"--check");
     let mut words = args.iter().copied().filter(|word| !word.starts_with('-'));
     match words.next() {
-        Some("trust" | "console") => true,
+        Some("trust" | "console" | "pause") => true,
+        Some("install" | "uninstall") => !dry_run,
+        Some("update") => !check,
         Some("jobs") => words.next() == Some("retry"),
         Some("notifications") => words.next() == Some("ack"),
         Some("plan") => words.next().is_some_and(|word| HUMAN_PLAN.contains(&word)),
@@ -601,24 +692,69 @@ fn edits_in_place(name: &str, args: &[&str]) -> bool {
         })
 }
 
-/// Whether a shell word names `~/.yoke`, something inside it, or, with
-/// `ancestors`, a directory containing it. A glob counts by its literal prefix.
-fn touches(word: &str, home: &Path, cwd: &Path, protected: &Path, ancestors: bool) -> bool {
-    let (prefix, glob) = match word.find(['*', '?', '[']) {
-        Some(index) => (&word[..index], true),
-        None => (word, false),
-    };
+/// Whether a shell word names protected state, a hook registration file or the yoke executable,
+/// or, with `ancestors`, a directory containing one of them. A glob counts when it can match one.
+fn touches(word: &str, home: &Path, cwd: &Path, protected: &Protected, ancestors: bool) -> bool {
+    let (prefix, glob) = split_glob(word);
     let path = expand(prefix, home, cwd);
-    if is_protected(&path, home, protected) {
+    if protected.hit(&path) || (ancestors && protected.ancestor_of(&path)) {
         return true;
     }
-    let path = normalized(&path);
-    let yoke_dir = normalized(&home.join(".yoke"));
-    (ancestors && yoke_dir.starts_with(&path))
-        || (glob
-            && yoke_dir
-                .to_string_lossy()
-                .starts_with(&*path.to_string_lossy()))
+    glob && protected.glob_hits(&expand(word, home, cwd), cwd, ancestors)
+}
+
+/// The literal prefix of a shell word and whether a wildcard follows it.
+fn split_glob(word: &str) -> (&str, bool) {
+    match word.find(['*', '?', '[']) {
+        Some(index) => (&word[..index], true),
+        None => (word, false),
+    }
+}
+
+/// Whether any word is the bypass token's path, or, for commands that read whole directories,
+/// the directory holding it.
+fn names_token(words: &[&str], name: &str, home: &Path, cwd: &Path, protected: &Protected) -> bool {
+    let searches = SEARCHERS.contains(&name);
+    let copies = COPIERS.contains(&name)
+        || (name == "find" && words.iter().any(|word| EXEC_FLAGS.contains(word)));
+    words.iter().any(|word| {
+        let (prefix, glob) = split_glob(word);
+        let path = expand(prefix, home, cwd);
+        if glob {
+            return protected.glob_token(&expand(word, home, cwd));
+        }
+        protected.reads_token(&path)
+            || (!word.starts_with('-')
+                && ((searches && protected.token_within(&path))
+                    || (copies && protected.is_yoke_dir(&path))))
+    })
+}
+
+/// Whether placing the sources of `cp`, `mv` or `ln` in a directory destination, or through
+/// `--target-directory`, would overwrite `<directory>/<source name>` where that is protected.
+fn places_over_protected(
+    operands: &[&str],
+    target_directory: bool,
+    home: &Path,
+    cwd: &Path,
+    protected: &Protected,
+) -> bool {
+    let Some((last, others)) = operands.split_last() else {
+        return false;
+    };
+    // `-t DIR` puts the directory first among the operands once its flag is dropped.
+    let (directories, sources): (Vec<&str>, Vec<&str>) = if target_directory {
+        (operands.to_vec(), operands.to_vec())
+    } else {
+        (vec![*last], others.to_vec())
+    };
+    directories.iter().any(|directory| {
+        let directory_path = expand(directory, home, cwd);
+        (directory.ends_with('/') || directory_path.is_dir())
+            && sources.iter().any(|source| {
+                protected.hit(&directory_path.join(basename(source.trim_end_matches('/'))))
+            })
+    })
 }
 
 /// Expand a leading `~`, `$HOME` or `${HOME}`, then anchor relative paths at `cwd`.
@@ -636,9 +772,244 @@ fn expand(word: &str, home: &Path, cwd: &Path) -> PathBuf {
     cwd.join(word)
 }
 
-fn is_protected(path: &Path, home: &Path, protected: &Path) -> bool {
-    normalized(path).starts_with(normalized(&home.join(".yoke")))
-        || resolved(path).starts_with(protected)
+/// Everything an agent must not change: Yoke's state, the files that register or configure hooks,
+/// and the yoke executable. Each path is kept both lexically normalized and symlink-resolved.
+struct Protected {
+    yoke: Vec<PathBuf>,
+    claude_dirs: Vec<PathBuf>,
+    codex_dirs: Vec<PathBuf>,
+    binaries: Vec<PathBuf>,
+    token: Vec<PathBuf>,
+    /// Where a symlinked registration file really lives, for example in a dotfiles repository.
+    leaves: Vec<PathBuf>,
+}
+
+/// A path as written, and as the filesystem resolves it.
+fn forms(path: &Path) -> Vec<PathBuf> {
+    let mut forms = vec![normalized(path)];
+    let resolved = resolved(path);
+    if !forms.contains(&resolved) {
+        forms.push(resolved);
+    }
+    forms
+}
+
+impl Protected {
+    fn new(
+        home: &Path,
+        claude_config: Option<PathBuf>,
+        codex_home: Option<PathBuf>,
+        exe: Option<PathBuf>,
+    ) -> Self {
+        // The home prefix is shared by almost every protected path, so resolve it once.
+        let base = resolved(home);
+        let under = |relative: &str| -> Vec<PathBuf> {
+            let mut forms = vec![normalized(&home.join(relative))];
+            let resolved = resolved_from(&base, Path::new(relative));
+            if !forms.contains(&resolved) {
+                forms.push(resolved);
+            }
+            forms
+        };
+        let directories = |default: &str, configured: Option<PathBuf>| -> Vec<PathBuf> {
+            under(default)
+                .into_iter()
+                .chain(configured.iter().flat_map(|dir| forms(dir)))
+                .collect()
+        };
+        let claude_dirs = directories(".claude", claude_config);
+        let codex_dirs = directories(".codex", codex_home);
+        let mut leaves = Vec::new();
+        for (dirs, names) in [
+            (&claude_dirs, ["settings.json", "settings.local.json"]),
+            (&codex_dirs, ["hooks.json", "config.toml"]),
+        ] {
+            for file in dirs.iter().flat_map(|dir| names.map(|name| dir.join(name))) {
+                let linked = file
+                    .symlink_metadata()
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink());
+                if let Some(target) = linked.then(|| resolved(&file)) {
+                    if !leaves.contains(&target) {
+                        leaves.push(target);
+                    }
+                }
+            }
+        }
+        Self {
+            yoke: under(".yoke"),
+            claude_dirs,
+            codex_dirs,
+            binaries: [".local/bin/yoke", ".cargo/bin/yoke"]
+                .into_iter()
+                .flat_map(under)
+                .chain(exe.iter().flat_map(|path| forms(path)))
+                .collect(),
+            token: under(".yoke/off-token"),
+            leaves,
+        }
+    }
+
+    /// The paths this process's agent environment points at, and the running executable.
+    fn from_env(home: &Path) -> Self {
+        let absolute = |key: &str| {
+            std::env::var_os(key)
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        Self::new(
+            home,
+            absolute("CLAUDE_CONFIG_DIR"),
+            absolute("CODEX_HOME"),
+            std::env::current_exe().ok(),
+        )
+    }
+
+    /// Whether `path` is inside `~/.yoke`, a hook registration file, or the yoke executable.
+    fn hit(&self, path: &Path) -> bool {
+        forms(path).iter().any(|form| {
+            self.yoke.iter().any(|dir| form.starts_with(dir))
+                || self.binaries.contains(form)
+                || self.leaves.contains(form)
+                || self.registers_hooks(form)
+        })
+    }
+
+    /// Claude Code reads hooks, `env` and `disableAllHooks` from `settings*.json` in any `.claude`
+    /// directory, Codex from `hooks.json` and `config.toml` in its home and in a project `.codex`.
+    fn registers_hooks(&self, path: &Path) -> bool {
+        let (Some(name), Some(parent)) = (
+            path.file_name().and_then(|name| name.to_str()),
+            path.parent(),
+        ) else {
+            return false;
+        };
+        let settings = name.starts_with("settings") && name.ends_with(".json");
+        if settings
+            && (parent.file_name().is_some_and(|dir| dir == ".claude")
+                || self.claude_dirs.iter().any(|dir| dir == parent))
+        {
+            return true;
+        }
+        if matches!(name, "hooks.json" | "config.toml")
+            && self.codex_dirs.iter().any(|dir| dir == parent)
+        {
+            return true;
+        }
+        !self.codex_dirs.iter().any(|dir| path.starts_with(dir))
+            && path.components().any(|part| part.as_os_str() == ".codex")
+    }
+
+    /// The protected files that exist at fixed places, for ancestor and glob checks.
+    fn fixed_targets(&self) -> Vec<PathBuf> {
+        let mut targets = self.yoke.clone();
+        for dir in &self.claude_dirs {
+            targets.extend(["settings.json", "settings.local.json"].map(|name| dir.join(name)));
+        }
+        for dir in &self.codex_dirs {
+            targets.extend(["hooks.json", "config.toml"].map(|name| dir.join(name)));
+        }
+        targets.extend(self.leaves.iter().cloned());
+        targets
+    }
+
+    /// Whether removing or moving `path` would remove a protected file: it holds one, or it is
+    /// a `.claude` or `.codex` directory. The executable is not covered: its directory is shared.
+    fn ancestor_of(&self, path: &Path) -> bool {
+        let targets = self.fixed_targets();
+        forms(path).iter().any(|form| {
+            form.file_name()
+                .is_some_and(|name| name == ".claude" || name == ".codex")
+                || targets.iter().any(|target| target.starts_with(form))
+        })
+    }
+
+    /// Whether a shell pattern, already expanded to an absolute path, can match a protected file.
+    fn glob_hits(&self, pattern: &Path, cwd: &Path, ancestors: bool) -> bool {
+        let pattern = normalized(pattern);
+        let mut targets = self.fixed_targets();
+        targets.extend(self.binaries.iter().cloned());
+        for dir in cwd.ancestors() {
+            for file in [
+                ".claude/settings.json",
+                ".claude/settings.local.json",
+                ".codex/hooks.json",
+                ".codex/config.toml",
+            ] {
+                targets.push(dir.join(file));
+            }
+            if ancestors {
+                targets.push(dir.join(".claude"));
+                targets.push(dir.join(".codex"));
+            }
+        }
+        if ancestors {
+            targets.extend(self.claude_dirs.iter().chain(&self.codex_dirs).cloned());
+            targets.extend(self.yoke.iter().cloned());
+        }
+        targets.iter().any(|target| glob_path(&pattern, target))
+    }
+
+    fn reads_token(&self, path: &Path) -> bool {
+        forms(path).iter().any(|form| self.token.contains(form))
+    }
+
+    fn glob_token(&self, pattern: &Path) -> bool {
+        let pattern = normalized(pattern);
+        self.token.iter().any(|token| glob_path(&pattern, token))
+    }
+
+    /// Whether `path` is the token or a directory that holds it.
+    fn token_within(&self, path: &Path) -> bool {
+        forms(path)
+            .iter()
+            .any(|form| self.token.iter().any(|token| token.starts_with(form)))
+    }
+
+    fn is_yoke_dir(&self, path: &Path) -> bool {
+        forms(path).iter().any(|form| self.yoke.contains(form))
+    }
+}
+
+/// Whether a path pattern matches `target` segment by segment, as a shell glob would.
+fn glob_path(pattern: &Path, target: &Path) -> bool {
+    let (pattern, target): (Vec<_>, Vec<_>) = (
+        pattern.components().collect(),
+        target.components().collect(),
+    );
+    pattern.len() == target.len()
+        && pattern
+            .iter()
+            .zip(&target)
+            .all(|(pattern, target)| match (pattern, target) {
+                (Component::Normal(pattern), Component::Normal(target)) => {
+                    let (pattern, target): (Vec<char>, Vec<char>) = (
+                        pattern.to_string_lossy().chars().collect(),
+                        target.to_string_lossy().chars().collect(),
+                    );
+                    // A wildcard never matches a leading dot.
+                    !(target.first() == Some(&'.') && pattern.first() != Some(&'.'))
+                        && glob_segment(&pattern, &target)
+                }
+                (pattern, target) => pattern == target,
+            })
+}
+
+/// `*`, `?` and `[...]` (treated as any one character, which can only over-match).
+fn glob_segment(pattern: &[char], text: &[char]) -> bool {
+    match pattern.split_first() {
+        None => text.is_empty(),
+        Some(('*', rest)) => (0..=text.len()).any(|skip| glob_segment(rest, &text[skip..])),
+        Some(('?', rest)) => text
+            .split_first()
+            .is_some_and(|(_, text)| glob_segment(rest, text)),
+        Some(('[', rest)) => match rest.iter().position(|c| *c == ']') {
+            Some(end) => text
+                .split_first()
+                .is_some_and(|(_, text)| glob_segment(&rest[end + 1..], text)),
+            None => text.first() == Some(&'[') && glob_segment(rest, &text[1..]),
+        },
+        Some((c, rest)) => text.first() == Some(c) && glob_segment(rest, &text[1..]),
+    }
 }
 
 fn normalized(path: &Path) -> PathBuf {
@@ -656,8 +1027,13 @@ fn normalized(path: &Path) -> PathBuf {
 }
 
 fn resolved(path: &Path) -> PathBuf {
+    resolved_from(Path::new(""), path)
+}
+
+/// `resolved` continued from a prefix that is already resolved.
+fn resolved_from(base: &Path, path: &Path) -> PathBuf {
     // Resolve each existing prefix, preserving symlink semantics before `..`.
-    let mut result = PathBuf::new();
+    let mut result = base.to_path_buf();
     for component in path.components() {
         match component {
             Component::CurDir => {}
@@ -1112,6 +1488,300 @@ mod tests {
             })
             .collect();
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn protects_hook_registration_files_and_the_yoke_binary() {
+        let (home, project) = homes();
+        let abs = home.path().display();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::fs::create_dir_all(home.path().join(".local/bin")).unwrap();
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        std::fs::write(home.path().join(".claude/settings.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(
+            home.path().join(".claude/settings.json"),
+            project.join("alias.json"),
+        )
+        .unwrap();
+        let owned = [
+            format!("echo '{{}}' > {abs}/.claude/settings.json"),
+            format!("cd {abs}/.claude && echo '{{}}' > settings.json"),
+        ];
+        let mut rows = vec![
+            ("echo '{}' > ~/.claude/settings.json", true),
+            ("echo '{}' >> ~/.claude/settings.local.json", true),
+            ("echo x > .claude/settings.local.json", true),
+            ("echo x > ../project/.claude/settings.json", true),
+            ("cat settings.json > alias.json", true),
+            ("sed -i '' 's/yoke/true/' ~/.claude/settings.json", true),
+            ("perl -pi -e 's/a/b/' $HOME/.claude/settings.json", true),
+            ("rm ~/.codex/hooks.json", true),
+            ("rm -f ~/.codex/config.toml", true),
+            ("rm .claude/settings.local.json", true),
+            ("rm .claude/settings*", true),
+            ("rm -rf ~/.claude", true),
+            ("rm -rf .claude", true),
+            ("rm -rf .codex", true),
+            ("mv .claude .claude.bak", true),
+            ("mv /tmp/x ~/.claude/", true),
+            ("chmod 000 ~/.codex/config.toml", true),
+            ("truncate -s 0 .claude/settings.json", true),
+            ("ln -sf /tmp/x ~/.claude/settings.json", true),
+            ("ln -sf /tmp/settings.json ~/.claude/", true),
+            ("tee ~/.claude/settings.local.json", true),
+            ("printf x | tee .codex/hooks.json", true),
+            ("echo x > .codex/config.toml", true),
+            ("touch .codex/hooks.json", true),
+            ("cp /tmp/evil ~/.local/bin/yoke", true),
+            ("cp /tmp/evil ~/.cargo/bin/yoke", true),
+            ("cp /tmp/yoke ~/.local/bin/", true),
+            ("cp -t ~/.local/bin /tmp/yoke", true),
+            ("cp /tmp/settings.json ~/.claude/", true),
+            ("cp /tmp/hooks.json ~/.codex/", true),
+            ("install -m 755 /tmp/evil ~/.local/bin/yoke", true),
+            ("mv /tmp/evil ~/.local/bin/yoke", true),
+            ("rm ~/.local/bin/yoke", true),
+            (
+                "curl -o ~/.claude/settings.json https://example.com/s.json",
+                true,
+            ),
+            ("patch ~/.claude/settings.json < fix.diff", true),
+            ("bash -c 'echo {} > ~/.claude/settings.json'", true),
+            ("sudo sed -i s/a/b/ ~/.claude/settings.json", true),
+            (
+                r#"python3 -c "open('.claude/settings.json','w').write('{}')""#,
+                true,
+            ),
+            ("find ~/.claude -name 'settings*.json' -delete", true),
+            // An interpreter given the path may write it, as for ~/.yoke.
+            ("python3 validate.py .claude/settings.json", true),
+            // Reads, neighbours and unrelated names stay allowed.
+            ("cat ~/.claude/settings.json", false),
+            ("grep hooks .claude/settings.json", false),
+            ("cp ~/.claude/settings.json /tmp/backup.json", false),
+            ("ls ~/.codex", false),
+            ("rm -rf .claude/worktrees/old", false),
+            ("echo x > ~/.claude/projects/p/session.jsonl", false),
+            ("echo x > .claude/commands/review.md", false),
+            ("echo x > .claude/settings.md", false),
+            ("echo x > docs/settings.json", false),
+            ("echo x > .claude-notes/settings.json", false),
+            ("touch ~/.codex/AGENTS.md", false),
+            ("echo x > ~/.local/bin/other", false),
+            ("cat ~/.local/bin/yoke", false),
+            ("cp /tmp/other ~/.local/bin/", false),
+            ("curl -o /tmp/out.json https://example.com/s.json", false),
+            ("yoke --version", false),
+        ];
+        rows.extend(owned.iter().map(|command| (command.as_str(), true)));
+        let failures = mismatches(home.path(), &project, &rows);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn protects_hook_registration_files_from_edit_tools_and_patches() {
+        let (home, project) = homes();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::create_dir(home.path().join("dotfiles")).unwrap();
+        std::fs::write(home.path().join("dotfiles/claude-settings.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(
+            home.path().join("dotfiles/claude-settings.json"),
+            home.path().join(".claude/settings.json"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            home.path().join(".claude/settings.json"),
+            project.join("alias.json"),
+        )
+        .unwrap();
+        let rows = [
+            // The real file behind a symlinked settings.json is protected too.
+            (
+                "Write",
+                json!({"file_path": "~/dotfiles/claude-settings.json"}),
+                true,
+            ),
+            (
+                "Write",
+                json!({"file_path": "~/.claude/settings.json"}),
+                true,
+            ),
+            (
+                "Write",
+                json!({"file_path": ".claude/settings.local.json"}),
+                true,
+            ),
+            (
+                "Write",
+                json!({"file_path": "$HOME/.codex/hooks.json"}),
+                true,
+            ),
+            ("Write", json!({"file_path": ".codex/config.toml"}), true),
+            ("Write", json!({"file_path": "alias.json"}), true),
+            ("Write", json!({"file_path": "~/.local/bin/yoke"}), true),
+            (
+                "Edit",
+                json!({"file_path": "~/.claude/settings.json"}),
+                true,
+            ),
+            (
+                "MultiEdit",
+                json!({"edits": [{"file_path": ".claude/settings.json"}]}),
+                true,
+            ),
+            (
+                "apply_patch",
+                json!({"command": "*** Begin Patch\n*** Update File: .claude/settings.json\n*** End Patch"}),
+                true,
+            ),
+            (
+                "apply_patch",
+                json!("*** Begin Patch\n*** Add File: $HOME/.codex/hooks.json\n+{}\n*** End Patch"),
+                true,
+            ),
+            (
+                "Write",
+                json!({"file_path": "~/.claude/commands/x.md"}),
+                false,
+            ),
+            ("Write", json!({"file_path": ".claude/settings.md"}), false),
+            ("Write", json!({"file_path": "docs/settings.json"}), false),
+            (
+                "Read",
+                json!({"file_path": "~/.claude/settings.json"}),
+                false,
+            ),
+            (
+                "apply_patch",
+                json!({"command": "*** Begin Patch\n*** Add File: docs/settings.json\n+1\n*** End Patch"}),
+                false,
+            ),
+        ];
+        let failures: Vec<String> = rows
+            .iter()
+            .filter_map(|(tool, input, deny)| {
+                let event = AgentEvent {
+                    tool_name: Some((*tool).into()),
+                    tool_input: input.clone(),
+                    ..Default::default()
+                };
+                let reason = evaluate(EventKind::PreToolUse, &event, home.path(), &project);
+                (reason.is_some() != *deny)
+                    .then(|| format!("{tool} {input}: expected deny={deny}, got {reason:?}"))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn protects_configured_agent_directories_and_the_running_executable() {
+        let (home, project) = homes();
+        let config = tempfile::tempdir().unwrap();
+        let exe = home.path().join("custom/bin/yoke");
+        let protected = Protected::new(
+            home.path(),
+            Some(config.path().join("claude")),
+            Some(config.path().join("codex")),
+            Some(exe.clone()),
+        );
+        let rows = [
+            (
+                format!("echo x > {}/claude/settings.json", config.path().display()),
+                true,
+            ),
+            (
+                format!("echo x > {}/codex/hooks.json", config.path().display()),
+                true,
+            ),
+            (format!("cp /tmp/evil {}", exe.display()), true),
+            (
+                format!("echo x > {}/claude/history.jsonl", config.path().display()),
+                false,
+            ),
+        ];
+        for (command, deny) in rows {
+            let reason = evaluate_in(
+                EventKind::PreToolUse,
+                &shell(&command),
+                home.path(),
+                &project,
+                &protected,
+            );
+            assert_eq!(reason.is_some(), deny, "{command}: {reason:?}");
+        }
+    }
+
+    #[test]
+    fn makes_install_uninstall_update_and_pause_human_only() {
+        let (home, project) = homes();
+        let rows = [
+            ("yoke uninstall", true),
+            ("yoke uninstall --agent claude,codex", true),
+            ("yoke install", true),
+            ("yoke install --agent claude --statusline", true),
+            ("~/.local/bin/yoke update", true),
+            ("yoke pause", true),
+            ("yoke pause --for 30m", true),
+            ("bash -c 'yoke uninstall'", true),
+            ("sudo yoke install", true),
+            (
+                r#"python3 -c "import subprocess; subprocess.run(['yoke','uninstall'])""#,
+                true,
+            ),
+            ("echo yoke pause | sh", true),
+            ("yoke install --dry-run", false),
+            ("yoke install --agent claude --dry-run", false),
+            ("yoke uninstall --dry-run", false),
+            ("yoke update --check", false),
+            ("yoke installed", false),
+            (r#"git commit -m "docs: explain yoke install""#, false),
+            (r#"grep -rn "yoke pause" docs/"#, false),
+        ];
+        let failures = mismatches(home.path(), &project, &rows);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn keeps_the_bypass_token_private_to_the_human() {
+        let (home, project) = homes();
+        std::fs::write(home.path().join(".yoke/off-token"), "secret").unwrap();
+        let abs = home.path().display();
+        let owned = [
+            format!("cat {abs}/.yoke/off-token"),
+            format!("cd {abs}/.yoke && cat off-token"),
+        ];
+        let mut rows = vec![
+            ("cat ~/.yoke/off-token", true),
+            ("cat $HOME/.yoke/off-token", true),
+            ("head -c 40 ~/.yoke/off-token", true),
+            ("cat < ~/.yoke/off-token", true),
+            ("cat ~/.yoke/off-*", true),
+            ("cat ~/.yoke/*", true),
+            ("cp ~/.yoke/off-token /tmp/t", true),
+            ("bash -c 'cat ~/.yoke/off-token'", true),
+            ("cat ~/.yoke/config.toml", false),
+            ("cat ~/.yoke/*.toml", false),
+            ("ls ~/.yoke/*", false),
+            ("stat ~/.yoke/off-token", false),
+        ];
+        rows.extend(owned.iter().map(|command| (command.as_str(), true)));
+        let failures = mismatches(home.path(), &project, &rows);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        for (tool, input, deny) in [
+            ("Read", json!({"file_path": "~/.yoke/off-token"}), true),
+            ("Read", json!({"file_path": "~/.yoke/config.toml"}), false),
+            ("Grep", json!({"pattern": "a", "path": "~/.yoke"}), true),
+            ("Grep", json!({"pattern": "a", "path": "src"}), false),
+        ] {
+            let event = AgentEvent {
+                tool_name: Some(tool.into()),
+                tool_input: input.clone(),
+                ..Default::default()
+            };
+            let reason = evaluate(EventKind::PreToolUse, &event, home.path(), &project);
+            assert_eq!(reason.is_some(), deny, "{tool} {input}: {reason:?}");
+        }
     }
 
     #[test]

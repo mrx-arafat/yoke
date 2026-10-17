@@ -9,18 +9,29 @@ use serde_json::Value;
 const MASK: &str = "[REDACTED]";
 
 /// Names whose value is a secret, matched inside longer names such as `DB_PASSWORD`.
-const KEYWORDS: &str = "token|secret|password|passwd|api[_-]?key|authorization";
+const KEYWORDS: &str = "token|secret|password|passwd|passphrase|api[_-]?key|authorization|credential|private[_-]?key|cookie|sess(?:ion)?[_-]?id|signature|account[_-]?key";
+/// Short names that are secrets only as a whole word of the name (`DB_PASS`, `x-sig`, `auth`):
+/// inside a longer word they are `bypass`, `compass`, `sigil` and `author`. `pwd` counts only
+/// next to another word (`PWD_DB`), because a bare `PWD` is the working directory.
+const WORD_NAME: &str = r"(?-u:\b)(?:(?:[a-z0-9_.-]*[_.-])?(?:pass|sig|auth)(?:[_.-][a-z0-9_.-]*)?|[a-z0-9_.-]*[_.-]pwd(?:[_.-][a-z0-9_.-]*)?|pwd[_.-][a-z0-9_.-]*)";
 
 static SENSITIVE_KEY: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(&format!("(?i){KEYWORDS}")).unwrap());
+    LazyLock::new(|| Regex::new(&format!("(?i){KEYWORDS}|^(?:{WORD_NAME})$")).unwrap());
 static PEM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)-----BEGIN [A-Z0-9 ]+-----.*?(?:-----END [A-Z0-9 ]+-----|\z)").unwrap()
 });
 // A prefix must start a word, so `ask-codex` and `<task-notification>` are not `sk-` keys.
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"\b(?:ghp_|gho_|ghs_|github_pat_|sk-|xoxb-|xoxp-)[A-Za-z0-9_-]+|AKIA[A-Za-z0-9]{16}",
-    )
+    Regex::new(concat!(
+        r"(?-u:\b)(?:ghp_|gho_|ghu_|ghr_|ghs_|github_pat_|sk-|sk_live_|rk_live_|pk_live_|xoxb-|xoxp-|xoxa-|xoxs-|xoxr-|xapp-|xoxe(?:\.xox[a-z])?-|glpat-|shp(?:at|ca|pa|ss)_|dop_v1_)[A-Za-z0-9_-]+",
+        r"|AKIA[A-Za-z0-9]{16}",
+        r"|(?-u:\b)AIza[A-Za-z0-9_-]{30,}",
+        r"|(?-u:\b)ya29\.[A-Za-z0-9_-]{20,}",
+        r"|(?-u:\b)npm_[A-Za-z0-9]{30,}",
+        r"|(?-u:\b)hf_[A-Za-z0-9]{20,}",
+        r"|(?-u:\b)SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",
+        r"|(?-u:\b)eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*",
+    ))
     .unwrap()
 });
 // Group 1 of `scheme://user:password@host` is the password. It may hold `@` and `:`, so it runs to
@@ -40,7 +51,7 @@ static AUTHORIZATION: LazyLock<Regex> = LazyLock::new(|| {
 // so prose such as `token is required` or `password-reset emails` is left alone.
 static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r#"(?i)(["']?[a-z0-9_.-]*(?:{KEYWORDS})[a-z0-9_.-]*["']?(?:\s*=\s*|\s*:)|--[a-z0-9_.-]*(?:{KEYWORDS})[a-z0-9_.-]*\s+)([^\s,;}}\]&])"#
+        r#"(?i)(["']?(?:[a-z0-9_.-]*(?:{KEYWORDS})[a-z0-9_.-]*|{WORD_NAME})["']?(?:\s*=\s*|\s*:)|--(?:[a-z0-9_.-]*(?:{KEYWORDS})[a-z0-9_.-]*|{WORD_NAME})\s+)([^\s,;}}\]&])"#
     ))
     .unwrap()
 });
@@ -80,6 +91,82 @@ pub fn redact_payload(input: &str, cap: usize) -> String {
     }
     output.truncate(end);
     output
+}
+
+/// Status fields of a tool's response that carry no free text, kept in its summary.
+const RESPONSE_STATUS: [&str; 10] = [
+    "exit_code",
+    "exitCode",
+    "code",
+    "is_error",
+    "isError",
+    "interrupted",
+    "success",
+    "truncated",
+    "duration_ms",
+    "durationMs",
+];
+/// Characters of a failed tool's `error` text kept in the decision log.
+const ERROR_KEPT: usize = 256;
+/// Characters of a command's error output kept as an excerpt; enough for a sandbox or shell
+/// error message (`bwrap: loopback: Failed RTM_NEWADDR`), too few to hold a file.
+const EXCERPT_KEPT: usize = 200;
+/// Tools whose error output is worth an excerpt; other tools' output is file or web content.
+const COMMAND_TOOLS: [&str; 2] = ["Bash", "PowerShell"];
+
+/// What the decision log keeps of a hook payload: the event with secrets masked and the tool's
+/// output reduced to its size and status flags, plus a short excerpt of a command's error output.
+/// The output is where file contents and personal data show up.
+pub fn hook_payload(input: &str, cap: usize) -> String {
+    let Ok(Value::Object(mut event)) = serde_json::from_str::<Value>(input) else {
+        return redact_payload(input, cap);
+    };
+    let command = event
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| COMMAND_TOOLS.contains(&name));
+    if let Some(response) = event.get_mut("tool_response") {
+        *response = summarize_response(response, command);
+    }
+    if let Some(Value::String(error)) = event.get_mut("error") {
+        if let Some((end, _)) = error.char_indices().nth(ERROR_KEPT) {
+            error.truncate(end);
+            error.push_str("...");
+        }
+    }
+    redact_payload(&Value::Object(event).to_string(), cap)
+}
+
+fn summarize_response(response: &Value, command: bool) -> Value {
+    let bytes = match response {
+        Value::String(text) => text.len(),
+        other => other.to_string().len(),
+    };
+    let mut summary = serde_json::Map::from_iter([("bytes".to_owned(), Value::from(bytes))]);
+    if let Value::Object(fields) = response {
+        for name in RESPONSE_STATUS {
+            if let Some(value @ (Value::Bool(_) | Value::Number(_))) = fields.get(name) {
+                summary.insert(name.to_owned(), value.clone());
+            }
+        }
+    }
+    // A command's standard output is data; its error output is a diagnostic.
+    let diagnostic = match response {
+        Value::String(text) => Some(text.as_str()),
+        Value::Object(fields) => ["stderr", "output"]
+            .iter()
+            .find_map(|name| fields.get(*name).and_then(Value::as_str))
+            .filter(|text| !text.is_empty()),
+        _ => None,
+    };
+    if let Some(text) = diagnostic.filter(|_| command) {
+        let end = text
+            .char_indices()
+            .nth(EXCERPT_KEPT)
+            .map_or(text.len(), |(end, _)| end);
+        summary.insert("excerpt".to_owned(), Value::from(&text[..end]));
+    }
+    Value::Object(summary)
 }
 
 /// Compile every pattern now, so a caller can pay for it off its critical path.
@@ -505,6 +592,145 @@ mod tests {
                 .unwrap_or_else(|_| panic!("1 MiB of {unit} took over 10 s"));
             assert_eq!(output, expected);
         }
+    }
+
+    /// Joins two halves at run time, so no key-shaped literal sits in the source where secret
+    /// scanners would mistake a test fixture for a leaked credential.
+    fn j(left: &str, right: &str) -> &'static str {
+        Box::leak(format!("{left}{right}").into_boxed_str())
+    }
+
+    #[test]
+    fn masks_the_credential_shapes_a_security_audit_found_missing() {
+        // (input, the secret that must not survive). Generic hex and base64 with no keyword
+        // or prefix cannot be recognized by any pattern and are deliberately not here.
+        let leaked: &[(&str, &str)] = &[
+            ("ghu_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "AAAAAAAA"),
+            ("ghr_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "AAAAAAAA"),
+            (j("sk_li", "ve_AAAAAAAAAAAAAAAAAAAAAAAA"), "AAAAAAAA"),
+            (j("rk_li", "ve_AAAAAAAAAAAAAAAAAAAAAAAA"), "AAAAAAAA"),
+            (j("pk_li", "ve_AAAAAAAAAAAAAAAAAAAAAAAA"), "AAAAAAAA"),
+            ("AIzaSyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "AAAAAAAA"),
+            ("ya29.A0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "AAAAAAAA"),
+            (j("xapp-", "1-A0AAAAAAAAA-111111-aaaaaaaaaaaa"), "aaaaaaaa"),
+            (j("xoxa-", "2-111111111111-aaaaaaaaaaaa"), "aaaaaaaa"),
+            (j("xoxs-", "111111111111-aaaaaaaaaaaa"), "aaaaaaaa"),
+            (j("xoxe.", "xoxp-1-aaaaaaaaaaaaaaaa"), "aaaaaaaa"),
+            ("glpat-AAAAAAAAAAAAAAAAAAAA", "AAAAAAAA"),
+            ("npm_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "AAAAAAAA"),
+            ("hf_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "AAAAAAAA"),
+            (j("shpat", "_0123456789abcdef0123456789abcdef"), "0123456789"),
+            (j("dop_v", "1_0123456789abcdef0123456789abcdef"), "0123456789"),
+            (
+                "SG.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "AAAAAAAA",
+            ),
+            (
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "AAAAAAAA",
+            ),
+            ("--passphrase correcthorsebattery", "correcthorse"),
+            ("PASSPHRASE=correcthorsebattery", "correcthorse"),
+            ("DB_PASS=hunter2hunter2", "hunter2"),
+            ("--pass hunter2hunter2", "hunter2"),
+            ("PWD_DB=hunter2hunter2", "hunter2"),
+            ("CREDENTIALS=hunter2hunter2", "hunter2"),
+            ("PRIVATE_KEY=hunter2hunter2hunter2", "hunter2"),
+            ("Cookie: session=abcdef0123456789abcdef", "abcdef0123"),
+            ("Set-Cookie: sid=abcdef0123456789abcdef; HttpOnly", "abcdef0123"),
+            ("sessionid=abcdef0123456789abcdef", "abcdef0123"),
+            ("PHPSESSID=abcdef0123456789abcdef", "abcdef0123"),
+            ("TWILIO_AUTH=0123456789abcdef0123456789abcdef", "0123456789"),
+            (
+                "DefaultEndpointsProtocol=https;AccountName=a;AccountKey=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==;EndpointSuffix=core.windows.net",
+                "AAAAAAAA",
+            ),
+            (
+                r#"{"auths":{"ghcr.io":{"auth":"dXNlcjpwYXNz"}}}"#,
+                "dXNlcjpwYXNz",
+            ),
+            (r#"{"auth":"dXNlcjpwYXNzd29yZA=="}"#, "dXNlcjpwYXNzd29yZA"),
+            (
+                "https://x.blob.core.windows.net/c?sig=AAAAAAAAAAAAAAAAAAAAAAAA%3D&sv=2020",
+                "AAAAAAAA",
+            ),
+            (
+                "https://b.s3.amazonaws.com/k?X-Amz-Signature=0123456789abcdef0123456789abcdef&X-Amz-Expires=60",
+                "0123456789",
+            ),
+        ];
+        for (input, secret) in leaked {
+            let output = redact(&format!("echo {input}"));
+            assert!(!output.contains(secret), "{secret} survived in {output}");
+        }
+        // Words that merely contain a short keyword, and identifiers with a token-like prefix,
+        // are not secrets; neither is a 40-digit commit hash.
+        let kept = [
+            "jest --passWithNoTests src/app.test.ts",
+            "3 tests passed: 12 skipped: 1",
+            "compass: north bypass=1 passthrough=2",
+            "cd $PWD && PWD=/home/user/project",
+            "export npm_config_registry=https://registry.npmjs.org/ hf_model_name=bert",
+            "git show 0123456789abcdef0123456789abcdef01234567",
+            "author: Ada, signing off; the sigil is a symbol",
+        ];
+        for input in kept {
+            assert_eq!(redact(input), input, "over-masked: {input}");
+        }
+    }
+
+    #[test]
+    fn stores_a_summary_of_tool_output_never_the_output() {
+        let event = serde_json::json!({
+            "session_id": "s",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/work/people.csv"},
+            "tool_response": {
+                "content": "Ada Lovelace ada@example.com 4111 1111 1111 1111",
+                "exit_code": 0,
+                "interrupted": false,
+            },
+            "error": "e".repeat(5000),
+        })
+        .to_string();
+        let stored = hook_payload(&event, 4096);
+        for personal in ["Ada", "example.com", "4111"] {
+            assert!(!stored.contains(personal), "{personal} stored in {stored}");
+        }
+        let parsed: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(parsed["tool_name"], "Read");
+        assert_eq!(parsed["tool_input"]["file_path"], "/work/people.csv");
+        assert_eq!(parsed["tool_response"]["exit_code"], 0);
+        assert_eq!(parsed["tool_response"]["interrupted"], false);
+        assert!(parsed["tool_response"]["bytes"].as_u64().unwrap() > 40);
+        assert!(parsed["error"].as_str().unwrap().len() < 600);
+        // A command's error output keeps a short excerpt, so a sandbox error stays diagnosable;
+        // its standard output and any other tool's output do not.
+        let sandboxed = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_response": format!("bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n{}", "x".repeat(900)),
+        })
+        .to_string();
+        let stored: Value = serde_json::from_str(&hook_payload(&sandboxed, 4096)).unwrap();
+        let excerpt = stored["tool_response"]["excerpt"].as_str().unwrap();
+        assert!(excerpt.starts_with("bwrap: loopback: Failed RTM_NEWADDR"));
+        assert!(excerpt.chars().count() <= 200);
+        let listing = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_response": {"stdout": "Ada Lovelace 4111 1111 1111 1111", "stderr": ""},
+        })
+        .to_string();
+        let stored = hook_payload(&listing, 4096);
+        assert!(
+            !stored.contains("Ada") && !stored.contains("4111"),
+            "{stored}"
+        );
+        // Text that is not a JSON object has no tool output to summarize.
+        assert_eq!(
+            hook_payload("not json token=abc", 64),
+            "not json token=[REDACTED]"
+        );
     }
 
     #[test]

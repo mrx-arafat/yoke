@@ -91,7 +91,39 @@ pub struct ImportReport {
     pub duplicates: usize,
     pub conflicts: Vec<String>,
     pub dry_run: bool,
+    /// Memories the archive marked pinned whose pin was not imported.
+    pub pins_dropped: usize,
+    /// Pending facts the archive held that were imported as already digested.
+    pub facts_marked_digested: usize,
+    /// In a dry run, the first memories the import would add, as they would be stored.
+    pub preview: Vec<ImportPreview>,
+    pub preview_omitted: usize,
 }
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ImportPreview {
+    pub project: String,
+    pub source: String,
+    pub ts: i64,
+    pub pinned: bool,
+    /// Cut at 200 characters.
+    pub text: String,
+}
+
+/// What an import takes from the archive beyond plain text.
+#[derive(Clone, Copy, Debug)]
+pub struct ImportOptions {
+    pub dry_run: bool,
+    /// Keep the archive's pinned flags; otherwise every imported memory is unpinned, because a
+    /// pinned memory is injected at every session start and the archive is untrusted.
+    pub keep_pins: bool,
+    /// Unix time; no record may be dated more than a day after it.
+    pub now: i64,
+}
+
+const PREVIEW_LIMIT: usize = 100;
+const PREVIEW_TEXT: usize = 200;
+const CLOCK_SLACK_SECS: i64 = 86_400;
 
 pub fn export_archive(
     store: &Store,
@@ -155,7 +187,8 @@ pub fn export_archive(
             .collect(),
         links,
     };
-    validate(&archive)?;
+    // Shape only: a local clock that ran ahead must not make the export fail.
+    validate(&archive, i64::MAX)?;
     let mut buffer = ArchiveBuffer(Vec::new());
     serde_json::to_writer_pretty(&mut buffer, &archive)?;
     let bytes = buffer.0;
@@ -183,8 +216,13 @@ pub fn import_archive(
     store: &Store,
     path: &Path,
     mappings: &BTreeMap<String, String>,
-    dry_run: bool,
+    options: &ImportOptions,
 ) -> Result<ImportReport> {
+    let ImportOptions {
+        dry_run,
+        keep_pins,
+        now,
+    } = *options;
     if !fs::symlink_metadata(path)?.file_type().is_file() {
         bail!("archive must be a regular file, not a symlink or special file");
     }
@@ -206,7 +244,7 @@ pub fn import_archive(
         bail!("archive exceeds 16 MiB");
     }
     let mut archive: Archive = serde_json::from_slice(&bytes).context("invalid memory archive")?;
-    validate(&archive)?;
+    validate(&archive, now)?;
     if mappings.len() != archive.projects.len()
         || archive
             .projects
@@ -236,13 +274,25 @@ pub fn import_archive(
         validate_project(destination)?;
     }
     // Archives are untrusted plaintext. Apply the same persistence boundary as locally created notes.
+    let mut pins_dropped = 0;
     for memory in &mut archive.memories {
         memory.text = redact(&memory.text);
+        if memory.pinned && !keep_pins {
+            memory.pinned = false;
+            pins_dropped += 1;
+        }
     }
+    // A pending fact would queue a digest job that sends its text to a model; the archive
+    // cannot ask for that.
+    let mut facts_marked_digested = 0;
     for fact in &mut archive.facts {
         fact.detail = redact(&fact.detail);
         fact.session_id = redact(&fact.session_id);
         fact.kind = redact(&fact.kind);
+        if !fact.digested {
+            fact.digested = true;
+            facts_marked_digested += 1;
+        }
     }
     let tx = Transaction::new_unchecked(
         store.connection(),
@@ -258,6 +308,10 @@ pub fn import_archive(
         duplicates: 0,
         conflicts: Vec::new(),
         dry_run,
+        pins_dropped,
+        facts_marked_digested,
+        preview: Vec::new(),
+        preview_omitted: 0,
     };
     let mut memory_ids = BTreeMap::new();
     let mut fact_ids = BTreeMap::new();
@@ -270,17 +324,32 @@ pub fn import_archive(
             )
             .optional()?;
         match existing {
-            Some(row) => match memory_difference(&row, memory, &mappings[&memory.project]) {
-                None => {
-                    report.duplicates += 1;
-                    memory_ids.insert(memory.identity.clone(), row.id);
+            Some(row) => {
+                match memory_difference(&row, memory, &mappings[&memory.project], keep_pins) {
+                    None => {
+                        report.duplicates += 1;
+                        memory_ids.insert(memory.identity.clone(), row.id);
+                    }
+                    Some(why) => report
+                        .conflicts
+                        .push(format!("memory {} {why}", memory.identity)),
                 }
-                Some(why) => report
-                    .conflicts
-                    .push(format!("memory {} {why}", memory.identity)),
-            },
+            }
             None => {
                 report.additions += 1;
+                if dry_run {
+                    if report.preview.len() < PREVIEW_LIMIT {
+                        report.preview.push(ImportPreview {
+                            project: mappings[&memory.project].clone(),
+                            source: memory.source.clone(),
+                            ts: memory.ts,
+                            pinned: memory.pinned,
+                            text: preview_text(&memory.text),
+                        });
+                    } else {
+                        report.preview_omitted += 1;
+                    }
+                }
             }
         }
     }
@@ -391,29 +460,38 @@ fn insert_identity(tx: &Transaction<'_>, identity: &str, kind: &str, id: i64) ->
 }
 
 /// Why a stored memory with the same identity is not the incoming one; `None` when it is.
-fn memory_difference(row: &Memory, incoming: &PortableMemory, project: &str) -> Option<String> {
+fn memory_difference(
+    row: &Memory,
+    incoming: &PortableMemory,
+    project: &str,
+    keep_pins: bool,
+) -> Option<String> {
     if row.project != project {
         return Some(format!("is already stored under project {}", row.project));
     }
     if row.ts != incoming.ts || row.source != incoming.source || row.text != incoming.text {
         return Some("differs from the local record".into());
     }
-    (row.pinned != incoming.pinned).then(|| "is pinned differently in the local record".into())
+    // Without --keep-pins the archive's pin is ignored, so a pin set locally is not a difference.
+    (keep_pins && row.pinned != incoming.pinned)
+        .then(|| "is pinned differently in the local record".into())
 }
 
 fn fact_difference(row: &Fact, incoming: &PortableFact, project: &str) -> Option<String> {
     if row.project != project {
         return Some(format!("is already stored under project {}", row.project));
     }
+    // `digested` is not compared: an import never changes a stored fact, and the local flag
+    // moves on as digests run.
     (row.ts != incoming.ts
         || row.session_id != incoming.session_id
         || row.kind != incoming.kind
-        || row.detail != incoming.detail
-        || row.digested != incoming.digested)
+        || row.detail != incoming.detail)
         .then(|| "differs from the local record".into())
 }
 
-fn validate(archive: &Archive) -> Result<()> {
+fn validate(archive: &Archive, now: i64) -> Result<()> {
+    let in_range = |ts: i64| (0..=now.saturating_add(CLOCK_SLACK_SECS)).contains(&ts);
     if archive.version != 1 {
         bail!(
             "unsupported memory archive version {}; expected 1",
@@ -438,6 +516,13 @@ fn validate(archive: &Archive) -> Result<()> {
     for memory in &archive.memories {
         validate_identity(&memory.identity)?;
         validate_text(&memory.text)?;
+        if !in_range(memory.ts) {
+            bail!(
+                "memory {} has timestamp {} outside 0 to one day after now; the archive is not a Yoke export or was edited",
+                memory.identity,
+                memory.ts
+            );
+        }
         if !projects.contains(&memory.project)
             || !matches!(memory.source.as_str(), "fact" | "remember" | "digest")
             || memories.insert(&memory.identity, memory).is_some()
@@ -448,6 +533,13 @@ fn validate(archive: &Archive) -> Result<()> {
     for fact in &archive.facts {
         validate_identity(&fact.identity)?;
         validate_text(&fact.detail)?;
+        if !in_range(fact.ts) {
+            bail!(
+                "fact {} has timestamp {} outside 0 to one day after now; the archive is not a Yoke export or was edited",
+                fact.identity,
+                fact.ts
+            );
+        }
         if !projects.contains(&fact.project)
             || fact.session_id.len() > 4096
             || fact.session_id.contains('\0')
@@ -472,6 +564,13 @@ fn validate(archive: &Archive) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn preview_text(text: &str) -> String {
+    match text.char_indices().nth(PREVIEW_TEXT) {
+        Some((end, _)) => format!("{}...", &text[..end]),
+        None => text.to_owned(),
+    }
 }
 
 fn validate_identity(identity: &str) -> Result<()> {
