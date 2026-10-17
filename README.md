@@ -48,7 +48,8 @@ curl -fsSL https://raw.githubusercontent.com/mrx-arafat/yoke/main/install.sh | b
 ```
 
 It works on macOS and on common Linux distributions, including a fresh server: run as root, it installs `yoke` into `/usr/local/bin`, and otherwise into `~/.local/bin`, offering to add that to your `PATH`.
-It downloads the release executable for your platform and refuses it unless its SHA-256 checksum matches, and while no release exists, or on Alpine and other musl systems, it builds `main` from source, offering to install a C compiler and Rust when they are missing.
+It downloads the release executable for your platform and refuses it unless its SHA-256 checksum matches, and when it has to build from source (on Alpine and other musl systems, or when the release has no executable for your platform) it builds the newest release tag, or a pinned commit while no release exists, never a moving branch, offering to install a C compiler and Rust when they are missing.
+To check what you downloaded rather than trust the page it came from, see [Verifying releases](docs/verifying-releases.md).
 It uses `sudo` only to install a C compiler, after asking; every question defaults to yes, and `YOKE_YES=1` answers them without a terminal.
 It then connects the Claude Code and Codex hooks it finds, creates or upgrades the state database once those hooks run the new binary, adds Yoke's line (mode, context, 5-hour and weekly quota) to Claude Code's status bar when you have no statusline, offers a starter global policy for you to review and trust, and runs `yoke health`.
 A statusline you already have is never replaced: the installer keeps it, and wraps it only if you answer yes at a terminal (`YOKE_NO_STATUSLINE=1` skips the step).
@@ -160,7 +161,7 @@ message = "Run cargo fmt --all, then retry."
 ```
 
 A `check` gate runs a shell command and fails on a nonzero exit, `deny` blocks whatever matches, and `rewrite` edits a `PreToolUse` input such as a shell command.
-Check commands receive the event, gate, tool, input, session, working directory and project as `YOKE_*` environment variables.
+Check commands receive the event, gate, tool, input, session, working directory and project as `YOKE_*` environment variables, and run in the directory of the trusted `yoke.toml`, so a relative command means the same file wherever the agent works.
 With that policy trusted, a force push is denied in the agent's own response format:
 
 ```console
@@ -169,8 +170,9 @@ $ echo '{"tool_name":"Bash","tool_input":{"command":"git push --force origin mai
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Force push is blocked by Yoke. Push without --force."}}
 
 $ yoke log --outcome deny --limit 1
-decisions[1]{time,agent,event,tool,outcome,gate,detail}:
-  "2026-10-14 08:55:56","claude","pre_tool_use","Bash","deny","no-force-push","git push --force origin main - Force push is blocked by Yoke. Push without --force."
+project: "/path/to/project"
+decisions[1]{time,agent,session,event,tool,outcome,gate,detail}:
+  "2026-10-14 08:55:56","claude","5f2a9c1e-0b7d-4c3a-9e55-1d6a7f0c2b48","pre_tool_use","Bash","deny","no-force-push","git push --force origin main - Force push is blocked by Yoke. Push without --force."
 ```
 
 Only `pre_tool_use`, `user_prompt_submit` and `stop` can block; failures on other events are recorded and the agent continues.
@@ -233,7 +235,7 @@ yoke plan status login-rate-limit
 Approval freezes the header, so changing a check, requirement or task needs a fresh approval.
 `yoke plan check` runs the frozen commands, records their output and artifact hashes, and marks the plan done only when every blocking check, required review, requirement and task passes on a working tree that did not change during the run.
 Set `review = true` to have the other agent's CLI review the change, and see the [workflow guide](docs/workflows.md#plans-backed-by-evidence) for human-only requirements, feedback threads and recovery.
-Take session ids from `yoke log --json` or the console Sessions page.
+Take session ids from the session column of `yoke log` (it lists the current project) or the console Sessions page.
 
 An excerpt of `yoke plan status` after that run, with the temporary project path shortened to `...`:
 
@@ -282,7 +284,7 @@ In enforce mode, session start injects pinned notes, trusted shared knowledge an
 
 ### Usage, trials and extensions
 
-- Yoke's statusline adds its mode, plan, alert and quota line to Claude Code (the 5-hour and weekly percent used and the reset time, when Claude reports them). The install script adds it when you have no statusline; otherwise run `yoke install --agent claude --statusline`, which wraps an existing statusline command. Without it, none of this shows inside the agent.
+- Yoke's statusline adds its mode, git branch, allowed and blocked counts, plan, alert and quota line to Claude Code (the 5-hour and weekly percent used and the reset time, when Claude reports them; `--style detailed` adds a second line). The install script adds it when you have no statusline; otherwise run `yoke install --agent claude --statusline`, which wraps an existing statusline command. Without it, none of this shows inside the agent.
 - `yoke usage` prints each agent's quota (percent used and left, reset times), token and estimated-cost totals for today and the last 7 days, and the newest sessions, read-only.
 - The console Usage page and `yoke usage` estimate API token prices from agent transcripts; an unpriced model shows as unknown rather than a guessed amount, and the figures are not invoices.
 - `yoke trial report --since <date>` summarizes recorded decisions into release-trial evidence, read-only.
@@ -295,7 +297,7 @@ In enforce mode, session start injects pinned notes, trusted shared knowledge an
   Read [Security model and limits](docs/workflows.md#security-model-and-limits) and use OS-level isolation if you need more.
 - Trusting a configuration authorizes its shell commands to run with your permissions, and observe mode still runs them.
 - Human-only commands refuse agent markers and noninteractive terminals; an action recorded with the actor `human` passed that check, which does not prove a person acted.
-- In enforce mode a Yoke failure on a blocking event denies the action; `YOKE_OFF=1` set when you start the agent from your own terminal is the explicit bypass, as [troubleshooting](docs/troubleshooting.md#storage-failures-block-work) explains.
+- In enforce mode a Yoke failure on a blocking event denies the action; the explicit bypass is `yoke pause`, which only a human can run: it prints a private token to start the agent with, or pauses the hooks for a limited time, as [troubleshooting](docs/troubleshooting.md#storage-failures-block-work) explains.
 - Yoke's own network use is `yoke update` and a background release check at most once a day at session start.
   Independent review and memory digests run the Claude Code or Codex CLI, which sends the selected material to that agent's service.
 - Builds of the original 0.1.0 skeleton commit (`db81d08`) predate trusted snapshots and execute configuration straight from disk; use them only in trusted repositories.

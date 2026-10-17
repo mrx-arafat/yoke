@@ -19,7 +19,7 @@ Pushing a tag builds a draft, and a human publishes the draft.
 | --- | --- | --- |
 | `ci.yml` | every push to `main` and every pull request | formatting, clippy, the full test suite on Ubuntu and macOS, `cargo deny check`, the generated changelog, the release packaging tests and the Markdown link check |
 | `installer.yml` | a push or pull request that changes `install.sh` or the workflow itself, and manual dispatch | `install.sh` on fresh Linux: as root in nine containers, as a user with sudo, and in a terminal |
-| `release.yml` | every pushed tag, and manual dispatch | licenses, focused tests, notices, a build with the notices embedded, packaging and checksums on four native runners |
+| `release.yml` | every pushed `vMAJOR.MINOR.PATCH` tag, and manual dispatch | for a tag, that the commit is in `main` and passed CI there; the full `cargo deny check`; focused tests, notices, a build with the notices embedded on a pinned toolchain, packaging and checksums on four native runners; then `SHA256SUMS` and signed build provenance for every asset |
 
 The release workflow runs these targets, each on its own native runner:
 
@@ -39,18 +39,23 @@ Each target produces six assets:
 - Each of those three has a `.sha256` file: one lowercase digest, two spaces, and the file name.
 
 A manual run of `release.yml` builds and uploads the same files as Actions artifacts and creates no release, because the job that creates the release runs only for a tag.
-A tag run builds again and then creates a draft release named `Yoke <tag>` with all 24 assets.
+A tag run builds again and then creates a draft release named `Yoke <tag>` with all 25 assets: the 24 per-target files and `SHA256SUMS`, which lists the checksum of each of them.
+The job that does this runs in the `release` environment, attests every asset with GitHub build provenance, and is the only job with permission to sign or publish.
+In the repository settings, give the `release` environment required reviewers and protect `v*` tags, so that nobody can sign or publish alone; GitHub creates an unprotected `release` environment on its first use otherwise.
+[Verifying releases](verifying-releases.md) says how a user checks the result and what that check does not prove.
 A draft is invisible to the two things users run.
 `yoke update` reads GitHub's latest-release endpoint, which never returns a draft or a prerelease.
-`install.sh` downloads `https://github.com/mrx-arafat/yoke/releases/latest/download/yoke-<target>`, builds `main` from source when that asset does not exist, and always builds from source on musl systems such as Alpine, because no musl executable is released.
+`install.sh` downloads `https://github.com/mrx-arafat/yoke/releases/latest/download/yoke-<target>`, builds the newest release tag from source when that asset does not exist (the commit pinned in `install.sh` while no release is published), and always builds from source on musl systems such as Alpine, because no musl executable is released.
 
 ## Choose the tag
 
 Use `v` plus the `yoke-cli` version, for example `v0.1.0` for version `0.1.0` in `[workspace.package]` of `Cargo.toml`.
-`scripts/release/package.py --tag` accepts `vMAJOR.MINOR.PATCH` or `MAJOR.MINOR.PATCH`, with digits only, no leading zeros, no pre-release or build suffix, and a number equal to the `yoke-cli` version.
-Checked on 2026-10-16 against version `0.1.0`: `v0.1.0` and `0.1.0` pass, and `v0.1.1`, `v0.1.0-rc1`, `V0.1.0` and `v01.1.0` exit 2 with `Release tag must be a stable version matching yoke-cli`.
-`release.yml` starts on every tag, so push no tag that is not a release.
-A wrong name runs all four jobs and fails in the notices step, after the license check and the focused tests, and creates no draft.
+`release.yml` starts only on `vMAJOR.MINOR.PATCH` tags, so a tag without the `v` never builds.
+`scripts/release/package.py --tag` checks the tag with digits only, no leading zeros, no pre-release or build suffix, and a number equal to the `yoke-cli` version.
+Checked on 2026-10-16 against version `0.1.0`: `v0.1.0` passes, and `v0.1.1`, `v0.1.0-rc1`, `V0.1.0` and `v01.1.0` exit 2 with `Release tag must be a stable version matching yoke-cli`.
+Push no tag of the form `vMAJOR.MINOR.PATCH` that is not a release.
+A wrong version runs the gate, the dependency check and all four package jobs, fails in the notices step after the focused tests, and creates no draft.
+A tag on a commit that is not in `main`, or that has no successful CI run on `main`, stops at the gate before anything is built.
 
 Set the tag once.
 Every later block assumes it is set in the same shell.
@@ -193,17 +198,18 @@ It runs `git` and `gh` with argument lists and timeouts, writes nothing, and cre
 uv run --no-project python scripts/release/preflight.py --tag "$TAG"
 ```
 
-It prints `PASS`, `FAIL` or `SKIP` for seven checks and exits 1 when any check fails.
+It prints `PASS`, `FAIL` or `SKIP` for eight checks and exits 1 when any check fails.
 
 | Check | Passes when |
 | --- | --- |
 | 1. tag format | the tag follows the rule in [Choose the tag](#choose-the-tag) and equals the `yoke-cli` version |
 | 2. clean tree | `git status` shows no change, ignoring untracked `.codegraph/` and `.lavish/` |
 | 3. HEAD is pushed | `HEAD` equals its upstream branch |
-| 4. changelog | `scripts/changelog.py --check` passes and the change record is dated |
-| 5. CI green for HEAD | the latest `CI` and `Installer` runs for `HEAD` both concluded `success` |
-| 6. release workflow evidence | a successful `release.yml` run exists for `HEAD` |
-| 7. tag not yet used | the tag exists neither locally nor on `origin` |
+| 4. install.sh pinned commit | `PINNED_COMMIT` in `install.sh` is a commit in `HEAD`'s history |
+| 5. changelog | `scripts/changelog.py --check` passes and the change record is dated |
+| 6. CI green for HEAD | the latest `CI` and `Installer` runs for `HEAD` both concluded `success` |
+| 7. release workflow evidence | a successful `release.yml` run exists for `HEAD` |
+| 8. tag not yet used | the tag exists neither locally nor on `origin` |
 
 Continue only when the summary reports no failure and no skip.
 A `SKIP` means a check could not run, for example `gh` is missing or not signed in, and is not a pass.
@@ -228,7 +234,7 @@ gh run watch <run-id> --exit-status
 gh release view "$TAG" --json isDraft,assets --jq '[.isDraft, (.assets | length)]'
 ```
 
-The run's `headSha` equals the commit you rehearsed, and the last command prints `[true,24]`.
+The run's `headSha` equals the commit you rehearsed, and the last command prints `[true,25]`.
 The draft job needs all four package jobs, so no draft exists unless every target built.
 If anything differs, go to [When the workflow fails](#when-the-workflow-fails).
 
@@ -242,7 +248,8 @@ gh release download "$TAG" -D "$D"
 REF=$TAG
 ```
 
-1. Run [Verify a set of assets](#verify-a-set-of-assets) on `D`.
+1. Run [Verify a set of assets](#verify-a-set-of-assets) on `D`, then verify the build provenance of the executables and `SHA256SUMS` as [Verifying releases](verifying-releases.md) describes.
+   Provenance cannot be checked before the first tagged run, so this is the first time it is exercised.
 2. Confirm that every box in [COMPLIANCE.md](../COMPLIANCE.md) is ticked at the tag.
    The command prints `0`.
 
@@ -352,7 +359,7 @@ Stop distribution first, then fix forward.
 
    `/releases/latest` then names the previous published release, or returns 404 when there is none.
    `yoke update` stops offering the bad version, and `install.sh` stops downloading it.
-   With no published release left, `install.sh` builds `main` from source, so revert or fix `main` before telling anyone to reinstall.
+   With no published release left, `install.sh` builds the commit pinned in it from source, so check that `PINNED_COMMIT` is still a commit you stand behind before telling anyone to reinstall.
    If GitHub refuses the edit, the release is immutable (`gh release view "$TAG" --json isImmutable`), and you can only supersede it.
 2. Never move or reuse a published tag, and never replace assets under the same version.
    Ship the fix as the next patch version through this whole runbook.

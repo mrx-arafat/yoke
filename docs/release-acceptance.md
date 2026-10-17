@@ -163,8 +163,9 @@ cargo package -p yoke-cli --no-verify --list
 
 Record the date, the tag, the workflow run URL and the person who checked each item.
 
-1. The tag is a stable `vMAJOR.MINOR.PATCH` or `MAJOR.MINOR.PATCH` matching the `yoke-cli` package version; the workflow rejects anything else before building.
-2. The workflow passed for all four targets, and the draft lists, per target, the executable, the archive, the notice file and a `.sha256` for each.
+1. The tag is a stable `vMAJOR.MINOR.PATCH` matching the `yoke-cli` package version; the workflow starts on no other tag and rejects a mismatch before building.
+2. The workflow passed for all four targets, and the draft lists, per target, the executable, the archive, the notice file and a `.sha256` for each, plus one `SHA256SUMS` for all of them.
+   `gh attestation verify` succeeds for the executables and `SHA256SUMS` as [Verifying releases](verifying-releases.md) shows; this has not been run, because no tagged run exists yet.
 3. Each downloaded asset verifies with `shasum -a 256 -c <asset>.sha256`, and the digests are copied into the release notes.
 4. Each archive contains `yoke`, `THIRD_PARTY_LICENSES`, `LICENSE-MIT` and `LICENSE-APACHE`, and `THIRD_PARTY_LICENSES` begins with `Yoke third-party licenses`.
 5. Every item in [COMPLIANCE.md](../COMPLIANCE.md) is ticked, including the trademark and crates.io name checks.

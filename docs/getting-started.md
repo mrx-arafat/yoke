@@ -22,7 +22,10 @@ On Alpine, use `| sh` instead of `| bash`, because Alpine ships without bash.
 It uses `sudo` only to install a C compiler, after asking.
 Every question defaults to yes and is read from your terminal, so it works through the pipe.
 It downloads `yoke-<target>` and `yoke-<target>.sha256` from the latest GitHub release, the same assets `yoke update` uses, and refuses to install unless the SHA-256 checksum matches.
-When the release has no executable for your platform, including while no release is published, it builds from source with `cargo install --locked --git https://github.com/mrx-arafat/yoke yoke-cli`.
+When the release has no executable for your platform, including while no release is published, it builds from source with `cargo install --locked --git https://github.com/mrx-arafat/yoke yoke-cli`, always at one exact revision: `YOKE_COMMIT` or `YOKE_VERSION` if you set one, otherwise the newest release tag, and while no release exists the commit pinned in `install.sh`.
+It never builds a moving branch, and it stops instead of guessing when it cannot look up the newest release.
+Downloads use TLS 1.2 or newer, time out after ten minutes and stop at 64 MiB.
+The SHA-256 file comes from the same place as the executable, so it catches a corrupt download but not a replaced release; [Verifying releases](verifying-releases.md) shows how to check the signed build provenance.
 Release executables need glibc, so on Alpine and other musl systems it always builds from source.
 Before building, it asks to install whatever is missing, picking the package manager by its command:
 
@@ -53,15 +56,20 @@ Once the hooks are connected, Yoke records hook events from every Claude Code an
 When the install directory is not on your `PATH`, it asks to add one line marked `# added by yoke install.sh` to `~/.bashrc`, and to `~/.zshrc` when your shell is zsh; open a new login shell or run `exec $SHELL -l` afterwards.
 Shells that skip that file do not find `yoke`: cron, scripts and, on Ubuntu, `ssh host command`, where `~/.bashrc` returns early for non-interactive shells.
 Use the full path there, for example `ssh host '~/.local/bin/yoke health'`; the hooks always use the absolute path.
+Without a terminal and without `YOKE_YES=1`, the installer does not edit the file: it prints the exact line and runs its follow-up commands by full path.
+That is deliberate.
+A piped install cannot ask, a shell startup file is yours rather than Yoke's, `yoke uninstall` does not remove the line again, and nothing needs it: the hooks use absolute paths and non-interactive shells skip the file.
+`YOKE_YES=1` is the explicit opt-in for cloud-init and CI.
 When no trusted global policy exists and you are at a terminal, it offers to add the `git-safety` preset to `~/.yoke/config.toml` in observe mode and runs `yoke trust --global`, which shows the exact bytes and waits for you to type the confirmation phrase.
 `YOKE_YES=1` never answers that confirmation; without a terminal the script prints `yoke preset add git-safety --global` and `yoke trust --global` for you to run.
 These environment variables change what it does:
 
 | Variable | Effect |
 | --- | --- |
-| `YOKE_INSTALL_DIR` | Absolute install directory, default `/usr/local/bin` for root and `~/.local/bin` otherwise. |
+| `YOKE_INSTALL_DIR` | Absolute install directory, default `/usr/local/bin` for root and `~/.local/bin` otherwise. It is written into your shell startup file, so it must not contain a double quote, dollar sign, backtick, backslash or newline. |
 | `YOKE_VERSION` | Release tag to download, or to build with `--tag`, instead of the latest. |
-| `YOKE_DOWNLOAD_URL` | Base URL of a mirror that serves the release assets. |
+| `YOKE_COMMIT` | Full 40-character commit to build from source, for example to test one commit. It cannot be combined with `YOKE_VERSION`. |
+| `YOKE_DOWNLOAD_URL` | Base `https://` URL of a mirror that serves the release assets. Plain `http://` is accepted only for `localhost`, `127.0.0.1` and `[::1]`. |
 | `YOKE_FROM_SOURCE=1` | Build from source even when a release exists. |
 | `YOKE_YES=1` | Answer yes to every question, also without a terminal, for cloud-init or CI; trusting a policy still needs a human. |
 | `YOKE_INSTALL_RUST=1` | Install Rust without asking when Cargo is missing. |
@@ -89,8 +97,9 @@ The remaining commands run from the project you want Yoke to govern, which need 
 yoke init
 ```
 
-This creates `yoke.toml` without overwriting an existing file.
-The starter uses observe mode, names the project after the current directory, and contains a sample `no-force-push` gate matching the `Bash` tool and the literal text `push --force`.
+This creates `yoke.toml` at the project root without overwriting an existing file.
+Run from a subdirectory of a repository, it writes the repository's root file and prints that path, so one project never splits in two.
+The starter uses observe mode, names the project after its root directory, and contains a sample `no-force-push` gate matching the `Bash` tool and the literal text `push --force`.
 A commented `[memory]` block shows where to turn on session digests.
 It is an example matcher, not comprehensive protection against every force-push spelling or tool name.
 Inspect and edit the file for your agent's actual payloads before enabling enforcement.
@@ -107,6 +116,36 @@ Review the displayed snapshot and type the requested confirmation phrase.
 Trust cannot be approved noninteractively or from a detected agent tool process.
 Subsequent edits remain inactive until you trust them again.
 
+### Where Yoke looks for your project
+
+Trust, gates, memory, plans and the decision log all belong to a project.
+Yoke finds it from the directory you run in, after resolving symlinks and letter case, so one directory never becomes two projects.
+For a hook, the project is fixed where the session starts: the directory Claude Code names in `CLAUDE_PROJECT_DIR`, else the directory the first event of the session reports, remembered for the rest of the session.
+A directory the agent reports later never changes the project, and never turns its policy off, whether it is outside the project, a symlink that leaves it, or holds a `yoke.toml` nobody trusted.
+It only selects a `yoke.toml` that a human trusted, at or below the directory the session started in.
+`yoke config` prints the project it resolved.
+
+Walking upward, the project is the first of these that applies:
+
+1. The nearest directory with a `yoke.toml` that a human trusted.
+2. The nearest directory with a `yoke.toml` that is not yet trusted.
+3. The root of the git repository.
+4. The directory itself.
+
+| Where you run Yoke | Project |
+| --- | --- |
+| A directory outside any git repository | That directory; a subdirectory of it is a different project |
+| A repository with no commits yet | The repository root; plans need a first commit |
+| A subdirectory of a repository | The repository root, unless a `yoke.toml` sits closer |
+| A monorepo package with its own `yoke.toml` | That package once a human trusts its file; until then its file is ignored, `yoke gates` says so, and the repository's trusted policy applies. An agent session started at the repository root applies the package's trusted policy while it works in the package, but its memory, plans and Stop guard stay with the repository |
+| A linked git worktree | The worktree directory, with its own memory, plans and log; the policy trusted for the repository applies there until you trust the worktree's own `yoke.toml` |
+| A submodule | The submodule's root, unless a `yoke.toml` above it covers it |
+| A bare repository | The bare repository directory |
+| A directory you renamed or moved | A new project; trust, memory, plans and log stay under the old path |
+
+Moving a project means trusting its `yoke.toml` again with `yoke trust`.
+To keep the project's memory across the move, see [the memory import notes](troubleshooting.md#memory-import-fails-or-recall-looks-empty).
+
 ## 3. Exercise the starter gate safely
 
 ```sh
@@ -118,6 +157,8 @@ yoke log --outcome would_deny --limit 5
 This sends a simulated payload; it does not execute Git.
 Observe mode produces no hook output, and the decision log should contain `would_deny` when the trusted starter gate matches.
 If it does not, inspect [troubleshooting](troubleshooting.md).
+`yoke log` lists the project you run it in; add `--all` to see every project.
+An empty `would_deny` listing says when the project has no trusted gate, so no gate has run.
 
 ## 4. Connect an agent
 
@@ -136,7 +177,8 @@ If you run Claude Code with `CLAUDE_CONFIG_DIR` or Codex with `CODEX_HOME`, keep
 Restart or reload your agent's hook configuration as appropriate, perform a normal tool action, and inspect `yoke log` for the resulting decision.
 Run `yoke health` to confirm that each agent reports installed, enabled hooks and a recorded event; it exits 1 when a check fails.
 
-Claude's statusline is the way to see Yoke inside the agent: it puts the mode, plan state, alerts and your 5-hour and weekly quota in Claude Code's prompt bar.
+Claude's statusline is the way to see Yoke inside the agent: it puts the mode (and whether any trusted policy applies), your git branch and changed-file count, this session's allowed and blocked actions, the plan state, your 5-hour and weekly quota, the session's cost and context use, and alerts such as `! 2 unread` in Claude Code's prompt bar, dropping the least important parts when the terminal is narrow.
+Add `--style detailed` to either command below for a second line, and see [Statusline](cli.md#statusline) for every segment, `NO_COLOR` and `YOKE_ASCII=1`.
 The install script adds it when you have no statusline, and `yoke install --agent claude,codex` does not; add it with:
 
 ```sh

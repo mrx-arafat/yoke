@@ -17,6 +17,25 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 
 ## Storage and upgrade
 
+### State files are private and the log keeps less of a tool's output
+
+- What changed: `~/.yoke` is now 0700 and `state.db`, its `-wal` and `-shm` files, `error.log` and the install backups are 0600; an existing installation is tightened the next time Yoke opens its database.
+  Redaction also masks more credential shapes (GitHub user and refresh tokens, Stripe live keys, Google API keys and OAuth tokens, newer Slack tokens, GitLab, npm, Hugging Face, SendGrid, Shopify and DigitalOcean tokens, JSON web tokens, passphrases, `DB_PASS`-style names, cookies and session ids, Azure `AccountKey`, signed-URL `sig` and `X-Amz-Signature`, and a `"auth"` field).
+  The decision log stores the size and status flags of a tool's `tool_response` instead of its content, with a 200-character excerpt of a shell command's error output, and cuts a failed tool's `error` at 256 characters.
+- Who is affected: anyone who shares the machine with other users, or who read `tool_response` from `yoke log --json`.
+- What to do: nothing for the modes.
+  Rows stored by earlier versions keep their old content until retention (`log.retention_days`) removes them; run `yoke forget` for notes that hold a credential.
+  Read `tool_response.excerpt` where you used to read the whole response.
+
+### Injected notes are fenced, and pins and imports need a person
+
+- What changed: session start injects notes inside a `<yoke-memory trust="untrusted-data">` block that labels each item and says the text is data, not instructions.
+  `yoke remember --pinned`, `yoke memory pin` and the real `yoke memory import` refuse to run from an agent's tool process.
+  An import unpins every note unless `--keep-pins` is given, stores pending facts as already digested, rejects out-of-range timestamps, and a dry run prints the text it would add.
+- Who is affected: anyone who scripts these commands from inside an agent, or restores pinned notes from an export.
+- What to do: run them in your own terminal, and add `--keep-pins` when restoring your own export.
+  Notes pinned by an agent before this change stay pinned; review them with `yoke recall` and unpin what you did not write.
+
 ### Redaction masks URL passwords and leaves prose readable
 
 - What changed: redaction now masks passwords in URLs such as `scheme://user:PASSWORD@host`, masks the whole value of a `key: value` line, and no longer masks ordinary words after "token", "secret" or "password" or names such as `ask-codex`.
@@ -33,6 +52,16 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 - What to do: use the same current binary for every hook and console reading this state; older binaries do not understand the new notification identities.
   Do not delete ambiguous rows to force recovery.
 
+### A session keeps the project it started in, and gates run in the project
+
+- What changed: a hook now treats the project as fixed where the session starts (`CLAUDE_PROJECT_DIR` for Claude Code, else the directory of the session's first event) and remembers it in a new `session_anchors` table, schema 14.
+  The directory a later event reports only selects a nested `yoke.toml` that a human trusted, so a directory outside the project, a symlink that leaves it, or a `yoke.toml` nobody trusted no longer turns the project's trusted policy off.
+  Check gates run in the directory of the trusted `yoke.toml` instead of the directory the agent reports; `YOKE_CWD` still carries the reported directory.
+- Who is affected: everyone with gates whose commands are relative and were written for the directory the agent worked in, and anyone who relied on an agent that left the project being governed by another policy.
+  The decision log, memory and plans of a session follow the project of its start directory, not the directory each tool call reports.
+- What to do: write gate commands relative to the `yoke.toml` that defines them, and start the agent in the project.
+  An older binary refuses a database at schema 14 as described under migrations below, so replace all hook binaries together.
+
 ### Migrations 007 to 012 run on first open
 
 - What changed: the state database moves from schema 6 to 12 in one transaction the first time a new binary opens it for writing, which any hook, `yoke log`, `yoke config`, `yoke jobs`, `yoke notifications` or plan command does.
@@ -48,6 +77,20 @@ Let active plan checks finish before replacing the binary: this build uses stabl
   A restored main file beside newer sidecars replays their frames and reads as schema 12 again.
   A copy made with `.backup` has no sidecars, so read-only commands fail with SQLite error 14 on it until the first writable open creates them.
 
+### Migration 013 builds indexes, which takes seconds on a large history
+
+- What changed: schema 13 adds three indexes: the newest decision of an agent (`yoke health`), a covering index for `yoke trial report`, and fact timestamps for retention.
+  They make those commands and the retention scan independent of the size of the history.
+  The same release stops sending log filters you did not give to SQLite, so `yoke log --tool`, `--outcome`, `--session` and `--project` use the indexes too.
+- Who is affected: everyone with an existing state database.
+  The build is proportional to history: about one second per 50 thousand decisions with a warm cache, and 19 to 26 seconds for 500 thousand decisions and 200 thousand facts on a cold cache.
+  The database grows by about 6 percent.
+  A new installation pays nothing.
+- While it runs, the hook or command that started it holds the write lock.
+  Other hooks wait 2 seconds, then decide from read-only state: gates still apply and a deny is still a deny, but those events are not recorded, and each of them costs 2 seconds.
+- What to do: after replacing the binary, close your agents and run `yoke log --limit 1` once in your own terminal, so the build does not delay an agent's tool calls.
+  A database you migrated cannot be opened by the old binary; to go back, restore the copy you kept as described above.
+
 ### Configuration keys older binaries cannot read
 
 - What changed: `[review.models]` and `[memory.digest_models]` choose the model for the reviewer and digest processes Yoke starts.
@@ -57,10 +100,11 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 
 ### Retention is bounded and covers more history
 
-- What changed: decisions, facts and the check runs of done or cancelled plans older than `log.retention_days` are deleted at most hourly at session start, in batches with a short time budget, so a large backlog drains over several sessions.
+- What changed: decisions, facts and the check runs of done or cancelled plans older than `log.retention_days` are deleted by a background job.
+  Session start queues the job at most hourly and returns at once; a worker deletes in short batches with pauses so hooks are not held up, and queues a follow-up pass when a large backlog does not fit one pass.
   Check runs of cancelled plans are now pruned too; memories, trusted snapshots and the runs and evidence of unfinished plans are never pruned.
-- Who is affected: long-running installations with large histories; the first sessions after the upgrade may each remove part of the backlog.
-- What to do: nothing; raise `log.retention_days` first if you want to keep older history.
+- Who is affected: long-running installations with large histories; the first session after the upgrade queues the cleanup of the whole backlog, which then runs in the background for seconds to minutes and shows as the `retention` job in `yoke jobs --all`.
+- What to do: nothing; a failing cleanup shows in `yoke health` and `yoke jobs`, and raise `log.retention_days` first if you want to keep older history.
 
 ### Yoke refuses an unset or relative HOME
 
@@ -75,6 +119,25 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 - What to do: parse the leading integer, and treat lines without it as from an earlier build.
 
 ## Hooks and enforcement
+
+### Switching Yoke off needs a person, and settings files cannot do it
+
+- What changed: `YOKE_OFF=1` no longer skips a hook.
+  A hook skips only when `YOKE_OFF` equals the private token that `yoke pause` prints (kept in `~/.yoke/off-token`, mode 0600), or while a pause set with `yoke pause --for 30m` lasts; every honoured or refused skip is written to `~/.yoke/error.log`.
+  The guard also denies agent writes, edits and patches to Claude Code's `settings*.json`, Codex's `hooks.json` and `config.toml`, a project `.claude` or `.codex`, and the `yoke` executable, and it denies reading the token.
+  `yoke install`, `yoke uninstall` and `yoke update` (without `--dry-run` or `--check`) refuse to run from an agent's tool process, and `yoke pause` is human-only.
+  `yoke health` and the statusline report `env.YOKE_OFF` or `env.HOME` in a Claude settings file, an active pause, and a session that is open but has recorded no hook decision for 20 minutes.
+- Who is affected: scripts and wrappers that set `YOKE_OFF=1` to start an agent without Yoke, and agents that were asked to edit their own hook settings or to reinstall Yoke.
+  Yoke's own review and digest children still pass `YOKE_OFF=1`, which hooks now refuse; what keeps their hooks from running is that they start with the agent's settings turned off (`--setting-sources ""` for Claude Code, `--ignore-user-config` for Codex), which was read from the code and not tested with a live Codex.
+- What to do: run `yoke pause` in your own terminal and use the token it prints, or pause for a limited time; run `yoke install` and `yoke uninstall` yourself.
+
+### Hooks ignore a HOME that is not the account's home
+
+- What changed: a hook of a release build that finds `HOME` different from the home directory in the user database uses the account's home when that holds Yoke state, and says so once on stderr and in `~/.yoke/error.log`.
+  A project settings file can set `HOME` for every hook it starts, which would otherwise point Yoke at an empty state with no trusted policy.
+  Debug builds and builds made with `--features honor-home-env` keep honouring `HOME`, and an unset or relative `HOME` is still an error in every build.
+- Who is affected: anyone who deliberately starts an agent with another `HOME` against an optimized release binary, such as an isolated acceptance run.
+- What to do: build with `--features honor-home-env` for such runs (see [CONTRIBUTING](../CONTRIBUTING.md#testing-against-real-state)), or run the agent with its real `HOME`.
 
 ### A completed plan reopens when its tree changes
 
@@ -142,6 +205,24 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 - What to do: run them yourself in your own terminal.
 
 ## Installation and health
+
+### The installer builds one exact revision, and the updater tests what it downloads
+
+- What changed: when `install.sh` builds from source it uses `YOKE_COMMIT`, `YOKE_VERSION`, the newest release tag, or, while no release exists, a commit pinned in the script; it no longer builds the moving default branch, and it stops when it cannot look up the newest release.
+  It rejects a plain `http://` `YOKE_DOWNLOAD_URL` unless the host is `localhost`, `127.0.0.1` or `[::1]`, refuses an install directory that contains a double quote, dollar sign, backtick, backslash or newline, and limits downloads to TLS 1.2 or newer, ten minutes and 64 MiB.
+  `yoke update` runs curl from a fixed system path when there is one, asks for TLS 1.2 or newer, and runs the downloaded executable once with `--version` before it replaces the installed one.
+  Release archives no longer carry the builder's owner or file times, and releases gain a `SHA256SUMS` asset and signed build provenance (see [Verifying releases](verifying-releases.md)).
+- Who is affected: anyone who installs while no release exists and expected the newest `main`, and anyone with an install directory or mirror URL of the kinds above.
+- What to do: to build another commit, set `YOKE_COMMIT` to its full hash.
+  Use an `https://` mirror, or a loopback address for a local one.
+
+### The digest worker reads only transcripts
+
+- What changed: the background digest reads a transcript only when its path, with symlinks and `..` resolved, is a `.jsonl` file inside the job's project or an agent's transcript directory (`$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`, and `$CODEX_HOME/sessions` or `~/.codex/sessions`).
+  Any other path is ignored with a line in `~/.yoke/error.log`, and the digest runs from the recorded facts alone.
+  A new worker `error.log` is created with mode 0600.
+- Who is affected: anyone who keeps agent transcripts somewhere else.
+- What to do: nothing for the default locations; `yoke memory digest --transcript <file>` in your own terminal still reads the file you name.
 
 ### Installation follows the agents' configuration directories
 

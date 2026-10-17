@@ -15,6 +15,7 @@ It runs as a command rather than a background daemon; the optional console runs 
 | [Troubleshooting](troubleshooting.md) | Diagnose inactive gates, failed checks, and storage problems |
 | [Uninstalling](uninstalling.md) | Remove the hooks, the executable, and Yoke's files in the right order |
 | [Releasing](releasing.md) | Take a release candidate to a published release, and withdraw a bad one |
+| [Verifying releases](verifying-releases.md) | Check a downloaded executable's checksum and signed build provenance, and see what each check proves |
 | [Release acceptance](release-acceptance.md) | See the gate status and the evidence for builds, checksums, notices, install and update |
 | [Field testing](field-testing.md) | Read what the first field test covered, how Yoke behaves in real use, every finding and its status, and how to repeat the test |
 | [Development handoff](next-steps.md) | Resume from the current state of `main` and complete the open field test items and outstanding acceptance |

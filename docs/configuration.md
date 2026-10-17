@@ -4,7 +4,12 @@
 
 ## Discovery, precedence, and trust
 
-Yoke combines the trusted global `~/.yoke/config.toml` snapshot with the nearest project `yoke.toml` found while walking upward from the current directory.
+Yoke combines the trusted global `~/.yoke/config.toml` snapshot with the project `yoke.toml` found while walking upward from the current directory: the nearest one a human trusted, else the nearest one.
+A nearer `yoke.toml` that is not trusted never replaces the policy of a trusted project above it; `yoke gates` and `yoke config` list the ignored file.
+For a hook the walk starts at the directory the agent session started in, which the first event fixes for the session (`CLAUDE_PROJECT_DIR` for Claude Code), and the directory an event reports can only select a nested `yoke.toml` that a human trusted at or below it.
+An event that reports a directory outside the project, a symlink that leaves it, or a nearer file nobody trusted keeps the project's trusted policy in force, and the ignored file is listed in a notification.
+In a linked git worktree the policy trusted for the repository applies until the worktree's own `yoke.toml` is trusted, and editing or deleting the worktree's copy changes nothing.
+[Where Yoke looks for your project](getting-started.md#where-yoke-looks-for-your-project) lists every layout.
 Project values override global values only when explicitly supplied.
 Project gates replace global gates with the same name; other gates remain in effect.
 Unknown configuration fields are rejected.
@@ -26,8 +31,8 @@ yoke gates
 | --- | --- | --- | --- |
 | `mode` | string | `"observe"` | `observe` records potential effects; `enforce` applies policy |
 | `meta.name` | string | `""` | Project label |
-| `log.retention_days` | integer (days) | `90` | Retention in days for decisions, facts, check runs of done or cancelled plans, and succeeded or dead background jobs; cleanup runs at most hourly at session start in bounded batches, so a large backlog drains over several sessions. Memories, trusted snapshots, and the check runs and evidence of unfinished plans are never removed by retention. Notifications use the same window when they are listed, except unresolved conditions |
-| `log.payload_cap` | integer (bytes) | `4096` | Bytes of each redacted hook payload stored, cut at a UTF-8 character boundary; `yoke log --json` flags a cut payload with `payload_truncated` |
+| `log.retention_days` | integer (days) | `90` | Retention in days for decisions, facts, check runs of done or cancelled plans, and succeeded or dead background jobs; cleanup is queued at most hourly at session start and runs in a background worker in short batches, so a session never waits for it and a large backlog drains in the background. Memories, trusted snapshots, and the check runs and evidence of unfinished plans are never removed by retention. Notifications use the same window when they are listed, except unresolved conditions |
+| `log.payload_cap` | integer (bytes) | `4096` | Bytes of each redacted hook payload stored, cut at a UTF-8 character boundary; `yoke log --json` flags a cut payload with `payload_truncated`; a tool's `tool_response` is stored as its size and status flags (plus a 200-character excerpt of a shell command's error output), not as the output |
 | `stop.max_blocks` | integer | `5` | Stop attempts without progress that Yoke blocks before an active plan becomes `stalled` |
 | `plans.dir` | string | `".yoke/plans"` | Plan directory relative to the project root; empty, absolute and parent-traversal paths are rejected |
 | `memory.digest` | boolean | `false` | Enable optional agent-generated session digests |
@@ -137,10 +142,14 @@ Claude rewrites preserve normal permission evaluation.
 | `YOKE_EVENT` | Normalized hook event |
 | `YOKE_GATE` | Current gate name |
 | `YOKE_TOOL_NAME` | Event tool name |
-| `YOKE_TOOL_INPUT` | JSON tool input |
+| `YOKE_TOOL_INPUT` | JSON tool input. The system limits an environment (about 128 KiB per variable on Linux, 1 MiB in total on macOS); when it refuses one this large the check gate does not run and the call is denied in enforce mode, with a reason that says the tool input is too large. `deny` and `rewrite` gates, and `match_contains` and `match_pattern`, see the whole input |
 | `YOKE_SESSION` | Agent session identifier |
-| `YOKE_CWD` | Event working directory |
+| `YOKE_CWD` | Directory the agent reported for the event; the agent chooses it, so treat it as data |
 | `YOKE_PROJECT` | Resolved project root |
 
+A check gate runs in the directory of the trusted `yoke.toml` it came from, the project root unless a nested trusted policy applies, and not in `YOKE_CWD`.
+So `run = "./check.sh"` or `run = "make lint"` means the same file whichever directory the agent works in.
+Relative `PATH` entries and `require_command` wrappers resolve against that directory as well.
+
 Treat payload-derived environment values as untrusted input in your own scripts.
-For storage failures and the explicit `YOKE_OFF=1` recovery mechanism, see [troubleshooting](troubleshooting.md).
+For storage failures and the explicit `yoke pause` recovery mechanism, see [troubleshooting](troubleshooting.md).

@@ -82,8 +82,8 @@ The plan reaches `done` only when every requirement is satisfied by checks that 
 `yoke plan status <slug>` shows each task as `done`, `ready`, or `blocked`, and each requirement as satisfied by `check`, satisfied by `human`, or `unsatisfied`.
 
 1. A human runs `yoke plan approve format-policy` in their own interactive terminal and reviews the exact contract.
-2. Obtain a real recorded session ID from `yoke log --project "$PWD" --json --limit 1` or the console.
-   `yoke log` covers every project, so the `--project` filter matters, and the newest row is yours only while no other session is active in that project.
+2. Obtain a real recorded session ID from the session column of `yoke log --limit 5`, or from the console.
+   `yoke log` lists only the project you run it in, and the newest row is yours only while no other session is active in that project.
 3. Run `yoke plan start format-policy --session <session-id>` with that ID.
 4. After making the intended changes, run `yoke plan check format-policy --agent codex` when Codex built them, or use `--agent claude` for Claude.
 5. Inspect `yoke plan status format-policy` for transitions, check output, and evidence.
@@ -150,6 +150,8 @@ yoke recall 'formatting' --json
 ```
 
 Use the returned ID with `yoke memory pin <id>`, `yoke memory pin <id> --unpin`, or `yoke forget <id>`.
+A pinned note is injected at every session start, so only a person may pin: `yoke remember --pinned` and `yoke memory pin` refuse to run from an agent's tool process and tell it to save the note without `--pinned`.
+Unpinning is always allowed.
 Recall is scoped to the current project: the directory you run it in, or the git root when it is inside a repository.
 Inside a directory without git, a subdirectory is a separate project, and `yoke recall` prints the `project:` path it searched.
 `yoke forget`, `yoke share` and `yoke memory pin` take the same project-scoped IDs: an ID from another project fails with `memory <id> not found in this project` and changes nothing.
@@ -158,12 +160,16 @@ Without a query, recall lists pinned entries first, then the newest.
 Session start injects notes only in enforce mode, so set `mode = "enforce"` in `yoke.toml` and run `yoke trust` in your own terminal.
 In the default observe mode nothing is injected: `yoke recall --explain` prints `injection: inactive`, and `yoke remember` says so with the first note of a project.
 Run `yoke recall --explain` to see exactly what session start injects in enforce mode and why: pinned notes, trusted knowledge, then recent notes, cut off at `memory.inject_tokens`.
+The agent receives them inside a `<yoke-memory trust="untrusted-data">` block that says they are data written by earlier sessions, tools and imports and not instructions.
+Each item carries a label with why it was chosen and how it was saved, such as `pinned note #12, remember` or `approved project knowledge`, and every line of a note is indented so a note cannot pose as a label or end the block (text that imitates the tag is rewritten).
+The labels and the block come on top of the `memory.inject_tokens` budget.
+This helps the agent tell notes from instructions; it cannot make a model ignore a note, so keep notes you do not trust out of enforce mode.
 Add a query to `--explain` to see the BM25 rank, score and matched words for each selected note.
 Secret redaction recognizes patterns; it does not make arbitrary sensitive notes safe to publish.
-It masks private key blocks, token prefixes such as `ghp_` and `sk-` at the start of a word, bearer and basic credentials, the password in `scheme://user:password@host`, and the value of `key=value` and `--key value` for names that contain `token`, `secret`, `password`, `passwd`, `api_key` or `authorization`.
+It masks private key blocks, token prefixes at the start of a word (`ghp_`, `ghu_`, `github_pat_`, `sk-`, `sk_live_`, `xox*-`, `xapp-`, `glpat-`, `npm_`, `hf_`, `AIza`, `ya29.`, `SG.` and similar), JSON web tokens, bearer and basic credentials, the password in `scheme://user:password@host`, and the value of `key=value` and `--key value` for names that contain `token`, `secret`, `password`, `passwd`, `passphrase`, `api_key`, `authorization`, `credential`, `private_key`, `cookie`, `session_id` or `signature`, or that have `pass`, `pwd`, `sig` or `auth` as a whole word (`DB_PASS`, `PWD_DB`, `sig=`).
 It masks the value of `key: value` only when the name ends in one of those words (or its plural), so `Tokenizer:` and `sshSecrets.ts:` are kept.
 In `key: value` the value is the rest of the line, up to a quote, a backtick or one of `,`, `;`, `}` and `]`.
-Ordinary prose such as `token is required` is kept, and a secret with no recognizable name or prefix is not masked.
+Ordinary prose such as `token is required` is kept, and a secret with no recognizable name or prefix is not masked: a bare hex string, a base64 blob or a 40-character AWS secret key written without its variable name stays readable.
 Notes stored by an earlier version keep their original text until you forget and save them again.
 
 `yoke share <id>` appends the selected note to `.yoke/knowledge.md`; sharing it again changes nothing and says so.
@@ -205,6 +211,10 @@ yoke memory import ./yoke-memory.json \
 
 To restore in place, map each project to itself (`--map '/path/to/project=/path/to/project'`); the error for a missing `--map` prints that line for every project in the archive.
 Dry runs report additions and duplicates without creating the destination database, and exit 1 when they find conflicts, as the real import would.
+A dry run also lists the memories the import would add, as they would be stored, each cut at 200 characters and quoted: as `preview` in the JSON report on stdout, and as a text table on stderr.
+Read it, because an archive is text that nobody in the project wrote.
+An import never takes pins or pending digests from the archive: every imported note is unpinned unless a person adds `--keep-pins` to restore their own export, and pending facts are stored as already digested so an archive cannot queue digest jobs that send text to a model.
+It rejects a record dated before 1970 or more than a day in the future, and, like `yoke remember --pinned`, the real import refuses to run from an agent's tool process; a dry run is allowed.
 A conflict names the reason: an archive already imported under another project path is refused rather than imported a second time.
 Imports preserve identities and fact relationships, skip identical imports, and reject conflicts atomically.
 Archives are versioned and bounded to 16 MiB and 20,000 records.
@@ -284,8 +294,37 @@ When the callback JSON carries Claude rate limits, the line ends with a quota se
 The 15 ms target applies to Yoke's own rendering, excluding the optional wrapper and waiting for stdin to close.
 Usage amounts are API token-price estimates based on supported transcript fields and a compiled pricing table, not subscription invoices.
 Unsupported models or missing billing dimensions display unknown cost, and a total that includes them shows the priced part plus the unknown samples.
-Concurrent imports of one session keep the newest transcript snapshot, and a replaced or truncated transcript replaces the stored usage on its next import.
+An import resumes a transcript at the byte where the previous import of that session stopped, so a Stop reads only what was appended.
+Concurrent imports of one session never count the same lines twice, and a replaced or truncated transcript replaces the stored usage on its next import.
 The Usage page filters by inclusive date range and groups by day or month in the UTC offset shown on the page.
+
+## Live terminal view
+
+`yoke watch` shows what Yoke sees in the current project, in any terminal pane, so it also serves Codex, which has no statusline.
+It checks the state every two seconds, reads only decisions recorded since its last reading, and repaints in place.
+It opens the state database read-only and never creates, migrates or writes it, so it is safe to leave running beside your agents.
+`q` or Ctrl-C quits and restores the terminal, `f` cycles the event list between all events, denied and would-deny only, and errors only, and `r` reads again at once.
+Without a terminal, for example in a pipe or a script, it prints one snapshot and exits 0.
+
+The view has these parts:
+
+- **Header**: the project, its git branch with the number of changed files, the Yoke version and the local time, then the mode and whether a trusted policy applies.
+  `no policy: gates are not running` and `policy not trusted: gates are not running` mean that no gate runs until a human trusts a policy.
+- **Agents**: allowed, would-deny, denied and errors for Claude Code and Codex since local midnight, and for each agent's newest session in this project, with the time of the last event.
+  A rewritten call counts as allowed.
+  A count ending in `+` is a lower bound: one refresh reads at most 20,000 decisions, so a busier period is not counted in full.
+  A session that started more than seven days ago is counted from seven days ago, and its row says since when.
+- **Quota**: each window's percent used as a bar, colored from 50 and from 80 percent used, and its reset time, read from the same records as `yoke usage`.
+- **Plans, Attention, Jobs and Hooks**: unfinished plans with their state, up to three unread notifications with the command that inspects each, pending background jobs, and whether each agent's hooks are installed, with the age of the newest event its hooks recorded in any project.
+- **Events**: the newest decisions first, with local time, agent, hook event, tool, outcome, the gates that did more than pass, and what the tool acted on, relative to the project when it is inside it, with the reason.
+  When the listed events ran gates, the heading also shows their median and largest gate time.
+  A narrow terminal drops the hook event column first, then the gates, then the tool.
+- **Footer**: the first problem or step that `yoke health` reports, refreshed every 30 seconds, and the keys.
+
+When the state is missing, locked or unreadable, the view says why under the header and keeps running; once it can be read again, the view picks it up.
+A short terminal gives the events room first: the quota block goes, then plans, attention, jobs and hooks, then the agent table.
+The changed-file count runs `git status` for the project directory only, without taking the index lock, at most every five seconds and for at most two seconds; the count is left out when git fails or is slow.
+Set `NO_COLOR` to any non-empty value to turn color off, and `YOKE_ASCII=1` to draw only ASCII characters.
 
 ## Usage and quota
 
@@ -295,7 +334,8 @@ It reads local records only and never creates, migrates or writes state, so it i
 
 The report has these parts:
 
-- **Quota** lists each agent's rate-limit windows with percent used, percent remaining, the reset time, the time until reset, and how long ago the agent reported the figures.
+- **Quota** is an aligned table of each agent's rate-limit windows: percent used, percent left, the reset time, the time until reset, how long ago the agent reported the figures, and the plan when the agent reports one (Codex does; Claude Code does not, so it shows `-`).
+  `--json` carries the same rows as structured records, including the window length in minutes, the plan and an `expired` flag.
 - **Usage** totals input, output, cache-read and cache-write tokens and the estimated cost per agent, since local midnight and over the 7 x 24 hours before now.
 - **Sessions** lists the newest sessions with their models, start, duration, tokens, estimated cost and coverage.
   Duration runs from the earlier of the recorded session start and the first usage sample to the session's last usage sample, so it includes any idle time.
@@ -314,33 +354,79 @@ Where quota comes from:
 - **Codex** records `rate_limits` in each `token_count` event of its session files.
   Yoke keeps the newest one while it imports a session's usage, when the session stops, ends or compacts, so Codex quota is only as fresh as the last import.
   Each window carries its own length, so a Codex plan that reports only a weekly window shows only `7d`.
+  Codex also reports an account credits balance.
+  Yoke does not read or store it: it is a billing figure rather than a rate-limit window, so it would put account money into the state database, logs and screenshots, and Yoke only reports usage windows.
 
 Several sessions report the same account limits, so Yoke keeps, per window, the reading with the later reset time and, for one reset time, the higher percent.
 An idle session replaying old figures therefore cannot lower them.
 A window whose reset time has passed is marked `reset` and keeps its last figure until the agent reports the next one.
 Without a recorded reading, the report says so and names what produces it; it never shows a guessed figure.
 
-Each import reads at most the newest 32 MiB of a transcript, so a long session can be larger than that.
-The usage in the older part is not counted: Claude messages and Codex counts before the cut are skipped, and the first Codex count in the counted part only sets the baseline, so skipped usage is never dated to it.
+Yoke remembers, per session, how far it has read (a byte offset, the file's identity and a fingerprint of its first and last 4 KiB), so a Stop on a long session reads only the lines added since the previous import.
+If the transcript was truncated, replaced or rewritten, that memory no longer fits and the import reads it again from the start, replacing the session's stored usage.
+
+A single read counts at most the newest 32 MiB.
+That is a first import of a transcript larger than 32 MiB, or more than 32 MiB appended between two imports.
+The usage in the skipped part is not counted: Claude messages and Codex counts before the cut are skipped, and the first Codex count after the cut only sets the baseline, so skipped usage is never dated to it.
+Usage counted by earlier imports stays.
 Such a session is marked `counted X MiB of Y MiB` in `yoke usage` and in its `partial` field with `--json`, and a note gives how many sessions are affected, because their totals under-report.
-The marker clears when a later import of that session counts the whole transcript.
+The marker clears when a later import of that session reads the whole transcript from the start.
 
 ## Security model and limits
 
 Yoke's self-protection keeps agents from accidentally or casually unblocking themselves; it is not a sandbox.
 Two layers enforce it:
 
-1. In `enforce` mode, a built-in guard denies agent tool calls that run a human-only command (`yoke trust`, `yoke console`, `yoke jobs retry`, `yoke notifications ack`, and `yoke plan approve`, `resume`, `cancel`, `reassign`, `accept`, `resolve`, `acknowledge`), write inside `~/.yoke`, or mention `state.db`.
+1. In `enforce` mode, a built-in guard denies agent tool calls that run a human-only command (`yoke trust`, `yoke console`, `yoke pause`, `yoke jobs retry`, `yoke notifications ack`, `yoke install`, `yoke uninstall`, `yoke update`, and `yoke plan approve`, `resume`, `cancel`, `reassign`, `accept`, `resolve`, `acknowledge`; `--dry-run` and `--check` stay allowed), write inside `~/.yoke`, write a file that registers hooks or the `yoke` executable, read the bypass token, or mention `state.db`.
    It reads shell commands word by word, so quoting, `$HOME` or `~` spellings, wrappers such as `env`, `sudo`, `nohup`, `xargs` and `timeout`, nested `bash -c`, `eval`, `$(...)`, `find -exec`, redirections, globs over `~/.yoke`, and `cd ~/.yoke` followed by a relative path are all recognized.
    The same words used as data, such as a `grep` pattern, a commit message or a `git log --grep`, are allowed.
    Text handed to an interpreter (`python3 -c`, `osascript`, `tmux send-keys`) or piped into a shell is matched as a phrase instead, so it can be denied when it only mentions a human-only command.
 2. Every human-only command refuses to run when a Claude Code or Codex agent marker is set in its environment or when it is not attached to an interactive terminal, and most then ask for a typed confirmation phrase.
+   `yoke install`, `yoke uninstall` and `yoke update` check the agent marker only, so the install script keeps working from your own shell.
+
+Which policy governs an agent's tool calls is not left to the agent either.
+A session is bound to the project it started in (`CLAUDE_PROJECT_DIR` for Claude Code, else the directory of its first event), and the directory a later event reports only selects a `yoke.toml` that a human trusted at or below it.
+So changing directory, writing a `yoke.toml` in a subdirectory, working outside the project, or following a symlink out of it does not turn the trusted policy off: the file nobody trusted is ignored and listed in a notification.
+Check gates run in the directory of the trusted `yoke.toml`, not in the directory the agent reports, so a relative command such as `./check.sh` cannot be replaced by a look-alike in a directory the agent created.
+Memory, plans and the Stop guard use the same project for the whole session.
+Limits: a session that starts outside any trusted project has no project policy, a session keeps its start directory for its lifetime (resume it from the right directory, or start a new one), and a directory added to the workspace is governed by the policy of the project the session started in.
+A repository's own project settings can change the environment an agent starts with, like any other setting that registers hooks, so review them as you review the repository's code.
+
+Switching Yoke off is a human act as well.
+The guard denies agent writes, edits, patches and shell writes (redirections, `sed -i`, `cp`, `mv`, `rm`, `tee`, `curl -o`) to Claude Code's `settings*.json` in `~/.claude`, in `CLAUDE_CONFIG_DIR` and in any project's `.claude`, to Codex's `hooks.json` and `config.toml` in `~/.codex` and `CODEX_HOME`, to anything in a project's `.codex`, and to the installed `yoke` executable.
+An interpreter given one of those paths, or code that names one, is treated as writing it, as it is for `~/.yoke`.
+A hook is skipped only when `YOKE_OFF` equals the random per-install token in `~/.yoke/off-token` (mode 0600), which only `yoke pause` prints and the guard keeps agents from reading, or while a pause set by `yoke pause --for` lasts (at most 24 hours).
+`YOKE_OFF=1`, any other value, and a `YOKE_OFF` set by a settings file are ignored; every honoured or refused skip and every pause is written to `~/.yoke/error.log`.
+A settings file's `env` block reaches every hook, so a hook of a release build also ignores a `HOME` that differs from the home directory in the user database when that home holds Yoke state, and says so once on stderr and in `error.log`.
+Debug builds and builds made with `--features honor-home-env` honour `HOME` so tests and isolated optimized runs can use their own; the shipped binary and the installer never enable it (see [CONTRIBUTING](../CONTRIBUTING.md#testing-against-real-state)).
+An unset or relative `HOME` is an error in every build.
+`yoke health` and the statusline report a Claude settings file that sets `env.YOKE_OFF` or `env.HOME`, `disableAllHooks` in any settings layer Yoke can read, an active pause, and a session that is open but has recorded no hook decision for 20 minutes.
+Limits: this is a reading of command words, not a sandbox.
+A same-user agent can still reach these files or the token through code that builds a path in pieces, a copied toolchain, or its own tools, and it can start a process without the hooks.
+`disableAllHooks` or managed policy that Yoke cannot read is invisible to it, and a session you start with the token has no hooks by design.
+Only operating-system isolation closes the rest.
 
 The console is human-only for the same reason: it can approve, resume, and acknowledge.
 Its printed link carries a one-time code, and the session secret lives only in an `HttpOnly`, `SameSite=Strict` cookie, so it never appears in a URL, browser history, process arguments, or terminal output.
 Browsers send a cookie to every port on the same host, so the console serves every page under a random path that changes each run and limits its cookie to that path.
 Other local servers you visit in the same browser, such as an agent's dev server, therefore never receive the cookie, and the console does not need a browser profile of its own.
 A same-user agent can still read your browser profile's files, including that cookie; this is an accepted risk.
+
+The background digest, which runs outside the agent's sandbox, reads a transcript only from the job's project or an agent's transcript directory, as a resolved `.jsonl` regular file, and only its last 32 KiB.
+A path anywhere else in a job, such as one a forged hook event named, is ignored and logged.
+
+Release executables are checked against a SHA-256 file from the same release, which catches a damaged download but not a replaced release.
+Each release also carries signed build provenance that you can verify yourself with `gh attestation verify`; `install.sh` and `yoke update` do not verify it for you.
+[Verifying releases](verifying-releases.md) has the commands and the limits.
+`install.sh` builds from source at one exact revision and never at a moving branch.
+A gate, an approved plan check or `yoke update` still runs code with your full privileges, outside your agent's sandbox.
+
+What Yoke writes to disk is private to your user and bounded.
+`~/.yoke` is created with mode 0700, and `state.db`, its `-wal` and `-shm` files, `error.log` and the install backups with 0600 (backup folders 0700), because they hold redacted tool inputs, memories and configuration snapshots.
+An installation made by an older build is tightened the next time Yoke opens its database; if a file cannot be changed, for example because another user owns it, Yoke goes on and does not fail a hook.
+The decision log keeps the size and status flags of a tool's output (`tool_response`), never the output; a shell command's error output keeps its first 200 characters so that a sandbox error stays diagnosable, and a failed tool's `error` text is cut at 256 characters.
+Notes you save and facts Yoke records are redacted with the patterns described under Project memory.
+Rows stored by an earlier build keep what they held until retention removes them or you forget them.
 
 These layers stop an agent from approving its own plan, starting the console, or editing Yoke state through its ordinary tools.
 They cannot stop an agent that has a shell running as your OS user and deliberately works around them.

@@ -175,6 +175,88 @@ Takeaways for the manual:
 - Both agents surface the gate's message to the model, so write messages that tell the agent what to do instead.
 - Trust is per exact file content: edit `yoke.toml` and the gate stops applying until it is trusted again.
 
+## Scale
+
+Yoke records every hook event, so the state database only grows.
+This section records what that costs after months of heavy use.
+The sizes are illustrative, not taken from a real installation.
+
+### Method
+
+- Fixture: an isolated home whose `state.db` was created by the product, then filled with generic rows by direct SQL.
+  500 sessions, 500 thousand decisions (about 730 bytes each, payloads capped at 4 KiB), 200 thousand facts, 50 thousand usage samples, 5 thousand memories, 100 plans with 1.4 thousand check runs, 2 thousand jobs and 400 notifications.
+  The database was 740 MB, of which decisions were 366 MB and facts 193 MB.
+- Measurements: release builds, every command and hook run as a real process, medians of 5 runs per command and 40 per hook.
+  The machine was a 16 GB laptop shared with other workloads (load average 4 to 10), so absolute numbers vary by tens of percent between runs.
+  Read the ratios, not the digits.
+- Thresholds: a hook should stay under 100 ms and an interactive command under 1 s.
+- This is implementation evidence from one machine.
+  It is not a performance guarantee and not release acceptance.
+
+### Before and after
+
+"Before" is the build before schema 13.
+"After" is schema 13 together with the query changes that ship with it: filters that were not given are no longer part of the log query, and the trial report formats 15-minute slots instead of every decision.
+
+| Command | Before | After |
+| --- | --- | --- |
+| `yoke health` | 280 ms (3 to 4 s on a cold cache) | 3 ms |
+| `yoke trial report` | 1.9 to 3.6 s (6 s and more on a cold cache) | 0.4 s |
+| `yoke log --tool <name that never ran>` | 180 to 610 ms | 4 ms |
+| `yoke log --outcome error` | 31 ms | 4 ms |
+| `yoke log --outcome would_deny` | 18 to 23 ms | 4 ms |
+| `yoke log --session <id>`, `--project <path>` | 13 ms | 5 ms |
+| `yoke log`, `yoke log --limit 1000` | 6 ms, 8 to 13 ms | 4 ms, 7 ms |
+| `yoke notifications`, first runs after an upgrade | 270 to 370 ms per run, 124 runs to catch up | 430 ms per run, 13 runs to catch up |
+| `yoke usage` | 41 ms with 50 thousand samples, 300 ms with 500 thousand | unchanged |
+| `yoke recall`, `statusline`, `config`, `gates`, `plan list`, `jobs`, `extensions` | 3 to 12 ms | unchanged |
+
+Hooks stay far below the threshold at this size.
+Median per event: PreToolUse 4.8 ms, PostToolUse 5.7 ms, UserPromptSubmit 5.1 ms, SessionStart 6.3 ms, SessionEnd 6.9 ms, Stop 9.9 ms with a 300-line transcript.
+The three new indexes add about 0.1 to 0.2 ms (about 3 percent) to each recorded event and 49 MB (6 percent) to the database.
+
+### What grows and what is bounded
+
+- Decisions, facts and finished check runs are deleted after `log.retention_days` (90 by default), so at the fixture's rate the database settles near 0.75 GB.
+  The file does not shrink after a prune; the freed pages are reused.
+  After pruning 150 thousand decisions and 39 thousand facts about a quarter of the pages were free.
+- Sessions, memories, usage samples, plans and their transitions are never pruned.
+  They are small: a usage sample is about 150 bytes, but `yoke usage` reads every sample, at about 6 microseconds each.
+- The write-ahead log is empty after the last hook exits.
+
+### Retention runs in the background
+
+The hourly cleanup used to run inside the SessionStart hook.
+The hook now only queues it as a background job, and a worker deletes in short batches with a 110 ms pause between them so that waiting hooks get the write lock.
+Measured on a 289 MB fixture with 52 thousand decisions and 21 thousand facts past the boundary.
+The optimized build cannot be pointed at an isolated home, so these runs used unoptimized builds; read the ratios, not the digits.
+
+| | SessionStart that has the cleanup due | While the backlog drains |
+| --- | --- | --- |
+| Before: inside the hook | median 66 ms, p95 106 ms, max 457 ms, in each of 67 sessions (about 5 s of deleting inside hooks) | each of those sessions waited |
+| After: background job | 26 ms; 15 to 20 ms once nothing is left to delete | the backlog was gone after 12.5 s; PreToolUse during the drain: median 17 ms, p95 60 ms, max 372 ms |
+
+With nothing to delete, a SessionStart that has the cleanup due costs 16 ms before and 15 to 20 ms after.
+
+### Migration 013
+
+Migration 013 builds three indexes on an existing database.
+On the fixture it took about 9 seconds with a warm cache and 19 to 26 seconds on a cold one, which is roughly one second per 50 thousand decisions.
+A fresh installation pays nothing.
+While it runs, the first hook holds the write lock.
+Hooks that arrive meanwhile wait 2 seconds, then decide from read-only state: gates still apply and a deny is still a deny, but those events are not recorded.
+See [upgrade notes](upgrade-notes.md) for how to run it on purpose.
+
+### Known limits
+
+- The first session starts after an upgrade from a build without notifications also read old history: each hook takes a window of 2,000 decision ids, the `yoke notifications` command 20,000.
+  Draining 500 thousand decisions therefore takes about 250 session starts or 13 runs of the command.
+  A window of 20,000 in the hook took 350 to 620 ms per hook (unoptimized build); 2,000 takes 40 to 120 ms there.
+- Stop re-reads the whole transcript.
+  It took 35 to 60 ms for a 5 MB transcript and grows with the file.
+- `yoke usage` grows linearly with the number of samples, because usage is never pruned.
+- Cold-cache first runs after a reboot are several times slower than the numbers above for any command that scans a table.
+
 ## Findings ledger
 
 One row per finding, sorted by status and then severity.
@@ -306,6 +388,15 @@ P1 has none left, apart from the remainder of j4-3.
 - after-fix-4: render `yoke usage` quota as a table for people and keep the compact form behind `--json`.
 - j1-3 and j4-6 (remainder): `yoke recall` still prints its time column as epoch seconds, and the plan commands other than `new`, `validate`, `comment`, `reply` and `review` still print one JSON value.
 - j3-memory-3 (remainder): forgetting a shared note in the console leaves its entry in `.yoke/knowledge.md`; the console should say so.
+
+### Declined after the failure-mode tests
+
+These were considered and left as they are, so that nobody reopens them without new evidence.
+
+- w2-chaos D4: a tool input too large for a check gate's environment is not delivered on stdin instead; that would change how `execute_bounded` treats an unread stdin for every caller, and `deny` and `rewrite` gates already see the whole input.
+- w2-chaos D5: a hook killed with SIGKILL still leaves a running gate command behind; a pid ledger that the next hook reaps was declined as more machinery than the case is worth, and gate timeouts are the bound.
+- w2-chaos D6: a Stop denied only because Yoke failed is let through the second time (`stop_hook_active`); a stricter counter that survives without the database was declined as heavier than the risk.
+- w2-chaos D7: a read-only `HOME` with no `~/.yoke` still denies blocking events, because the state and the last known mode cannot be read there.
 
 ### Decisions and checks that need a person
 

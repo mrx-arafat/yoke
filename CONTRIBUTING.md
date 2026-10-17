@@ -42,6 +42,23 @@ Inspect nearby test names before selecting filters for another module.
 Add the fewest behavioral regressions necessary and keep external agent credentials out of ordinary automated tests.
 Hook changes need real payload/output checks; UI changes need browser interaction and a subsequent snapshot of the resulting state.
 Unit checks alone do not establish agent integration or rendered UI correctness.
+To fake GitHub in a test, point `YOKE_CURL` at a stub script: `yoke update` and the daily check run curl from a fixed system path, so a stub on `PATH` is not used, and only debug and `honor-home-env` builds honour `YOKE_CURL`.
+
+## Testing against real state
+
+A hook uses the account's own home directory, not `HOME`, whenever the two differ and the account home already holds Yoke state.
+Only a debug build or a build made with `--features honor-home-env` honours `HOME`.
+So never run an optimized (`--release`) binary on a machine that has a real `~/.yoke` and expect an isolated `HOME` to protect it: the hook writes to the real database.
+For an optimized run under an isolated home, build into a throwaway target directory and delete it afterwards:
+
+```sh
+CARGO_TARGET_DIR="$(mktemp -d)" cargo build --release -p yoke-cli --features honor-home-env
+```
+
+Never build into the `target/release` that installed hooks run, and never enable the feature in `release.yml` or the installer.
+CI and containers have no real state, so `cargo test` and release builds there need no feature.
+`cargo test --release` needs `--features honor-home-env`, because the integration tests rely on `HOME`.
+Before any run that could touch a real `~/.yoke`, set `HOME` to a fresh directory with `T=$(mktemp -d) && export HOME="${T:?}"`.
 
 ## Continuous integration
 
