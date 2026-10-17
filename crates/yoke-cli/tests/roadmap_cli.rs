@@ -344,10 +344,13 @@ fn digest_rejects_fifo_without_waiting_for_a_writer() {
         .status()
         .unwrap()
         .success());
+    let empty_path = temp.path().join("empty-path");
+    fs::create_dir(&empty_path).unwrap();
     let mut child = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), &home)
         .args(["memory", "digest", "fixture", "--transcript"])
         .arg(&fifo)
         .env("HOME", &home)
+        .env("PATH", &empty_path)
         .env("CLAUDECODE", "1")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CODEX_SESSION_ID")

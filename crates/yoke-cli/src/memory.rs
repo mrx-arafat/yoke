@@ -488,11 +488,6 @@ fn digest(
         "codex" => review::Reviewer::Codex,
         _ => anyhow::bail!("invalid configured digest agent"),
     };
-    let mut command = review::command(
-        reviewer,
-        loaded.config.memory.digest_models.get(reviewer.as_str()),
-    )?;
-    command.current_dir(&loaded.project_root);
     let mut tail = Vec::new();
     if let Some(path) = transcript {
         let mut file = std::fs::OpenOptions::new()
@@ -508,6 +503,11 @@ fn digest(
         file.seek(SeekFrom::Start(length.saturating_sub(32768)))?;
         file.take(32768).read_to_end(&mut tail)?;
     }
+    let mut command = review::command(
+        reviewer,
+        loaded.config.memory.digest_models.get(reviewer.as_str()),
+    )?;
+    command.current_dir(&loaded.project_root);
     memory::digest_with_command(
         store,
         session,
