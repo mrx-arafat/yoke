@@ -4,7 +4,7 @@
     "name": "Broken or placeholder image",
     "description": "<img> tags with empty src, missing src, or placeholder values ship as broken-image boxes. Use real images, generated assets, or remove the tag.",
     "severity": "warning",
-    "file": "/Users/easinarafat/AI/yoke/crates/yoke-cli/src/console/artifacts/rendered-decisions.html",
+    "file": "crates/yoke-cli/src/console/artifacts/rendered-decisions.html",
     "line": 0,
     "snippet": "<img> with no src attribute"
   },
@@ -13,7 +13,7 @@
     "name": "Tiny body text",
     "description": "Body text below 12px is hard to read, especially on high-DPI screens. Use at least 14px for body content, 16px is ideal.",
     "severity": "warning",
-    "file": "/Users/easinarafat/AI/yoke/crates/yoke-cli/src/console/artifacts/rendered-decisions.html",
+    "file": "crates/yoke-cli/src/console/artifacts/rendered-decisions.html",
     "line": 0,
     "snippet": "11px body text"
   },
@@ -22,7 +22,7 @@
     "name": "Flat type hierarchy",
     "description": "Font sizes are too close together — no clear visual hierarchy. Use fewer sizes with more contrast (aim for at least a 1.25 ratio between steps).",
     "severity": "warning",
-    "file": "/Users/easinarafat/AI/yoke/crates/yoke-cli/src/console/artifacts/rendered-decisions.html",
+    "file": "crates/yoke-cli/src/console/artifacts/rendered-decisions.html",
     "line": 0,
     "snippet": "Sizes: 11px, 12px, 13px, 14px, 16px, 20px (ratio 1.8:1)"
   },
@@ -31,7 +31,7 @@
     "name": "Numbered section markers (01 / 02 / 03)",
     "description": "Numbered display markers as section labels (01, 02, 03) are the AI editorial scaffold one tier deeper than tracked eyebrow chips. If you find yourself reaching for them, choose a different section cadence.",
     "severity": "advisory",
-    "file": "/Users/easinarafat/AI/yoke/crates/yoke-cli/src/console/artifacts/rendered-decisions.html",
+    "file": "crates/yoke-cli/src/console/artifacts/rendered-decisions.html",
     "line": 0,
     "snippet": "Sequence: 02, 04, 05, 08, 10, 11"
   }

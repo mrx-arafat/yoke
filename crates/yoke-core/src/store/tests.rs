@@ -328,7 +328,90 @@ const DOWNS: &[&str] = &[
     include_str!("012-usage-time.down.sql"),
     include_str!("013-scale-indexes.down.sql"),
     include_str!("014-session-anchors.down.sql"),
+    include_str!("015-usage-summaries.down.sql"),
 ];
+
+#[test]
+fn usage_summaries_upgrade_schemas_12_to_14_and_follow_mutation_and_rollback() -> Result<()> {
+    for version in 12..=14 {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("upgrade.db");
+        {
+            let db = Connection::open(&path)?;
+            for migration in &MIGRATIONS[..version] {
+                db.execute_batch(migration)?;
+            }
+            db.pragma_update(None, "user_version", version)?;
+            db.execute_batch("INSERT INTO usage_samples VALUES
+                ('claude','a','/project','1','alpha',3,2,1,0,10,1),
+                ('claude','a','/project','2','alpha',3,2,1,0,10,86401),
+                ('claude','b','/project','3','beta',3,2,1,0,NULL,172801),
+                ('claude','b','/project','4','beta',3,2,1,0,NULL,NULL);
+                INSERT INTO notifications(key,kind,project,subject,title,detail,first_seen,last_seen,state,acknowledged_at,actor)
+                VALUES('preserved','hook_error','/project','test','test','test',1,2,'acknowledged',2,'human');")?;
+            let legacy = Store::open_read_only(&path)?;
+            assert_eq!(
+                crate::usage::recent_sessions(&legacy, 1)?[0].session_id,
+                "b"
+            );
+            assert_eq!(
+                crate::usage::totals_by_agent(&legacy, 2)?[0]
+                    .totals
+                    .input_tokens,
+                6
+            );
+        }
+        let store = Store::open(&path)?;
+        let totals = crate::usage::totals_by_agent(&store, 2)?;
+        assert_eq!(
+            (
+                totals[0].totals.samples,
+                totals[0].totals.input_tokens,
+                totals[0].totals.unknown_pricing_samples
+            ),
+            (2, 6, 1)
+        );
+        assert_eq!(
+            totals[0].totals.known_cost_usd.as_deref(),
+            Some("0.000000010")
+        );
+        let sessions = crate::usage::recent_sessions(&store, 2)?;
+        assert_eq!(
+            (sessions[0].session_id.as_str(), sessions[0].totals.samples),
+            ("b", 2)
+        );
+        assert_eq!(sessions[0].totals.known_cost_usd, None);
+        store.connection().execute_batch("UPDATE usage_samples SET ts=172802,input_tokens=7,model='zeta' WHERE session_id='a' AND record_key='1';")?;
+        let sessions = crate::usage::recent_sessions(&store, 2)?;
+        assert_eq!(sessions[0].session_id, "a");
+        assert_eq!(sessions[0].totals.input_tokens, 10);
+        assert_eq!(sessions[0].models, ["alpha", "zeta"]);
+        store
+            .connection()
+            .execute_batch("BEGIN; DELETE FROM usage_samples; ROLLBACK;")?;
+        assert_eq!(
+            crate::usage::recent_sessions(&store, 2)?[0]
+                .totals
+                .input_tokens,
+            10
+        );
+        store
+            .connection()
+            .execute_batch("DELETE FROM usage_samples WHERE session_id='a' AND record_key='1';")?;
+        let sessions = crate::usage::recent_sessions(&store, 2)?;
+        assert_eq!(sessions[1].last_at, Some(86401));
+        assert_eq!(sessions[1].models, ["alpha"]);
+        assert_eq!(
+            store.connection().query_row(
+                "SELECT actor FROM notifications WHERE key='preserved'",
+                [],
+                |row| row.get::<_, String>(0)
+            )?,
+            "human"
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn migrations_reverse_only_in_disposable_fixture_and_preserve_core_rows() -> Result<()> {

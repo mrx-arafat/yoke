@@ -386,3 +386,14 @@ fn a_wrapped_command_keeps_its_room_when_the_line_is_narrow() {
     );
     assert!(rendered.line.starts_with("yoke (no data yet)"));
 }
+
+#[test]
+fn a_wrapper_may_close_stdin_without_reading_the_callback() {
+    // Exceed the pipe capacity on both macOS and Linux so early close is deterministic.
+    let input = vec![b' '; 256 * 1024];
+    assert_eq!(
+        run_wrapper("exec 0<&-; printf wrapped-output", &input).unwrap(),
+        "wrapped-output"
+    );
+    assert!(run_wrapper("exec 0<&-; exit 7", &input).is_err());
+}

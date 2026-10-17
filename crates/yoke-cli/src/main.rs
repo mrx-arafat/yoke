@@ -12,6 +12,7 @@ mod memory;
 mod notifications;
 mod presets;
 mod preview;
+mod project;
 mod retention;
 mod starter;
 mod statusline;
@@ -105,6 +106,9 @@ enum Cmd {
         /// Pin the note so session start injects it before other memories.
         #[arg(long)]
         pinned: bool,
+        /// Print the full saved memory record as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Search current-project memory: best matches first, or pinned then newest without a query.
     Recall {
@@ -135,6 +139,11 @@ enum Cmd {
     Memory {
         #[command(subcommand)]
         command: memory::MemoryCommand,
+    },
+    /// Human-only: relocate project records without granting trust to changed files.
+    Project {
+        #[command(subcommand)]
+        command: project::ProjectCommand,
     },
     /// List queued, running, failed and dead background jobs, or retry a dead one.
     Jobs {

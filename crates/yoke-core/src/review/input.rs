@@ -2,7 +2,6 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path};
-use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
@@ -23,10 +22,41 @@ pub(super) fn collect(project: &Path, base_ref: Option<&str>) -> Result<String> 
     let root = git(&cwd, &["rev-parse", "--show-toplevel"])?;
     let root = std::str::from_utf8(&root).context("review repository root is not UTF-8")?;
     let project = Path::new(root.strip_suffix('\n').unwrap_or(root)).canonicalize()?;
-    let diff = git(
+    let names = git(
         &project,
-        &["diff", "--no-ext-diff", "--no-textconv", base, "--"],
+        &["diff", "--name-only", "--no-renames", "-z", base, "--"],
     )?;
+    let mut selected = Vec::new();
+    for name in names
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+    {
+        let name = std::str::from_utf8(name).context("tracked review path is not UTF-8")?;
+        if secret_path(Path::new(name)) {
+            eprintln!(
+                "review: skipping secret-looking file {}",
+                crate::redact::redact(name)
+            );
+        } else {
+            eprintln!("review: tracked file {}", crate::redact::redact(name));
+            selected.push(format!(":(top,literal){name}"));
+        }
+    }
+    let mut args = vec![
+        "diff",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        base,
+        "--",
+    ];
+    args.extend(selected.iter().map(String::as_str));
+    // A positive list prevents a concurrently added secret path from joining the diff.
+    let diff = if selected.is_empty() {
+        Vec::new()
+    } else {
+        git(&project, &args)?
+    };
     let diff = String::from_utf8(diff).context("review diff is not UTF-8")?;
     ensure!(
         !diff
@@ -38,11 +68,32 @@ pub(super) fn collect(project: &Path, base_ref: Option<&str>) -> Result<String> 
         &project,
         &["ls-files", "--others", "--exclude-standard", "-z"],
     )?;
-    append_untracked(&project, diff, &paths)
+    Ok(crate::redact::redact(&append_untracked(
+        &project, diff, &paths,
+    )?))
+}
+
+fn secret_path(path: &Path) -> bool {
+    path.components().any(|part| {
+        let name = part.as_os_str().to_string_lossy().to_ascii_lowercase();
+        name.starts_with(".env")
+            || name == ".ssh"
+            || name == ".aws"
+            || matches!(name.as_str(), ".npmrc" | ".netrc" | ".pypirc" | "auth.json")
+            || name.contains("credential")
+            || name.contains("secret")
+            || name.starts_with("id_rsa")
+            || name.starts_with("id_ed25519")
+            || name.starts_with("id_ecdsa")
+            || name.starts_with("id_dsa")
+            || [".pem", ".key", ".p12", ".pfx", ".keystore", ".sql", ".dump"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+    })
 }
 
 fn git(project: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let mut command = Command::new("git");
+    let mut command = crate::process::git()?;
     command
         .args(args)
         .current_dir(project)
@@ -70,6 +121,14 @@ pub(super) fn append_untracked(project: &Path, mut input: String, paths: &[u8]) 
                 .all(|component| matches!(component, Component::Normal(_))),
             "untracked review path must be project-relative"
         );
+        if secret_path(path) {
+            eprintln!(
+                "review: skipping secret-looking file {}",
+                crate::redact::redact(name)
+            );
+            continue;
+        }
+        eprintln!("review: untracked file {}", crate::redact::redact(name));
         let full = project.join(path);
         let parent = full
             .parent()
@@ -94,12 +153,15 @@ pub(super) fn append_untracked(project: &Path, mut input: String, paths: &[u8]) 
                 "review changes exceed 1 MiB at {name}"
             );
             let mut bytes = Vec::new();
-            File::options()
+            let file = File::options()
                 .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&full)?
-                .take(remaining as u64 + 1)
-                .read_to_end(&mut bytes)?;
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&full)?;
+            ensure!(
+                file.metadata()?.is_file(),
+                "untracked review input must stay a regular file: {name}"
+            );
+            file.take(remaining as u64 + 1).read_to_end(&mut bytes)?;
             ensure!(
                 bytes.len() <= remaining,
                 "review changes exceed 1 MiB at {name}"

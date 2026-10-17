@@ -37,6 +37,9 @@ pub enum MemoryCommand {
         /// Explicitly replace an existing archive.
         #[arg(long)]
         overwrite: bool,
+        /// Print the export report as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Validate and import plaintext memory data; never imports executable trust.
     Import {
@@ -54,6 +57,9 @@ pub enum MemoryCommand {
         /// a pinned memory is injected at every session start; use this to restore your own export.
         #[arg(long)]
         keep_pins: bool,
+        /// Print the import report as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Pin a memory for context injection; add --unpin to remove the pin.
     Pin {
@@ -103,17 +109,27 @@ fn require_person(action: &str, why: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn remember(text: &str, pinned: bool) -> Result<()> {
+pub fn remember(text: &str, pinned: bool, json: bool) -> Result<()> {
     if pinned {
         require_person(
             "yoke remember --pinned",
             "a pinned note is injected at every session start, so only a person may pin; save the note without --pinned",
         )?;
     }
-    let (store, loaded) = commands::load_project()?;
+    let (store, loaded) = commands::load_memory_project()?;
     let project = project_of(&loaded)?;
     let row = memory::remember(&store, project, text, pinned, timestamp()?)?;
-    println!("{}", serde_json::to_string(&row)?);
+    if json {
+        println!("{}", serde_json::to_string(&row)?);
+    } else {
+        println!(
+            "id: {}\ntime: {}\npinned: {}\ntext: {}",
+            row.id,
+            commands::quote(&yoke_core::timefmt::local_time(row.ts)),
+            row.pinned,
+            commands::quote(&row.text)
+        );
+    }
     // Said once, with the first note of a project, so a new user learns it without a nag per note.
     if let Some(notice) = injection_notice(loaded.config.mode) {
         if memory::recall(&store, project, "", 2)?.len() == 1 {
@@ -124,7 +140,7 @@ pub fn remember(text: &str, pinned: bool) -> Result<()> {
 }
 
 pub fn recall(query: &str, limit: u16, json: bool, explain: bool) -> Result<()> {
-    let (store, loaded) = commands::load_project()?;
+    let (store, loaded) = commands::load_memory_project()?;
     let project = loaded
         .project_root
         .to_str()
@@ -238,9 +254,9 @@ fn explain_context(
 
 pub fn forget(id: i64) -> Result<()> {
     ensure!(id > 0, "memory id must be positive");
-    let (store, loaded) = commands::load_project()?;
+    let (store, loaded) = commands::load_memory_project()?;
     let forgotten = memory::forget_in_project(&store, project_of(&loaded)?, id)?
-        .with_context(|| format!("memory {id} not found in this project"))?;
+        .with_context(|| format!("memory {id} not found in this project; run yoke recall to list this project's memory ids"))?;
     println!("deleted: true");
     match forgotten.shared_copy {
         SharedCopy::None => {}
@@ -263,7 +279,7 @@ pub fn forget(id: i64) -> Result<()> {
 
 pub fn share(id: i64) -> Result<()> {
     ensure!(id > 0, "memory id must be positive");
-    let (store, loaded) = commands::load_project()?;
+    let (store, loaded) = commands::load_memory_project()?;
     let shared = memory::share_in_project(&store, project_of(&loaded)?, id)?;
     println!(
         "file: {}\nhelp: \"{}\"",
@@ -283,27 +299,44 @@ pub fn run(command: MemoryCommand) -> Result<()> {
             file,
             all,
             overwrite,
+            json,
         } => {
             let home = commands::home()?;
             let store = Store::open_read_only(home.join(".yoke/state.db"))?;
-            let loaded = config::load_trusted(&store, &std::env::current_dir()?, &home)?;
-            let project = loaded
-                .project_root
-                .to_str()
-                .context("project path must be UTF-8")?;
+            let anchored = commands::agent_memory_project(&store)?;
+            ensure!(anchored.is_none() || !all, "an agent can export only its session's project; remove --all, or export all projects from your own terminal");
+            let root = match anchored {
+                Some(root) => root,
+                None => {
+                    config::load_trusted(&store, &std::env::current_dir()?, &home)?.project_root
+                }
+            };
+            let project = root.to_str().context("project path must be UTF-8")?;
             let report = memory::export_archive(
                 &store,
                 &file,
                 if all { None } else { Some(project) },
                 overwrite,
             )?;
-            println!("{}", serde_json::to_string(&report)?);
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!(
+                    "file: {}\nprojects: {}\nmemories: {}\nfacts: {}\nbytes: {}",
+                    commands::quote(&file.display().to_string()),
+                    report.projects.len(),
+                    report.memories,
+                    report.facts,
+                    report.bytes
+                );
+            }
         }
         MemoryCommand::Import {
             file,
             mappings,
             dry_run,
             keep_pins,
+            json,
         } => {
             if !dry_run {
                 require_person(
@@ -338,13 +371,28 @@ pub fn run(command: MemoryCommand) -> Result<()> {
             } else {
                 commands::open_store(&home)?
             };
+            if let Some(root) = commands::agent_memory_project(&store)? {
+                for destination in projects.values() {
+                    ensure!(Path::new(destination).canonicalize().ok().as_ref() == Some(&root), "agent import previews must map every destination to its session's project {}; change --map or run it in your own terminal", commands::quote(&root.display().to_string()));
+                }
+            }
             let options = ImportOptions {
                 dry_run,
                 keep_pins,
                 now: timestamp()?,
             };
             let report = memory::import_archive(&store, &file, &projects, &options)?;
-            println!("{}", serde_json::to_string(&report)?);
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!("dry_run: {}\nprojects: {}\nadditions: {}\nduplicates: {}\npins_dropped: {}\nfacts_marked_digested: {}",
+                    report.dry_run, report.projects.len(), report.additions, report.duplicates,
+                    report.pins_dropped, report.facts_marked_digested);
+                println!("conflicts[{}]:", report.conflicts.len());
+                for conflict in &report.conflicts {
+                    println!("  {}", commands::quote(conflict));
+                }
+            }
             print_import_notes(&report);
             // The real import refuses on conflicts, so a dry run must fail the same way for scripts.
             ensure!(
@@ -361,7 +409,7 @@ pub fn run(command: MemoryCommand) -> Result<()> {
                     "a pinned note is injected at every session start, so only a person may pin",
                 )?;
             }
-            let (store, loaded) = commands::load_project()?;
+            let (store, loaded) = commands::load_memory_project()?;
             memory::pin_in_project(&store, project_of(&loaded)?, id, !unpin)?;
             println!("id: {id}\npinned: {}", !unpin);
         }
@@ -369,7 +417,7 @@ pub fn run(command: MemoryCommand) -> Result<()> {
             session,
             transcript,
         } => {
-            let (store, loaded) = commands::load_project()?;
+            let (store, loaded) = commands::load_memory_project()?;
             let report = digest(
                 &store,
                 &loaded,
@@ -443,7 +491,7 @@ fn digest(
     let mut command = review::command(
         reviewer,
         loaded.config.memory.digest_models.get(reviewer.as_str()),
-    );
+    )?;
     command.current_dir(&loaded.project_root);
     let mut tail = Vec::new();
     if let Some(path) = transcript {

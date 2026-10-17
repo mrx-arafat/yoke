@@ -70,7 +70,7 @@ fn hook_diagnostics_reports_only_missing_claude_post_tool_use_failure() {
 fn fixture() -> (TempDir, InstallOptions) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let options = InstallOptions {
+    let mut options = InstallOptions {
         claude_settings: root.join("claude/settings.json"),
         codex_hooks: root.join("codex/hooks.json"),
         codex_config: root.join("codex/config.toml"),
@@ -82,12 +82,212 @@ fn fixture() -> (TempDir, InstallOptions) {
         statusline: Statusline::Off,
         statusline_style: None,
     };
+    put(&options.executable, "#!/bin/sh\n");
+    fs::set_permissions(
+        &options.executable,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    options.executable = options.executable.canonicalize().unwrap();
     (dir, options)
 }
 
 fn put(path: &std::path::Path, text: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, text).unwrap();
+}
+
+#[test]
+fn install_requires_a_regular_executable_and_records_its_canonical_target() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let (dir, mut options) = fixture();
+    fs::remove_file(&options.executable).unwrap();
+    assert!(install(&options).is_err());
+    put(&options.executable, "#!/bin/sh\n");
+    assert!(install(&options).is_err());
+    fs::set_permissions(&options.executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let canonical = options.executable.canonicalize().unwrap();
+    let link = dir.path().join("link");
+    symlink(&options.executable, &link).unwrap();
+    options.executable = link;
+    install(&options).unwrap();
+    assert_eq!(
+        read_receipt(&options, Agent::Claude)
+            .unwrap()
+            .unwrap()
+            .executable,
+        canonical
+    );
+}
+
+#[test]
+fn executable_ancestor_permissions_distinguish_sticky_and_group_guidance() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, options) = fixture();
+    install(&options).unwrap();
+    let ancestor = options.executable.parent().unwrap();
+    let location = ancestor.display().to_string();
+    for (mode, problem, guidance) in [
+        (0o1777, false, false),
+        (0o777, true, false),
+        (0o775, false, true),
+    ] {
+        fs::set_permissions(ancestor, fs::Permissions::from_mode(mode)).unwrap();
+        let claude = status(&options, dir.path()).remove(0);
+        assert_eq!(
+            claude.problems.iter().any(|line| line.contains(&location)),
+            problem,
+            "mode {mode:o}: {claude:?}"
+        );
+        assert_eq!(
+            claude
+                .notes
+                .iter()
+                .any(|line| line.contains(&location) && line.contains("chmod g-w")),
+            guidance,
+            "mode {mode:o}: {claude:?}"
+        );
+        if guidance {
+            assert!(install(&options)
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|line| { line.contains(&location) && line.contains("chmod g-w") }));
+        }
+    }
+}
+
+#[test]
+fn json_edits_preserve_inter_entry_whitespace_and_final_newline() {
+    let original = "{\n\t\"theme\" : \"dark\",\n\t\"hooks\" : {\n\t\t\"Stop\" : [ { \"hooks\": [] } ]\n\t}\n}\n";
+    let mut value: Value = serde_json::from_str(original).unwrap();
+    value["hooks"]["Stop"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"hooks":[{"command":"yoke"}]}));
+    let rendered = json::render(original, &value).unwrap();
+    assert!(
+        rendered.starts_with(
+            "{\n\t\"theme\" : \"dark\",\n\t\"hooks\" : {\n\t\t\"Stop\" : [ { \"hooks\": [] },"
+        ),
+        "{rendered}"
+    );
+    assert!(rendered.ends_with(" ]\n\t}\n}\n"), "{rendered}");
+}
+
+#[test]
+fn install_lock_recovers_a_dead_owner_and_refuses_a_live_owner() {
+    let (_dir, options) = fixture();
+    fs::create_dir_all(&options.state_dir).unwrap();
+    put(&options.state_dir.join("install.lock"), "2147483647\n");
+    let lock = files::Lock::acquire(&options.state_dir).unwrap();
+    assert!(files::Lock::acquire(&options.state_dir).is_err());
+    drop(lock);
+    assert!(files::Lock::acquire(&options.state_dir).is_ok());
+}
+
+#[test]
+fn receipts_and_preview_omit_unrelated_secrets_and_backups_are_bounded() {
+    let (_dir, options) = fixture();
+    let original = r#"{"env":{"TOKEN":"private-settings-sentinel"},"hooks":{"Stop":[{"hooks":[{"command":"printf private-hook-sentinel"}]}],"private-event-sentinel":[]}}"#;
+    put(&options.claude_settings, original);
+    put(&options.codex_config, "token = 'private-config-sentinel'\n");
+    let dry = install(&InstallOptions {
+        dry_run: true,
+        ..options.clone()
+    })
+    .unwrap();
+    let preview = dry
+        .changes
+        .iter()
+        .flat_map(preview_lines)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!preview.contains("private-"), "{preview}");
+    assert!(preview.contains("run-hook"), "{preview}");
+    install(&options).unwrap();
+    for agent in [Agent::Claude, Agent::Codex] {
+        let receipt = files::read(&receipt_path(&options, agent))
+            .unwrap()
+            .unwrap();
+        assert!(!receipt.contains("private-"), "{receipt}");
+        assert!(receipt.contains("hashes"));
+    }
+    for _ in 0..6 {
+        files::backup(&options.state_dir, &dry.changes).unwrap();
+    }
+    assert_eq!(
+        fs::read_dir(options.state_dir.join("backups"))
+            .unwrap()
+            .count(),
+        5
+    );
+    for entry in fs::read_dir(options.state_dir.join("backups")).unwrap() {
+        let index = fs::read_to_string(entry.unwrap().path().join("index.json")).unwrap();
+        assert!(!index.contains("private-"), "{index}");
+    }
+    uninstall(&options).unwrap();
+    assert_eq!(
+        fs::read_to_string(options.claude_settings).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn settings_reads_reject_fifo_and_health_does_not_block_on_its_symlink() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let (dir, options) = fixture();
+    install(&options).unwrap();
+    let fifo = dir.path().join("fifo");
+    let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path inside this test's temporary directory.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    assert!(files::read(&fifo).is_err());
+    let project_settings = dir.path().join(".claude/settings.json");
+    fs::create_dir_all(project_settings.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&fifo, &project_settings).unwrap();
+    let statuses = status(&options, dir.path());
+    assert!(
+        statuses[0]
+            .problems
+            .iter()
+            .any(|problem| problem.contains("regular file")),
+        "{:?}",
+        statuses[0].problems
+    );
+}
+
+#[test]
+fn expired_original_backups_do_not_make_preexisting_handlers_owned() {
+    let (_dir, mut options) = fixture();
+    options.agents = vec![Agent::Claude];
+    let group = hook_group(&options.executable, Agent::Claude, "Stop").unwrap();
+    let original = json!({"hooks":{"Stop":[{"hooks":[group["hooks"][0].clone(),{"type":"command","command":"keep original"}]}]}});
+    put(&options.claude_settings, &original.to_string());
+    install(&options).unwrap();
+    let mut edited: Value =
+        serde_json::from_str(&fs::read_to_string(&options.claude_settings).unwrap()).unwrap();
+    edited["hooks"]["Stop"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|value| value != &group);
+    put(&options.claude_settings, &edited.to_string());
+    for _ in 0..6 {
+        files::backup(
+            &options.state_dir,
+            &[FileChange {
+                path: options.claude_settings.clone(),
+                before: Some("newer backup".into()),
+                after: None,
+            }],
+        )
+        .unwrap();
+    }
+    uninstall(&options).unwrap();
+    let restored: Value =
+        serde_json::from_str(&fs::read_to_string(options.claude_settings).unwrap()).unwrap();
+    assert_eq!(restored, original);
 }
 
 #[test]
@@ -99,6 +299,10 @@ fn roundtrip_preserves_existing_settings_and_is_idempotent() {
     put(&options.codex_config, config);
     let report = install(&options).unwrap();
     assert_eq!(report.changes.len(), 3);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.starts_with("Codex requires review")));
     let installed = fs::read_to_string(&options.claude_settings).unwrap();
     assert!(installed
         .contains("{ \"hooks\": [{\"type\":\"command\",\"command\":\"yoke custom-user-hook\"}] }"));
@@ -116,7 +320,12 @@ fn roundtrip_preserves_existing_settings_and_is_idempotent() {
             format!("Yoke: {event}")
         );
     }
-    assert!(install(&options).unwrap().changes.is_empty());
+    let repeated = install(&options).unwrap();
+    assert!(repeated.changes.is_empty());
+    assert!(!repeated
+        .warnings
+        .iter()
+        .any(|warning| warning.starts_with("Codex requires review")));
     let backup_root = options.state_dir.join("backups");
     let backup_count = fs::read_dir(&backup_root).unwrap().count();
     // Backups hold copies of the user's settings, which may carry tokens.
@@ -153,18 +362,18 @@ fn dry_run_and_codex_only_statusline_leave_the_entire_temp_root_untouched() {
     let (dir, mut options) = fixture();
     options.dry_run = true;
     assert!(!install(&options).unwrap().changes.is_empty());
-    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     assert!(uninstall(&options).unwrap().changes.is_empty());
     options.statusline = Statusline::Wrap;
     assert!(!install(&options).unwrap().changes.is_empty());
-    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     options.dry_run = false;
     options.agents = vec![Agent::Codex];
     assert!(install(&options)
         .unwrap_err()
         .to_string()
         .contains("statusline"));
-    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
 #[test]
@@ -528,10 +737,13 @@ fn a_moved_executable_or_settings_directory_is_refused_with_the_fix() {
     let (dir, options) = fixture();
     install(&options).unwrap();
 
-    let moved = InstallOptions {
+    let mut moved = InstallOptions {
         executable: dir.path().join("elsewhere/yoke"),
         ..options.clone()
     };
+    fs::create_dir_all(moved.executable.parent().unwrap()).unwrap();
+    fs::copy(&options.executable, &moved.executable).unwrap();
+    moved.executable = moved.executable.canonicalize().unwrap();
     let error = format!("{:#}", install(&moved).unwrap_err());
     assert!(
         error.starts_with("executable changed; uninstall before reinstalling"),

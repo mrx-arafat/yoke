@@ -5,6 +5,14 @@ use crate::trust::SnapshotStatus;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[test]
+fn help_links_pin_only_a_matching_release_tag() {
+    assert!(release_ref(Some("tag"), Some("v0.1.0"), "v0.1.0"));
+    assert!(!release_ref(Some("branch"), Some("v0.1.0"), "v0.1.0"));
+    assert!(!release_ref(Some("tag"), Some("v0.0.9"), "v0.1.0"));
+    assert!(!release_ref(None, None, "v0.1.0"));
+}
+
 fn store() -> (tempfile::TempDir, Store) {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().join("state.db")).unwrap();
@@ -45,6 +53,47 @@ fn decide(store: &Store, project: &str, ts: i64, outcome: &str, reason: &str) {
 
 fn by_kind<'a>(rows: &'a [Notification], kind: &str) -> &'a Notification {
     rows.iter().find(|row| row.kind == kind).unwrap()
+}
+
+#[test]
+fn partial_usage_notifies_each_session_once_and_resolves_after_a_full_import() {
+    let (_directory, store) = store();
+    for session in ["first", "second"] {
+        store.connection().execute("INSERT INTO sessions(id,agent,project,started_at) VALUES(?1,'claude','/work/app',0)", [session]).unwrap();
+        store
+            .set_kv(
+                &format!("usage.partial.claude.{session}"),
+                r#"{"transcript_bytes":100,"skipped_bytes":50,"limit_bytes":50}"#,
+            )
+            .unwrap();
+    }
+    let config = loaded("/work/app", Vec::new());
+    sync(&store, &config, 1).unwrap();
+    let rows = list(&store, Path::new("/work/app"), false, 100).unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.kind == "usage_partial")
+            .count(),
+        2
+    );
+    let id = by_kind(&rows, "usage_partial").id;
+    acknowledge(&store, Path::new("/work/app"), &Target::Ids(vec![id]), 2).unwrap();
+    sync(&store, &config, 3).unwrap();
+    let rows = list(&store, Path::new("/work/app"), false, 100).unwrap();
+    assert!(rows.iter().all(|row| row.count == 1));
+    assert_eq!(
+        rows.iter().find(|row| row.id == id).unwrap().state,
+        "acknowledged"
+    );
+    store
+        .connection()
+        .execute("DELETE FROM kv WHERE key GLOB 'usage.partial.*'", [])
+        .unwrap();
+    sync(&store, &config, 4).unwrap();
+    assert!(list(&store, Path::new("/work/app"), false, 100)
+        .unwrap()
+        .iter()
+        .all(|row| row.resolved_at == Some(4)));
 }
 
 #[test]
@@ -542,38 +591,137 @@ fn back_to_back_drains_never_starve_a_hook_waiting_for_the_lock() {
         .connection()
         .execute_batch(
             "INSERT INTO sessions(id,agent,project,started_at) VALUES('s','codex','/work/p0',0);
-             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<240000)
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<80000)
              INSERT INTO decisions(ts,session_id,agent,project,event,tool,mode,outcome,reason,gates,payload)
              SELECT 1000000+i,'s','codex','/work/p0','pre_tool_use','Bash','enforce',
                     CASE WHEN i%2 THEN 'error' ELSE 'allow' END,'disk full','[]','{}' FROM n;",
         )
         .unwrap();
     let path = directory.path().join("state.db");
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stopped = stop.clone();
+    let (permit, requested) = std::sync::mpsc::channel::<()>();
+    let (ready, opened) = std::sync::mpsc::channel();
+    let (attempting, attempts) = std::sync::mpsc::channel();
+    let (written, writes) = std::sync::mpsc::channel();
     // Same opener, and so the same 2 s busy timeout, that hooks use.
     let hook = std::thread::spawn(move || {
         let hook = Store::open(path).unwrap();
-        let (mut writes, mut worst) = (0, Duration::ZERO);
-        while !stopped.load(std::sync::atomic::Ordering::Acquire) {
+        ready.send(()).unwrap();
+        let mut count = 0;
+        while requested.recv().is_ok() {
             let started = Instant::now();
-            hook.set_kv("hook.write", &writes.to_string()).unwrap();
-            worst = worst.max(started.elapsed());
-            writes += 1;
-            std::thread::sleep(Duration::from_millis(20));
+            attempting.send(()).unwrap();
+            hook.set_kv("hook.write", &count.to_string()).unwrap();
+            written.send(started.elapsed()).unwrap();
+            count += 1;
         }
-        (writes, worst)
+        count
     });
     let config = loaded("/work/p0", Vec::new());
+    opened.recv_timeout(Duration::from_secs(5)).unwrap();
     let mut calls = 0;
-    while sync(&store, &config, 1_100_000).unwrap() {
+    let mut worst = Duration::ZERO;
+    loop {
+        // Queue a real hook writer behind the lock before starting each drain call.
+        store.connection().execute_batch("BEGIN IMMEDIATE").unwrap();
+        permit.send(()).unwrap();
+        attempts.recv_timeout(Duration::from_secs(5)).unwrap();
+        store.connection().execute_batch("COMMIT").unwrap();
+        let pending = sync(&store, &config, 1_100_000).unwrap();
+        worst = worst.max(writes.recv_timeout(Duration::from_secs(5)).unwrap());
         calls += 1;
+        if !pending {
+            break;
+        }
     }
-    stop.store(true, std::sync::atomic::Ordering::Release);
-    let (writes, worst) = hook
+    drop(permit);
+    let writes = hook
         .join()
         .expect("a hook write failed while the drain ran");
-    assert!(calls > 1 && writes > 10, "calls {calls}, writes {writes}");
+    assert!(calls > 1, "calls {calls}");
+    assert_eq!(writes, calls, "every drain overlaps a queued hook write");
     // Generous: a waiting hook needs one window plus one pause, far below its 2 s timeout.
     assert!(worst < Duration::from_secs(1), "a hook waited {worst:?}");
+}
+
+#[test]
+fn hook_backlog_queues_one_durable_drain_without_processing_the_whole_history() {
+    let (_directory, store) = store();
+    store.connection().execute_batch("INSERT INTO sessions(id,agent,project,started_at) VALUES('backlog','codex','/work/app',0);
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<6000)
+        INSERT INTO decisions(ts,session_id,agent,project,event,mode,outcome,reason,gates,payload)
+        SELECT i,'backlog','codex','/work/app','pre_tool_use','observe','would_deny','gate','[]','{}' FROM n;").unwrap();
+    let config = loaded("/work/app", Vec::new());
+    assert!(sync_for_hook(&store, &config, 6001).unwrap());
+    assert!(sync_for_hook(&store, &config, 6002).unwrap());
+    assert_eq!(
+        by_kind(
+            &list(&store, Path::new("/work/app"), false, 10).unwrap(),
+            "observe_would_deny"
+        )
+        .count,
+        4000
+    );
+    let jobs = crate::jobs::list(&store, false, 10).unwrap();
+    assert_eq!(
+        jobs.len(),
+        1,
+        "a backlog must have one durable background drain"
+    );
+    assert_eq!(jobs[0].kind, "notifications-drain");
+    assert!(!drain_background(&store, 6003).unwrap());
+    assert_eq!(
+        by_kind(
+            &list(&store, Path::new("/work/app"), false, 10).unwrap(),
+            "observe_would_deny"
+        )
+        .count,
+        6000
+    );
+    assert!(!sync_for_hook(&store, &config, 6004).unwrap());
+    // Compare the unchanged bounded window with the new queue glue on identical fixture data.
+    for with_queue in [false, true] {
+        let mut times = Vec::new();
+        for _ in 0..21 {
+            store.connection().execute_batch("UPDATE kv SET value='0' WHERE key='notifications.decision_id'; DELETE FROM jobs WHERE kind='notifications-drain';").unwrap();
+            let start = Instant::now();
+            let pending = if with_queue {
+                sync_for_hook(&store, &config, 6005).unwrap()
+            } else {
+                sync_bounded(
+                    &store,
+                    &config,
+                    6005,
+                    HOOK_BATCH_IDS,
+                    Duration::ZERO,
+                    Duration::ZERO,
+                )
+                .unwrap()
+            };
+            assert!(pending);
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        println!(
+            "notification_window with_queue={with_queue} p50_ms={:.3} p99_ms={:.3}",
+            times[10], times[20]
+        );
+    }
+}
+
+#[test]
+fn notification_windows_skip_deleted_row_id_gaps() {
+    let (_directory, store) = store();
+    store.connection().execute_batch("INSERT INTO sessions(id,agent,project,started_at) VALUES('gap','claude','/work/app',0);
+        INSERT INTO decisions(id,ts,session_id,agent,project,event,mode,outcome,reason,gates,payload)
+        VALUES(1000000,1,'gap','claude','/work/app','pre_tool_use','observe','would_deny','gate','[]','{}');").unwrap();
+    assert!(!sync_for_hook(&store, &loaded("/work/app", Vec::new()), 2).unwrap());
+    assert_eq!(
+        by_kind(
+            &list(&store, Path::new("/work/app"), false, 10).unwrap(),
+            "observe_would_deny"
+        )
+        .count,
+        1
+    );
+    assert!(crate::jobs::list(&store, false, 10).unwrap().is_empty());
 }

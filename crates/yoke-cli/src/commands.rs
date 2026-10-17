@@ -70,6 +70,47 @@ pub fn load_project() -> Result<(Store, LoadedConfig)> {
     Ok((store, loaded))
 }
 
+/// Agent memory scope comes from the hook-recorded session and OS process ancestry.
+pub fn agent_memory_project(store: &Store) -> Result<Option<PathBuf>> {
+    if guard::agent_process_signal().is_none() {
+        return Ok(None);
+    }
+    let session = std::env::var("CODEX_THREAD_ID")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("CODEX_SESSION_ID")
+                .ok()
+                .filter(|value| !value.is_empty())
+        });
+    let agent = if session.is_some() { "codex" } else { "claude" };
+    yoke_core::project::agent_scope(
+        store,
+        agent,
+        session.as_deref(),
+        &yoke_core::process::ancestors(),
+    )
+    .map(Some)
+}
+
+/// Load memory policy from the anchored project for agents and the current directory for humans.
+pub fn load_memory_project() -> Result<(Store, LoadedConfig)> {
+    let home = home()?;
+    let store = open_store(&home)?;
+    let loaded = match agent_memory_project(&store)? {
+        Some(root) => {
+            let anchor = trust::SessionAnchor {
+                dir: root.clone(),
+                root: root.clone(),
+                not_remembered: None,
+            };
+            trust::load_for_event(&store, &anchor, &root, &home)?.loaded
+        }
+        None => config::load_trusted(&store, &std::env::current_dir()?, &home)?,
+    };
+    Ok((store, loaded))
+}
+
 pub fn require_human(action: &str) -> Result<()> {
     if let Some(signal) = guard::agent_process_signal() {
         bail!("{action} requires a human outside an agent tool process ({signal}); run yoke {action} in your own terminal");
@@ -125,7 +166,7 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
             agent,
             json,
         }) => workflow::review(slug, session, agent, json),
-        Some(Cmd::Remember { text, pinned }) => memory::remember(&text, pinned),
+        Some(Cmd::Remember { text, pinned, json }) => memory::remember(&text, pinned, json),
         Some(Cmd::Recall {
             query,
             limit,
@@ -135,6 +176,7 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
         Some(Cmd::Forget { id }) => memory::forget(id),
         Some(Cmd::Share { id }) => memory::share(id),
         Some(Cmd::Memory { command }) => memory::run(command),
+        Some(Cmd::Project { command }) => crate::project::run(command),
         Some(Cmd::Jobs { command, all, json }) => crate::jobs::run(command, all, json),
         Some(Cmd::Preset { command }) => presets::run(command),
         Some(Cmd::Init) => init(),
@@ -436,6 +478,7 @@ fn trust(global: bool) -> Result<()> {
         return Ok(());
     }
     prepared.commit(&store)?;
+    crate::hook::refresh_mode_record(&store, &home, &std::env::current_dir()?)?;
     println!("trust: saved");
     Ok(())
 }
@@ -475,10 +518,8 @@ fn install(
     for change in report.changes {
         println!("file: {}", quote(&change.path.display().to_string()));
         if dry_run {
-            // Changed lines with two lines of context; "-" is removed, "+" is added.
-            for line in
-                crate::preview::change_lines(change.before.as_deref(), change.after.as_deref())
-            {
+            // Only owned hunks are shown; other settings may contain credentials.
+            for line in install::preview_lines(&change) {
                 println!("{line}");
             }
         }

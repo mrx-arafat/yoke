@@ -133,6 +133,27 @@ pub fn execute_bounded(
     timeout: Duration,
     output_cap: usize,
 ) -> io::Result<ProcessOutput> {
+    execute(command, input, timeout, output_cap, false)
+}
+
+/// Execute a display command that may intentionally close stdin without consuming it.
+/// Gates and reviewers must use `execute_bounded`, which requires complete input delivery.
+pub fn execute_bounded_with_optional_stdin(
+    command: &mut Command,
+    input: &[u8],
+    timeout: Duration,
+    output_cap: usize,
+) -> io::Result<ProcessOutput> {
+    execute(command, input, timeout, output_cap, true)
+}
+
+fn execute(
+    command: &mut Command,
+    input: &[u8],
+    timeout: Duration,
+    output_cap: usize,
+    optional_stdin: bool,
+) -> io::Result<ProcessOutput> {
     if timeout.is_zero() || output_cap == 0 || output_cap > 16 * 1024 * 1024 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -201,6 +222,9 @@ pub fn execute_bounded(
                         e.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                     ) => {}
+                Err(e) if optional_stdin && e.kind() == io::ErrorKind::BrokenPipe => {
+                    stdin.take();
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -219,7 +243,7 @@ pub fn execute_bounded(
                 &mut out.stderr_truncated,
             )?;
             out.exit_code = status.code();
-            out.success = status.success() && written == input.len();
+            out.success = status.success() && (optional_stdin || written == input.len());
             break;
         }
         if start.elapsed() >= timeout {
@@ -241,6 +265,28 @@ pub fn execute_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_stdin_accepts_early_close_but_gate_input_stays_mandatory() {
+        let input = vec![b'x'; 256 * 1024];
+        let command = || {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "exec 0<&-; printf display"]);
+            command
+        };
+        let out = execute_bounded_with_optional_stdin(
+            &mut command(),
+            &input,
+            Duration::from_secs(5),
+            1024,
+        )
+        .unwrap();
+        assert!(out.success);
+        assert_eq!(out.stdout, b"display");
+        assert!(!out.timed_out);
+        let strict = execute_bounded(&mut command(), &input, Duration::from_secs(5), 1024);
+        assert!(strict.is_err() || !strict.unwrap().success);
+    }
 
     #[test]
     fn streams_stdin_without_deadlock_and_reports_truncation() {

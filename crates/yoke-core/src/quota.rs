@@ -124,6 +124,7 @@ impl Quota {
     }
 
     fn finish(mut self) -> Option<Self> {
+        self.windows.retain(|w| valid_reset(w, self.observed_at));
         self.windows.sort_by_key(|w| w.window_minutes);
         (!self.windows.is_empty()).then_some(self)
     }
@@ -159,6 +160,9 @@ impl Quota {
     pub fn absorb(&mut self, incoming: &Quota) {
         let mut confirmed = false;
         for w in &incoming.windows {
+            if !valid_reset(w, incoming.observed_at) {
+                continue;
+            }
             confirmed |= self.absorb_window(w.clone());
         }
         if confirmed {
@@ -182,6 +186,7 @@ impl Quota {
                 && self.observed_at >= 0
                 && self.windows.iter().all(|w| w.window_minutes > 0
                     && w.resets_at >= 0
+                    && valid_reset(w, self.observed_at)
                     && w.used_percent.is_finite()
                     && (0.0..=100.0).contains(&w.used_percent)),
             "quota record is out of range"
@@ -210,6 +215,15 @@ impl Quota {
             short_time(binding.resets_at, now, offset_secs)
         ))
     }
+}
+
+// Permit five minutes of source clock skew, never an indefinitely pinned quota window.
+fn valid_reset(window: &Window, observed_at: i64) -> bool {
+    observed_at >= 0
+        && window.window_minutes > 0
+        && window.resets_at >= 0
+        && window.resets_at
+            <= observed_at.saturating_add(i64::from(window.window_minutes) * 60 + 300)
 }
 
 /// `8` for a whole percent, `8.5` otherwise.
@@ -258,6 +272,7 @@ pub fn read_file(path: &Path, agent: &str) -> Result<Option<Quota>> {
 /// Merge a reading into the quota file with one atomic rename. It never creates the state
 /// directory, and skips the write when nothing changed recently. Returns whether it wrote.
 pub fn record_file(path: &Path, incoming: &Quota, now: i64) -> Result<bool> {
+    incoming.clone().checked(&incoming.agent)?;
     let directory = path.parent().context("quota file has no directory")?;
     if !std::fs::symlink_metadata(directory).is_ok_and(|meta| meta.is_dir()) {
         return Ok(false);
@@ -305,6 +320,7 @@ fn load_from(connection: &Connection, agent: &str) -> Result<Option<Quota>> {
 
 /// Merge a reading into the state database inside the caller's transaction.
 pub(crate) fn record_in(connection: &Connection, incoming: &Quota) -> Result<()> {
+    incoming.clone().checked(&incoming.agent)?;
     let current = load_from(connection, &incoming.agent).unwrap_or(None);
     let mut merged = current.clone().unwrap_or_else(|| incoming.clone());
     merged.absorb(incoming);
@@ -319,6 +335,24 @@ pub(crate) fn record_in(connection: &Connection, incoming: &Quota) -> Result<()>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reset_times_cannot_outlive_the_observed_window_and_clock_slack() {
+        let at = 10_000;
+        let payload = |reset| serde_json::json!({"rate_limits":{"five_hour":{"used_percentage":5,"resets_at":reset}}});
+        assert!(super::Quota::from_claude(&payload(at + 18_300), at).is_some());
+        assert!(super::Quota::from_claude(&payload(at + 18_301), at).is_none());
+        let forged = super::Quota {
+            agent: "claude".into(),
+            observed_at: at,
+            plan: None,
+            windows: vec![super::Window {
+                window_minutes: 300,
+                used_percent: 5.0,
+                resets_at: i64::MAX,
+            }],
+        };
+        assert!(forged.checked("claude").is_err());
+    }
     use super::*;
     use serde_json::json;
 
@@ -337,7 +371,7 @@ mod tests {
 
     #[test]
     fn claude_and_codex_payloads_become_labelled_windows_and_bad_windows_are_dropped() {
-        let quota = claude((8.0, 1_792_179_600), (63.0, 1_792_609_200), NOW);
+        let quota = claude((8.0, NOW + 3_600), (63.0, 1_792_609_200), NOW);
         let labels: Vec<_> = quota.windows.iter().map(Window::label).collect();
         assert_eq!(labels, ["5h", "7d"]);
         assert_eq!(quota.windows[1].remaining_percent(), 37.0);

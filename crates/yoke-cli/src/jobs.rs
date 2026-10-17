@@ -224,6 +224,9 @@ fn work() -> Result<()> {
             crate::retention::RETENTION_JOB => {
                 crate::retention::run_job(&store, &job, timestamp()?)
             }
+            yoke_core::notifications::HISTORY_JOB => {
+                yoke_core::notifications::drain_background(&store, timestamp()?)
+            }
             other => Err(Permanent(format!("unknown job kind {other}")).into()),
         };
         match result {

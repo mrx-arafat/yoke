@@ -20,17 +20,19 @@ static SENSITIVE_KEY: LazyLock<Regex> =
 static PEM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)-----BEGIN [A-Z0-9 ]+-----.*?(?:-----END [A-Z0-9 ]+-----|\z)").unwrap()
 });
-// A prefix must start a word, so `ask-codex` and `<task-notification>` are not `sk-` keys.
+// Distinctive credential prefixes are masked even when embedded in another word.
+// The short `sk-` prefix needs a word boundary so ordinary names like `ask-codex` survive.
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"(?-u:\b)(?:ghp_|gho_|ghu_|ghr_|ghs_|github_pat_|sk-|sk_live_|rk_live_|pk_live_|xoxb-|xoxp-|xoxa-|xoxs-|xoxr-|xapp-|xoxe(?:\.xox[a-z])?-|glpat-|shp(?:at|ca|pa|ss)_|dop_v1_)[A-Za-z0-9_-]+",
+        r"(?:ghp_|gho_|ghu_|ghr_|ghs_|github_pat_|sk_live_|rk_live_|pk_live_|xoxb-|xoxp-|xoxa-|xoxs-|xoxr-|xapp-|xoxe(?:\.xox[a-z])?-|glpat-|shp(?:at|ca|pa|ss)_|dop_v1_)[A-Za-z0-9_-]+",
+        r"|(?-u:\b)sk-[A-Za-z0-9_-]+",
         r"|AKIA[A-Za-z0-9]{16}",
-        r"|(?-u:\b)AIza[A-Za-z0-9_-]{30,}",
-        r"|(?-u:\b)ya29\.[A-Za-z0-9_-]{20,}",
-        r"|(?-u:\b)npm_[A-Za-z0-9]{30,}",
-        r"|(?-u:\b)hf_[A-Za-z0-9]{20,}",
-        r"|(?-u:\b)SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",
-        r"|(?-u:\b)eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*",
+        r"|AIza[A-Za-z0-9_-]{30,}",
+        r"|ya29\.[A-Za-z0-9_-]{20,}",
+        r"|npm_[A-Za-z0-9]{30,}",
+        r"|hf_[A-Za-z0-9]{20,}",
+        r"|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",
+        r"|eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*",
     ))
     .unwrap()
 });

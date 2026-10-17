@@ -4,7 +4,6 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use yoke_core::engine::execute_bounded;
@@ -69,7 +68,8 @@ pub(crate) fn branch(root: &Path) -> Option<String> {
 pub(crate) fn changed_files(root: &Path, timeout: Duration) -> Option<usize> {
     git_dir(root)?;
     let output = execute_bounded(
-        Command::new("git")
+        yoke_core::process::git()
+            .ok()?
             .arg("-C")
             .arg(root)
             // Never take the index lock: a watcher must not race the user's own git commands.

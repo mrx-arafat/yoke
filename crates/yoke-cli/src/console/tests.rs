@@ -69,12 +69,24 @@ fn memory_actions_scope_ids_and_undo_only_once() {
     )
     .unwrap();
     assert!(memory::get(&store, m.id).unwrap().unwrap().pinned);
+    apply(
+        &mut actions,
+        serde_json::json!({"action":"share","id":m.id}),
+    )
+    .unwrap();
     let result = apply(
         &mut actions,
         serde_json::json!({"action":"forget","id":m.id}),
     )
     .unwrap();
     assert!(memory::get(&store, m.id).unwrap().is_none());
+    assert!(result["data"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(".yoke/knowledge.md"));
+    assert!(std::fs::read_to_string(project.join(".yoke/knowledge.md"))
+        .unwrap()
+        .contains("Keep source provenance"));
     let undo = serde_json::json!({"action":"undo-forget","ticket":result["data"]["undo"]});
     apply(&mut actions, undo.clone()).unwrap();
     assert_eq!(
@@ -800,7 +812,8 @@ fn approval_ticket_binds_to_the_displayed_header_and_current_revision() {
     assert!(
         refused
             .to_string()
-            .contains("plan header changed after it was displayed"),
+            .contains("plan header or check inputs changed after they were displayed")
+            && refused.to_string().contains("run yoke plan approve again"),
         "{refused:#}"
     );
     assert_eq!(plan::get(&store, &project, "bind").unwrap().state, "draft");

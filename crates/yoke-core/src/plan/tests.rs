@@ -5,6 +5,29 @@ use std::process::Command;
 use super::*;
 use crate::store::DecisionRecord;
 
+#[test]
+fn declared_check_inputs_are_bound_to_human_approval() {
+    let f = Fixture::new();
+    fs::write(f.root.join("check.sh"), "exit 0\n").unwrap();
+    f.plan(
+        "title = 'Inputs'\n[[check]]\nname = 'script'\nrun = 'sh check.sh'\ninputs = ['check.sh']",
+    );
+    let prepared = prepare_approval(&f.store, &f.root, "example").unwrap();
+    assert!(prepared.header.contains("check.sh"));
+    assert!(prepared.header.contains(&files::hash(b"exit 0\n")));
+    fs::write(f.root.join("check.sh"), "exit 1\n").unwrap();
+    assert!(approve(&f.store, &prepared).is_err());
+    let prepared = prepare_approval(&f.store, &f.root, "example").unwrap();
+    approve(&f.store, &prepared).unwrap();
+    start(&f.store, &f.root, "example", "fixture-session").unwrap();
+    fs::write(f.root.join("check.sh"), "touch should-not-run\n").unwrap();
+    assert!(check(&f.store, &f.root, "example", None).is_err());
+    assert!(!f.root.join("should-not-run").exists());
+    fs::remove_file(f.root.join("check.sh")).unwrap();
+    std::os::unix::fs::symlink("tracked.txt", f.root.join("check.sh")).unwrap();
+    assert!(prepare_approval(&f.store, &f.root, "example").is_err());
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     root: PathBuf,

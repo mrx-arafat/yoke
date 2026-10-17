@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{ensure, Context, Result};
 use serde_json::Value;
 use yoke_core::config::{self, Mode};
-use yoke_core::engine::{evaluate_with_context, EvaluationContext};
+use yoke_core::engine::{evaluate_for_agent_with_context, EvaluationContext};
 use yoke_core::event::Agent;
 use yoke_core::redact::redact;
 use yoke_core::store::{DecisionRecord, Store};
@@ -17,6 +17,7 @@ use yoke_core::{memory, notifications, plan, stop_guard, trust, wire, AgentEvent
 use crate::commands;
 
 mod mode_cache;
+mod provenance;
 
 /// A line for the person watching stderr. Unlike `eprintln!` it never panics: a stderr pipe the
 /// agent has already closed would otherwise end the hook with exit 101 before it printed its
@@ -159,7 +160,7 @@ fn record_overrun(kind: EventKind, reason: &str, limit: Duration, enforce: bool)
     };
     let mut row = context.row;
     row.reason = Some(reason.into());
-    row.payload = String::new();
+    row.payload = provenance::payload(&mut serde_json::json!({}));
     row.gates = serde_json::json!([{"name": "watchdog", "result": "timeout", "ms": limit.as_millis(), "exit_code": null}]);
     let result = commands::open_store(&context.home).and_then(|store| {
         if enforce && kind == EventKind::Stop && !row.session_id.is_empty() {
@@ -416,8 +417,10 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
         "hook payload exceeds 1 MiB, more than Yoke can check; ask the agent to use smaller tool inputs, for example a large file written in several smaller edits"
     );
     // Some producers put a byte order mark in front of the JSON; it carries no meaning here.
-    let raw: Value = serde_json::from_slice(strip_bom(&bytes)).context("parse hook JSON object")?;
+    let mut raw: Value =
+        serde_json::from_slice(strip_bom(&bytes)).context("parse hook JSON object")?;
     let ev: AgentEvent = serde_json::from_value(raw.clone()).context("parse hook event fields")?;
+    state.row.payload = provenance::payload(&mut raw);
     state.row.session_id = ev.session_id.clone();
     state.row.tool = ev.tool_name.clone();
     STOP_ACTIVE.store(stop_hook_active(&raw), Ordering::SeqCst);
@@ -465,7 +468,11 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
     state.mode = Some(loaded.config.mode);
     publish(state.mode);
     state.row.mode = loaded.config.mode.as_str().into();
-    state.row.project = loaded.project_root.display().to_string();
+    let project_available = loaded.project_root.to_str().is_some();
+    state.row.project = loaded.project_root.to_str().unwrap_or("").to_owned();
+    if !project_available {
+        say!("yoke: project scope unavailable because the project path is not UTF-8; rename the project directory using UTF-8 names to enable project policy, plans and memory; trusted parent and global policy still apply");
+    }
     state.cap = loaded.config.log.payload_cap;
     let kind = EventKind::parse(event).with_context(|| format!("unknown hook event {event}"))?;
     state.row.event = kind.as_str().into();
@@ -496,7 +503,8 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
     }
     // Accounting never decides or errors an event: a bad or oversized transcript warns and
     // the trusted gates and stop guard still run.
-    if !ev.session_id.is_empty()
+    if project_available
+        && !ev.session_id.is_empty()
         && matches!(
             kind,
             EventKind::Stop | EventKind::SessionEnd | EventKind::PreCompact
@@ -514,7 +522,7 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
             }
         }
     }
-    let outcome = evaluate_with_context(
+    let outcome = evaluate_for_agent_with_context(
         &loaded.config,
         kind,
         &ev,
@@ -524,6 +532,7 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
             policy_root,
             home: home.clone(),
         },
+        agent,
     );
     state.row.gates = serde_json::to_value(&outcome.gates)?;
     if outcome.error {
@@ -555,13 +564,14 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
     } else {
         None
     };
-    let atomic_stop = kind == EventKind::Stop && !ev.session_id.is_empty();
-    if !ev.session_id.is_empty() && !atomic_stop {
+    let atomic_stop = project_available && kind == EventKind::Stop && !ev.session_id.is_empty();
+    if project_available && !ev.session_id.is_empty() && !atomic_stop {
         if let Err(error) = memory::record_hook_facts(store, &state.row, &raw) {
             warn_advisory(&home, "memory facts were not saved", &error);
         }
     }
-    if loaded.config.mode == Mode::Enforce
+    if project_available
+        && loaded.config.mode == Mode::Enforce
         && !outcome.blocked()
         && matches!(kind, EventKind::SessionStart | EventKind::UserPromptSubmit)
     {
@@ -586,7 +596,8 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
         }
         output = wire::context(agent, kind, &context);
     }
-    if kind != EventKind::SessionStart
+    if project_available
+        && kind != EventKind::SessionStart
         && !ignored.is_empty()
         && store
             .claim_interval(IGNORED_CONFIG_NOTICE, state.row.ts, IGNORED_CONFIG_INTERVAL)
@@ -618,15 +629,18 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
                 }
             );
         }
-        if let Err(error) = schedule_update(store, &home, state.row.ts) {
+        if let Err(error) = schedule_update(store, &home, state.row.ts, loaded.config.update.check)
+        {
             warn_advisory(&home, "update check scheduling failed", &error);
         }
         // The statusline only counts materialized rows, so this is what lets it flag a new
         // untrusted or stale configuration; the bounded call never sleeps.
-        if let Err(error) = notifications::sync_for_hook(store, &loaded, now) {
-            warn_advisory(&home, "notification sync failed", &error);
+        if project_available {
+            if let Err(error) = notifications::sync_for_hook(store, &loaded, now) {
+                warn_advisory(&home, "notification sync failed", &error);
+            }
         }
-        if loaded.config.memory.digest && !ev.session_id.is_empty() {
+        if project_available && loaded.config.memory.digest && !ev.session_id.is_empty() {
             // Facts of sessions whose end hook never ran are digested now; `tick` starts the worker.
             if let Err(error) = crate::memory::schedule_orphan_digests(
                 store,
@@ -700,7 +714,8 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
             Err(error) => warn_advisory(&home, "audit decision was not saved", &error),
         }
     }
-    if state.persisted
+    if project_available
+        && state.persisted
         && loaded.config.memory.digest
         && !ev.session_id.is_empty()
         && ((agent == Agent::Claude && kind == EventKind::SessionEnd)
@@ -751,8 +766,16 @@ pub(crate) fn state_hint(detail: &str) -> &'static str {
         "another process holds ~/.yoke/state.db locked: find it with `lsof ~/.yoke/state.db`, or wait for it to finish and retry"
     } else if has(&["disk is full", "No space left"]) {
         "free disk space in your own terminal"
-    } else {
+    } else if has(&[
+        "Permission denied",
+        "Read-only file system",
+        "I/O error",
+        "unable to open database",
+        "database or disk is full",
+    ]) {
         "check free disk space and filesystem permissions in your own terminal"
+    } else {
+        "run `yoke config` in your own terminal and resolve the policy diagnostic above before retrying"
     }
 }
 
@@ -950,14 +973,32 @@ pub(crate) fn diagnostic(message: &str) {
     say!("{}", redact(message));
 }
 
-fn schedule_update(store: &Store, home: &Path, timestamp: i64) -> Result<()> {
-    if !store.claim_interval(UPDATE_ATTEMPT, timestamp, UPDATE_INTERVAL)? {
+fn schedule_update(store: &Store, home: &Path, timestamp: i64, enabled: bool) -> Result<()> {
+    if !enabled || !store.claim_interval(UPDATE_ATTEMPT, timestamp, UPDATE_INTERVAL)? {
         return Ok(());
     }
+    update_command(home)?
+        .spawn()
+        .context("start bounded daily update check")?;
+    Ok(())
+}
+
+/// Refresh the same fallback record hooks use immediately after a human approves policy.
+pub(crate) fn refresh_mode_record(store: &Store, home: &Path, cwd: &Path) -> Result<()> {
+    let loaded = config::load_trusted(store, cwd, home)?;
+    if let Some(key) = mode_cache::project_key(&loaded.project_root) {
+        mode_cache::remember(home, &key, loaded.config.mode, now());
+    }
+    Ok(())
+}
+
+fn update_command(home: &Path) -> Result<Command> {
     let errors = yoke_core::private::open_append(&home.join(".yoke/error.log"))?;
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(["update", "--check"])
+        .current_dir(home)
+        .env("HOME", home)
         .env("YOKE_OFF", "1")
         .env(BACKGROUND, "1")
         .stdin(Stdio::null())
@@ -968,15 +1009,58 @@ fn schedule_update(store: &Store, home: &Path, timestamp: i64) -> Result<()> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    command
-        .spawn()
-        .context("start bounded daily update check")?;
-    Ok(())
+    Ok(command)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trusted_mode_refresh_updates_the_fallback_before_another_hook() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(home.join(".yoke")).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        let store = Store::open(":memory:").unwrap();
+        let key = mode_cache::project_key(&project).unwrap();
+        mode_cache::remember(&home, &key, Mode::Observe, 1);
+        std::fs::write(project.join("yoke.toml"), "mode='enforce'").unwrap();
+        trust::prepare_project(&store, &project)
+            .unwrap()
+            .commit(&store)
+            .unwrap();
+        assert_eq!(
+            mode_cache::recall(&home, &key),
+            mode_cache::Recall::Observe(1)
+        );
+        refresh_mode_record(&store, &home, &project).unwrap();
+        assert_eq!(mode_cache::recall(&home, &key), mode_cache::Recall::Enforce);
+    }
+
+    #[test]
+    fn disabled_update_check_creates_no_job_or_interval_and_child_uses_chosen_home() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(":memory:").unwrap();
+        schedule_update(&store, home.path(), 123, false).unwrap();
+        assert_eq!(store.get_kv(UPDATE_ATTEMPT).unwrap(), None);
+        assert!(!home.path().join(".yoke").exists());
+        std::fs::create_dir(home.path().join(".yoke")).unwrap();
+        let command = update_command(home.path()).unwrap();
+        assert_eq!(command.get_current_dir(), Some(home.path()));
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "HOME" && value == Some(home.path().as_os_str())));
+    }
+
+    #[test]
+    fn policy_errors_do_not_suggest_storage_repairs() {
+        assert!(!state_hint("project path must be UTF-8").contains("disk"));
+        assert!(!state_hint("unknown field in trusted config").contains("permissions"));
+        assert!(state_hint("Permission denied (os error 13)").contains("permissions"));
+        assert!(state_hint("database is locked").contains("lsof"));
+    }
 
     #[test]
     fn deadline_fits_the_gates_own_timeouts_up_to_the_agent_ceiling() {

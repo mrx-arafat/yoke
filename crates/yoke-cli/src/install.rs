@@ -9,12 +9,18 @@ use serde_json::{json, Value};
 
 #[path = "install/drift.rs"]
 pub(crate) mod drift;
+#[path = "install/executable.rs"]
+mod executable;
 #[path = "install/features.rs"]
 mod features;
 #[path = "install/files.rs"]
 mod files;
 #[path = "install/json.rs"]
 mod json;
+#[path = "install/preview.rs"]
+mod preview;
+#[path = "install/receipt.rs"]
+mod receipt;
 #[path = "install/status.rs"]
 mod status;
 #[path = "install/statusline.rs"]
@@ -103,17 +109,26 @@ pub struct InstallReport {
     pub warnings: Vec<String>,
 }
 
+/// Preview only changed Yoke hooks, feature flags and statusline ownership.
+pub fn preview_lines(change: &FileChange) -> Vec<String> {
+    preview::lines(change)
+}
+
 #[derive(Serialize, Deserialize)]
 struct OwnedHook {
     event: String,
     group: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     previous_group: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    preexisting: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Receipt {
     version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hashes: Option<receipt::Hashes>,
     agent: Agent,
     executable: PathBuf,
     hooks: FileChange,
@@ -233,10 +248,10 @@ fn read_receipt(options: &InstallOptions, agent: Agent) -> Result<Option<Receipt
     let Some(raw) = files::read(&receipt_path(options, agent))? else {
         return Ok(None);
     };
-    let receipt: Receipt =
+    let mut receipt: Receipt =
         serde_json::from_str(&raw).context("invalid installation ownership receipt")?;
     ensure!(
-        receipt.version == 1 && receipt.agent == agent,
+        matches!(receipt.version, 1 | 2) && receipt.agent == agent,
         "unsupported installation receipt"
     );
     ensure!(
@@ -291,6 +306,7 @@ fn read_receipt(options: &InstallOptions, agent: Agent) -> Result<Option<Receipt
             "invalid previous owned command in installation receipt"
         );
     }
+    receipt::hydrate(&mut receipt, &options.state_dir)?;
     Ok(Some(receipt))
 }
 
@@ -401,11 +417,16 @@ fn prepare(options: &InstallOptions, agent: Agent, warnings: &mut Vec<String>) -
             .as_array_mut()
             .unwrap();
         if !groups.contains(&group) && !groups.contains(&unlabeled_group(&group)) {
+            let preexisting = groups
+                .iter()
+                .map(|group| receipt::hash(&group.to_string()))
+                .collect();
             groups.push(group.clone());
             added.push(OwnedHook {
                 event: event.to_owned(),
                 group,
                 previous_group: None,
+                preexisting,
             });
         }
     }
@@ -428,6 +449,7 @@ fn prepare(options: &InstallOptions, agent: Agent, warnings: &mut Vec<String>) -
     };
     Ok(Receipt {
         version: 1,
+        hashes: None,
         agent,
         executable: options.executable.clone(),
         hooks: FileChange {
@@ -461,12 +483,20 @@ fn change(report: &mut InstallReport, file: FileChange) {
 /// Plan or install only documented local hooks; all filesystem locations are explicit.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     validate(options)?;
+    let normalized = InstallOptions {
+        executable: executable::canonical(&options.executable)?,
+        ..options.clone()
+    };
+    let options = &normalized;
     let mut report = InstallReport::default();
+    report
+        .warnings
+        .extend(executable::warnings(&options.executable));
     let mut receipts = Vec::new();
     for agent in selected(options) {
         if let Some(mut receipt) = read_receipt(options, agent)? {
             ensure!(
-                receipt.executable == options.executable,
+                receipt.executable == options.executable || receipt.executable.canonicalize().ok().as_ref() == Some(&options.executable),
                 "executable changed; uninstall before reinstalling: the {name} hooks run {}, not {}; run \"{}\" uninstall --agent {name} first, then install again (install.sh does this for you)",
                 receipt.executable.display(),
                 options.executable.display(),
@@ -480,7 +510,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
                     &[&options.claude_settings],
                 ));
             }
-            let mut receipt_changed = label_receipt(&mut receipt)?;
+            let mut receipt_changed = label_receipt(&mut receipt)? || receipt.version == 1;
             for file in std::iter::once(&receipt.hooks).chain(receipt.config.iter()) {
                 let current = files::read(&file.path)?;
                 if current == file.before {
@@ -628,7 +658,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
             }
             if receipt_changed {
                 let path = receipt_path(options, agent);
-                let serialized = serde_json::to_string_pretty(&receipt)?;
+                let serialized = receipt::serialize(&receipt, &report.changes)?;
                 files::check_size(&serialized)?;
                 receipts.push(FileChange {
                     before: files::read(&path)?,
@@ -642,7 +672,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
             if let Some(config) = &receipt.config {
                 change(&mut report, config.clone());
             }
-            let serialized = serde_json::to_string_pretty(&receipt)?;
+            let serialized = receipt::serialize(&receipt, &report.changes)?;
             files::check_size(&serialized)?;
             receipts.push(FileChange {
                 path: receipt_path(options, agent),
@@ -650,7 +680,12 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
                 after: Some(serialized),
             });
         }
-        if agent == Agent::Codex {
+        if agent == Agent::Codex
+            && report
+                .changes
+                .iter()
+                .any(|change| change.path == options.codex_hooks)
+        {
             report.warnings.push("Codex requires review and trust of new hooks via /hooks; installation does not grant hook trust. Local hooks do not cover hosted tools or cloud orchestration.".into());
         }
     }
@@ -725,7 +760,13 @@ fn remove_hooks(receipt: &Receipt, current: Option<String>) -> Result<FileChange
     if let Some(owned) = &receipt.statusline {
         statusline::restore(&mut value, owned);
     }
-    let after = Some(json::render(raw, &value)?);
+    let after = if receipt.hooks.before.is_none()
+        && value.as_object().is_some_and(|object| object.is_empty())
+    {
+        None
+    } else {
+        Some(json::render(raw, &value)?)
+    };
     Ok(FileChange {
         path: receipt.hooks.path.clone(),
         before: current,
@@ -742,6 +783,9 @@ fn remove_handler(groups: &mut [Value], owned: &OwnedHook, original: &Value) -> 
         if original["hooks"][&owned.event]
             .as_array()
             .is_some_and(|old| old.contains(group))
+            || owned
+                .preexisting
+                .contains(&receipt::hash(&group.to_string()))
         {
             continue;
         }

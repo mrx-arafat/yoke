@@ -8,8 +8,29 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use yoke_core::{memory, store::Store, trust};
 
+fn isolated_command(bin: &Path, home: &Path) -> Command {
+    let home = home.canonicalize().expect("fixture home must exist");
+    let temporary = std::env::temp_dir().canonicalize().unwrap();
+    assert!(
+        home.starts_with(&temporary) && home != temporary,
+        "fixture HOME must be inside a temporary directory"
+    );
+    let curl = home.parent().unwrap().join(".fixture-curl");
+    if !curl.exists() {
+        fs::write(&curl, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut command = Command::new(bin);
+    command
+        .env("HOME", &home)
+        .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env("YOKE_CURL", curl);
+    command
+}
+
 fn hook(home: &Path, project: &Path, bin: &Path, event: &str, payload: &Value) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_yoke"))
+    let mut child = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), home)
         .args(["run-hook", event, "--agent", "claude"])
         .env("HOME", home)
         .env("PATH", bin)
@@ -36,7 +57,7 @@ fn hook(home: &Path, project: &Path, bin: &Path, event: &str, payload: &Value) -
 }
 
 fn jobs(home: &Path, project: &Path) -> Vec<Value> {
-    let output = Command::new(env!("CARGO_BIN_EXE_yoke"))
+    let output = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), home)
         .args(["jobs", "--all", "--json"])
         .env("HOME", home)
         .current_dir(project)

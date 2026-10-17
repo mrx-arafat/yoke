@@ -19,7 +19,11 @@ pub enum PlanCommand {
         json: bool,
     },
     /// List this project's persisted plans.
-    List,
+    List {
+        /// Print full plan records and their bound sessions as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show a plan's tasks, requirements, feedback and evidence, or list plans.
     Status {
         /// Plan to show; omit it to list every plan.
@@ -236,21 +240,50 @@ pub fn run(command: PlanCommand) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string(&row)?);
             } else {
-                print!("{}", render_new(&row, plan::has_head(project)));
+                let has_head = plan::has_head(project);
+                let mut output = render_new(&row, has_head);
+                if !has_head {
+                    let git = yoke_core::process::git()?
+                        .current_dir(project)
+                        .args(["rev-parse", "--is-bare-repository"])
+                        .output()?;
+                    let advice = if !git.status.success() {
+                        "This directory is not a Git repository; run `git init` and make an initial commit first (set git user.name and user.email before committing)"
+                    } else if git.stdout.starts_with(b"true") {
+                        "This is a bare Git repository; use a working clone or worktree and make an initial commit there before reviewing a plan"
+                    } else {
+                        plan::NO_HEAD_ADVICE
+                    };
+                    output = output.replace(plan::NO_HEAD_ADVICE, advice);
+                }
+                print!("{output}");
             }
         }
         PlanCommand::Status {
             slug: None,
             json: true,
-        } => println!("{}", serde_json::to_string(&plan::list(&store, project)?)?),
-        PlanCommand::List | PlanCommand::Status { slug: None, .. } => {
+        }
+        | PlanCommand::List { json: true } => {
+            let sessions = plan::bound_sessions(&store, project)?;
+            let rows = plan::list(&store, project)?
+                .iter()
+                .map(|row| record_with_session(row, &sessions))
+                .collect::<Result<Vec<_>>>()?;
+            println!("{}", serde_json::to_string(&rows)?);
+        }
+        PlanCommand::List { json: false } | PlanCommand::Status { slug: None, .. } => {
             let plans = plan::list(&store, project)?;
-            println!("plans[{}]{{slug,state,file}}:", plans.len());
+            let sessions = plan::bound_sessions(&store, project)?;
+            println!("plans[{}]{{slug,state,session,file}}:", plans.len());
             for row in plans {
                 println!(
-                    "  {},{},{}",
+                    "  {},{},{},{}",
                     commands::quote(&row.slug),
                     row.state,
+                    sessions
+                        .get(&row.id)
+                        .map(|s| commands::quote(s))
+                        .unwrap_or_else(|| "none".into()),
                     commands::quote(&row.file)
                 );
             }
@@ -261,9 +294,18 @@ pub fn run(command: PlanCommand) -> Result<()> {
         } => {
             let detail = plan::detail(&store, project, &slug)?;
             if json {
-                println!("{}", serde_json::to_string(&detail)?);
+                let mut value = serde_json::to_value(&detail)?;
+                value["session"] = serde_json::to_value(
+                    plan::bound_sessions(&store, project)?.get(&detail.plan.id),
+                )?;
+                println!("{}", serde_json::to_string(&value)?);
             } else {
-                status(&detail);
+                status(
+                    &detail,
+                    plan::bound_sessions(&store, project)?
+                        .get(&detail.plan.id)
+                        .map(String::as_str),
+                );
             }
         }
         PlanCommand::Validate { slug, agent, json } => {
@@ -275,7 +317,7 @@ pub fn run(command: PlanCommand) -> Result<()> {
                 &store,
                 project,
                 &slug,
-                &mut review::command(reviewer, loaded.config.review.models.get(reviewer.as_str())),
+                &mut review::command(reviewer, loaded.config.review.models.get(reviewer.as_str()))?,
                 std::time::Duration::from_secs(600),
             )?;
             if json {
@@ -405,12 +447,9 @@ pub fn run(command: PlanCommand) -> Result<()> {
         )?,
         PlanCommand::Approve { slug, json } => {
             let prepared = plan::prepare_approval(&store, project, &slug)?;
-            println!(
-                "plan: {}\nheader: {}\ndigest: {}",
-                commands::quote(&slug),
-                commands::quote(&prepared.header),
-                prepared.digest
-            );
+            println!("plan: {}", commands::quote(&slug));
+            print!("{}", render_approval_header(&prepared.header));
+            println!("digest: {}", prepared.digest);
             print_feedback("open_feedback", &prepared.open_feedback);
             if commands::confirm(&format!("approve {slug}"))? {
                 let approved = plan::approve(&store, &prepared)?;
@@ -703,6 +742,39 @@ fn render_new(record: &plan::PlanRecord, has_head: bool) -> String {
 /// Longest tail of a failed check's output a table row shows.
 const OUTPUT_TAIL: usize = 160;
 
+fn record_with_session(
+    record: &plan::PlanRecord,
+    sessions: &std::collections::BTreeMap<i64, String>,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(record)?;
+    value["session"] = serde_json::to_value(sessions.get(&record.id))?;
+    Ok(value)
+}
+
+fn render_approval_header(header: &str) -> String {
+    let mut escaped = 0;
+    let mut text = String::from("header:\n");
+    // Only LF is structural. CR and Unicode line separators must remain visible data.
+    for line in header.split('\n') {
+        text.push_str("  ");
+        for c in line.chars() {
+            if c.is_ascii_graphic() || c == ' ' {
+                // A literal backslash must not impersonate an escaped control character.
+                if c == '\\' {
+                    text.push('\\');
+                }
+                text.push(c);
+            } else {
+                escaped += 1;
+                text.extend(c.escape_default());
+            }
+        }
+        text.push('\n');
+    }
+    text.push_str(&format!("escaped_characters: {escaped}\n"));
+    text
+}
+
 /// A plan after a state change: the full record with `--json`, a compact text view otherwise.
 fn print_record(
     record: &plan::PlanRecord,
@@ -945,7 +1017,7 @@ fn render_review(slug: &str, report: &review::ReviewReport) -> String {
 }
 
 /// AXI text view of one plan; `--json` carries every field and the plan body.
-fn status(detail: &plan::PlanDetail) {
+fn status(detail: &plan::PlanDetail, session: Option<&str>) {
     let plan = &detail.plan;
     let progress = &detail.progress;
     let done = progress
@@ -989,6 +1061,12 @@ fn status(detail: &plan::PlanDetail) {
     println!("plan:");
     println!("  slug: {}", commands::quote(&plan.slug));
     println!("  state: {}", plan.state);
+    println!(
+        "  session: {}",
+        session
+            .map(commands::quote)
+            .unwrap_or_else(|| "none".into())
+    );
     println!("  revision: {}", plan.revision);
     println!("  file: {}", commands::quote(&plan.file));
     println!("  tasks: {done}/{} done", progress.tasks.len());
@@ -1129,6 +1207,22 @@ fn status(detail: &plan::PlanDetail) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_header_preserves_lines_and_exposes_hidden_characters() {
+        let shown = render_approval_header(
+            "title = 'safe'\nrun = 'echo \u{202e}\t\r\u{1b}'\nliteral = '\\u{202e}'",
+        );
+        assert!(
+            shown.contains("header:\n  title = 'safe'\n  run = 'echo \\u{202e}\\t\\r\\u{1b}'\n"),
+            "{shown}"
+        );
+        assert!(shown.contains("literal = '\\\\u{202e}'"), "{shown}");
+        assert!(shown.ends_with("escaped_characters: 4\n"), "{shown}");
+        assert!(shown
+            .chars()
+            .all(|c| c == '\n' || c.is_ascii_graphic() || c == ' '));
+    }
 
     fn record() -> plan::PlanRecord {
         plan::PlanRecord {

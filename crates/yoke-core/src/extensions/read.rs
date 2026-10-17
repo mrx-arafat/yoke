@@ -1,8 +1,8 @@
 //! Bounded, link-aware file access and command resolution without executing anything.
 
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use super::{Note, OUTSIDE_LINK};
@@ -19,6 +19,7 @@ const BUILTINS: &[&str] = &[
 pub(super) struct Reader {
     roots: Vec<PathBuf>,
     pub(super) notes: Vec<Note>,
+    remaining_entries: usize,
 }
 
 impl Reader {
@@ -26,6 +27,7 @@ impl Reader {
         let mut reader = Self {
             roots: Vec::new(),
             notes: Vec::new(),
+            remaining_entries: MAX_FILES,
         };
         for root in roots {
             if fs::symlink_metadata(root).is_ok_and(|meta| meta.file_type().is_symlink()) {
@@ -81,7 +83,16 @@ impl Reader {
             return None;
         }
         let mut bytes = Vec::new();
-        if let Err(error) = File::open(path).and_then(|file| file.take(cap).read_to_end(&mut bytes))
+        if let Err(error) = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .and_then(|file| {
+                if !file.metadata()?.is_file() {
+                    return Err(std::io::Error::other("not a regular file"));
+                }
+                file.take(cap).read_to_end(&mut bytes)
+            })
         {
             self.note(path, format!("unreadable: {error}"));
             return None;
@@ -104,9 +115,20 @@ impl Reader {
     /// Sorted direct children; a missing directory has none.
     pub(super) fn entries(&mut self, dir: &Path) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = match fs::read_dir(dir) {
-            Ok(entries) => entries
-                .filter_map(|entry| Some(entry.ok()?.path()))
-                .collect(),
+            Ok(entries) => {
+                let mut paths = Vec::new();
+                for entry in entries {
+                    if self.remaining_entries == 0 {
+                        self.note(dir, "stopped after 2000 directory entries");
+                        break;
+                    }
+                    self.remaining_entries -= 1;
+                    if let Ok(entry) = entry {
+                        paths.push(entry.path());
+                    }
+                }
+                paths
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
             Err(error) => {
                 self.note(dir, format!("unreadable: {error}"));

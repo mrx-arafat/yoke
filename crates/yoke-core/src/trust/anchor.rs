@@ -193,6 +193,26 @@ mod tests {
     }
 
     #[test]
+    fn stale_nested_policy_and_knowledge_raise_notifications_for_the_session_project() {
+        let f = Fixture::new();
+        let anchor = f.start("nested-notifications", &f.project);
+        let nested = f.project.join("sub");
+        fs::create_dir_all(nested.join(".yoke")).unwrap();
+        fs::write(nested.join(".yoke/knowledge.md"), "Approved knowledge\n").unwrap();
+        f.trust(&nested, "mode='enforce'");
+        fs::write(nested.join("yoke.toml"), "mode='observe'").unwrap();
+        fs::write(nested.join(".yoke/knowledge.md"), "Changed knowledge\n").unwrap();
+        let (loaded, _) = f.event(&anchor, &nested);
+        crate::notifications::sync(&f.store, &loaded, 1).unwrap();
+        let rows = crate::notifications::list(&f.store, &f.project, false, 100).unwrap();
+        assert_eq!(
+            rows.iter().filter(|row| row.kind == "config_stale").count(),
+            2
+        );
+        assert_eq!(loaded.config.mode, Mode::Enforce);
+    }
+
+    #[test]
     fn no_cwd_an_event_reports_moves_the_trusted_policy_or_the_project() {
         let f = Fixture::new();
         let anchor = f.start("s", &f.project);

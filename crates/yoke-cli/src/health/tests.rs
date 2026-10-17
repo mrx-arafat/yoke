@@ -3,6 +3,42 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
+#[test]
+fn health_reports_group_and_other_access_without_changing_permissions() {
+    let (dir, options) = fixture();
+    let state = dir.path().join(".yoke");
+    fs::create_dir_all(&state).unwrap();
+    let db = state.join("state.db");
+    drop(Store::open(&db).unwrap());
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).unwrap();
+    fs::set_permissions(&db, fs::Permissions::from_mode(0o604)).unwrap();
+    let report = collect(inputs(dir.path(), options)).unwrap();
+    assert!(
+        report
+            .problems
+            .iter()
+            .any(|p| p.contains(".yoke") && p.contains("chmod 700")),
+        "{:?}",
+        report.problems
+    );
+    assert!(
+        report
+            .problems
+            .iter()
+            .any(|p| p.contains("state.db") && p.contains("chmod 600")),
+        "{:?}",
+        report.problems
+    );
+    assert_eq!(
+        fs::metadata(state).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
+    assert_eq!(
+        fs::metadata(db).unwrap().permissions().mode() & 0o777,
+        0o604
+    );
+}
+
 fn fixture() -> (TempDir, install::InstallOptions) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -480,6 +516,11 @@ fn a_statusline_someone_else_pointed_at_yoke_counts_as_installed() {
 fn attention_is_explained_and_pending_memory_facts_are_counted() {
     let (dir, options) = fixture();
     let root = dir.path();
+    fs::set_permissions(
+        options.executable.parent().unwrap(),
+        fs::Permissions::from_mode(0o775),
+    )
+    .unwrap();
     install::install(&options).unwrap();
     fs::create_dir_all(root.join(".yoke")).unwrap();
     let store = Store::open(root.join(".yoke/state.db")).unwrap();
@@ -508,6 +549,12 @@ fn attention_is_explained_and_pending_memory_facts_are_counted() {
     assert_eq!((memory.pending_facts, memory.digest), (3, false));
     // Observe mode is on by default, so this is the state of a correct fresh install.
     assert_eq!(report.status, "attention");
+    assert!(
+        guidance_with(&report, "group-writable"),
+        "{:?}",
+        report.guidance
+    );
+    assert!(guidance_with(&report, "chmod g-w"), "{:?}", report.guidance);
     assert!(
         report.meaning.contains("nothing is broken"),
         "{}",

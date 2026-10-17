@@ -1,6 +1,17 @@
 use super::*;
 use std::fs;
 
+#[test]
+fn directory_entries_are_bounded_before_collection() {
+    let directory = tempfile::tempdir().unwrap();
+    for index in 0..2002 {
+        fs::write(directory.path().join(index.to_string()), "").unwrap();
+    }
+    let mut reader = read::Reader::new(&[directory.path()]);
+    assert_eq!(reader.entries(directory.path()).len(), 2000);
+    assert!(reader.notes.iter().any(|note| note.note.contains("2000")));
+}
+
 fn put(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, text).unwrap();

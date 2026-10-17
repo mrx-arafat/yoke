@@ -118,12 +118,10 @@ pub(super) fn status(home: &Path, dir: &Path, now: i64) -> Option<Branch> {
 }
 
 fn measure(dir: &Path) -> Value {
-    let mut git = std::process::Command::new("git");
+    let Ok(mut git) = yoke_core::process::git() else {
+        return json!({"state": "unavailable"});
+    };
     git.args([
-        "--no-optional-locks",
-        // A repository's own configuration must not be able to run a program for a status line.
-        "-c",
-        "core.fsmonitor=false",
         "status",
         "--porcelain=v1",
         "--untracked-files=normal",
@@ -132,10 +130,7 @@ fn measure(dir: &Path) -> Value {
     ])
     .current_dir(dir)
     .env("GIT_TERMINAL_PROMPT", "0")
-    .env("LC_ALL", "C")
-    .env_remove("GIT_DIR")
-    .env_remove("GIT_WORK_TREE")
-    .env_remove("GIT_INDEX_FILE");
+    .env("LC_ALL", "C");
     match execute_bounded(&mut git, b"", GIT_TIMEOUT, OUTPUT_CAP) {
         Ok(output) if output.timed_out => json!({"state": "slow"}),
         Ok(output) if output.success => {

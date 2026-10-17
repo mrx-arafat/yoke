@@ -1,8 +1,75 @@
 use std::os::unix::fs::{symlink, PermissionsExt};
+use std::process::Command;
 
 use super::*;
 use crate::plan::{self, storage};
 use crate::store::Store;
+
+#[test]
+fn fifo_reads_and_hash_swaps_are_refused_without_waiting_for_a_writer() {
+    const CHILD: &str = "YOKE_TEST_PLAN_FIFO";
+    if std::env::var_os(CHILD).is_none() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "plan::files::lock_tests::fifo_reads_and_hash_swaps_are_refused_without_waiting_for_a_writer", "--quiet"]).env(CHILD, "1");
+        let output = execute_bounded(&mut command, &[], Duration::from_secs(5), 4096).unwrap();
+        assert!(
+            output.success && !output.timed_out,
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "FIFO child test was not exercised: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let (_temp, _store, plan) = fixture();
+    let root = Path::new(&plan.project);
+    let pipe = root.join("input.pipe");
+    fs::write(&pipe, "listed as a regular file").unwrap();
+    let listed = fs::symlink_metadata(&pipe).unwrap();
+    fs::remove_file(&pipe).unwrap();
+    let name = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+    // SAFETY: name is a live NUL-terminated path inside this disposable fixture.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let error = hash_listed_entry(&mut Sha256::new(), &pipe, &listed).unwrap_err();
+    assert!(
+        error.to_string().contains("special file") && error.to_string().contains("retry"),
+        "{error:#}"
+    );
+    assert!(file_hash(&pipe)
+        .unwrap_err()
+        .to_string()
+        .contains("rerun the check"));
+    hash_entry(&mut Sha256::new(), &pipe).unwrap();
+    let target = root.join("target.txt");
+    let link = root.join("link");
+    fs::write(&target, "before").unwrap();
+    symlink("target.txt", &link).unwrap();
+    assert!(hash_listed_entry(&mut Sha256::new(), &link, &listed).is_err());
+    assert!(file_hash(&link).is_err());
+    let mut before = Sha256::new();
+    hash_entry(&mut before, &link).unwrap();
+    fs::write(&target, "after").unwrap();
+    let mut after = Sha256::new();
+    hash_entry(&mut after, &link).unwrap();
+    assert_eq!(
+        before.finalize(),
+        after.finalize(),
+        "a symlink fingerprint must not read its target"
+    );
+    let (raw, header) = parse(
+        "+++\ntitle='FIFO'\n[[check]]\nname='fifo'\nrun='true'\ninputs=['input.pipe']\n+++\n",
+    )
+    .unwrap();
+    assert!(approval_header(&plan, raw, &header).is_err());
+    fs::remove_file(&plan.file).unwrap();
+    fs::rename(pipe, &plan.file).unwrap();
+    assert!(read(&plan).is_err());
+}
 
 const CHILD_PROJECT: &str = "YOKE_CHECK_LOCK_TEST_PROJECT";
 const CHILD_TEST: &str = "plan::files::lock_tests::check_lock_child_cannot_resume_live_owner";

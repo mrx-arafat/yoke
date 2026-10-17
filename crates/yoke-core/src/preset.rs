@@ -2,6 +2,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -206,18 +207,22 @@ pub fn add(path: &Path, name: &str, options: &PresetOptions) -> Result<AddOutcom
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent).context("create config parent")?;
     let lock_path = path.with_extension("preset.lock");
-    let _lock_file = OpenOptions::new()
+    let mut lock_file = OpenOptions::new()
         .write(true)
-        .create_new(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&lock_path)
         .context("preset config is locked; ensure no other preset writer is running")?;
-    struct Lock<'a>(&'a Path);
-    impl Drop for Lock<'_> {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(self.0);
-        }
-    }
-    let _lock = Lock(&lock_path);
+    ensure!(
+        lock_file.metadata()?.is_file(),
+        "preset lock must be a regular file"
+    );
+    lock_file
+        .try_lock()
+        .context("preset config is locked; retry after the other preset writer finishes")?;
+    lock_file.set_len(0)?;
+    writeln!(lock_file, "{}", std::process::id())?;
     let original = read_config(path)?;
     let text = std::str::from_utf8(&original).context("config is not UTF-8")?;
     if text.contains(&block) {
@@ -259,12 +264,12 @@ fn read_config(path: &Path) -> Result<Vec<u8>> {
     }
     use std::os::unix::fs::OpenOptionsExt;
     let mut bytes = Vec::new();
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    ensure!(file.metadata()?.is_file(), "config must be a regular file");
+    file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 1024 * 1024, "config exceeds 1 MiB");
     Ok(bytes)
 }
@@ -277,6 +282,25 @@ mod tests {
         event::{AgentEvent, EventKind},
     };
     use serde_json::json;
+
+    #[test]
+    fn preset_lock_records_the_owner_and_recovers_after_descriptor_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("yoke.toml");
+        let lock_path = path.with_extension("preset.lock");
+        fs::write(&lock_path, "stale process\n").unwrap();
+        let options = PresetOptions::default();
+        assert!(add(&path, "git-safety", &options).unwrap().changed);
+        assert_eq!(
+            fs::read_to_string(&lock_path).unwrap(),
+            format!("{}\n", std::process::id())
+        );
+        let lock = OpenOptions::new().write(true).open(&lock_path).unwrap();
+        lock.try_lock().unwrap();
+        assert!(add(&path, "git-safety", &options).is_err());
+        drop(lock);
+        assert!(!add(&path, "git-safety", &options).unwrap().changed);
+    }
 
     #[test]
     fn git_preset_blocks_destructive_invocations_and_preserves_normal_commands() {

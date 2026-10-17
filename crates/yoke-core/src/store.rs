@@ -24,6 +24,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/012-usage-time.sql"),
     include_str!("store/013-scale-indexes.sql"),
     include_str!("store/014-session-anchors.sql"),
+    include_str!("store/015-usage-summaries.sql"),
 ];
 
 mod read;
@@ -241,6 +242,10 @@ impl Store {
         }
         if pending && foreign_key_violations(&transaction)? > before {
             bail!("migration left foreign key violations; state database was not changed");
+        }
+        if pending {
+            // Bounded statistics work only after schema changes, never on ordinary hooks.
+            transaction.execute_batch("PRAGMA analysis_limit=400; PRAGMA optimize=0x10002;")?;
         }
         transaction.commit()?;
         connection.pragma_update(None, "foreign_keys", true)?;

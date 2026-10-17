@@ -123,7 +123,7 @@ fn execute(plan: &PlanRecord, declared: &PlanCheck, fingerprint: &str) -> CheckR
     let mut run = empty_run(plan, &declared.name, fingerprint);
     run.command = declared.command.clone();
     run.blocking = declared.blocking;
-    let mut command = Command::new("sh");
+    let mut command = Command::new("/bin/sh");
     command
         .arg("-c")
         .arg(&declared.command)

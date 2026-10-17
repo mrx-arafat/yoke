@@ -1,9 +1,31 @@
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
+
+fn isolated_command(bin: &Path, home: &Path) -> Command {
+    let home = home.canonicalize().expect("fixture home must exist");
+    let temporary = std::env::temp_dir().canonicalize().unwrap();
+    assert!(
+        home.starts_with(&temporary) && home != temporary,
+        "fixture HOME must be inside a temporary directory"
+    );
+    let curl = home.parent().unwrap().join(".fixture-curl");
+    if !curl.exists() {
+        fs::write(&curl, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut command = Command::new(bin);
+    command
+        .env("HOME", &home)
+        .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env("YOKE_CURL", curl);
+    command
+}
 
 fn run(home: &Path, project: &Path, args: &[&str], input: &[u8]) -> Output {
     run_with_path(home, project, args, input, None)
@@ -16,7 +38,7 @@ fn run_with_path(
     input: &[u8],
     path: Option<&Path>,
 ) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_yoke"));
+    let mut command = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), home);
     // A person at a shell: pinning and importing refuse an agent's tool process, and this run
     // may itself have been started by one.
     for marker in [
@@ -64,14 +86,19 @@ fn memory_transfer_preserves_identity_and_fresh_home_dry_run_writes_nothing() {
     let note = json(run(
         &home,
         &source,
-        &["remember", "Keep the migration reversible", "--pinned"],
+        &[
+            "remember",
+            "Keep the migration reversible",
+            "--pinned",
+            "--json",
+        ],
         b"",
     ));
     let archive = temp.path().join("memory.json");
     let exported = json(run(
         &home,
         &source,
-        &["memory", "export", archive.to_str().unwrap()],
+        &["memory", "export", archive.to_str().unwrap(), "--json"],
         b"",
     ));
     assert_eq!(exported["memories"], 1);
@@ -88,6 +115,7 @@ fn memory_transfer_preserves_identity_and_fresh_home_dry_run_writes_nothing() {
         &mapping,
         // Restoring one's own export keeps its pin; an import drops pins by default.
         "--keep-pins",
+        "--json",
     ];
     let mut dry_args = args.to_vec();
     dry_args.push("--dry-run");
@@ -151,7 +179,7 @@ fn memory_transfer_preserves_identity_and_fresh_home_dry_run_writes_nothing() {
 /// Run `yoke statusline` as a person's shell would, with colors off and a fixed width so the
 /// line does not depend on the developer's terminal.
 fn statusline(home: &Path, cwd: &Path, args: &[&str], input: &[u8]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_yoke"));
+    let mut command = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), home);
     command
         .arg("statusline")
         .args(args)
@@ -233,7 +261,11 @@ fn statusline_fresh_home_and_wrapper_are_read_only() {
         String::from_utf8(output.stdout).unwrap(),
         "yoke (no data yet) | main | $0.50 \u{b7} 2m\n"
     );
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Observe the no-writes property for the worker window, failing as soon as a write appears.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while entries_under(&home).is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert_eq!(entries_under(&home), Vec::<String>::new());
 }
 
@@ -287,16 +319,38 @@ fn digest_rejects_fifo_without_waiting_for_a_writer() {
         .unwrap()
         .commit(&store)
         .unwrap();
+    // Establish the real hook anchor before invoking digest from an agent tool process.
+    let hook = run(
+        &home,
+        &project,
+        &["run-hook", "PreToolUse", "--agent", "claude"],
+        serde_json::json!({
+            "session_id": "fixture",
+            "cwd": project,
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    assert!(
+        hook.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hook.stderr)
+    );
     let fifo = temp.path().join("transcript.fifo");
     assert!(Command::new("mkfifo")
         .arg(&fifo)
         .status()
         .unwrap()
         .success());
-    let mut child = Command::new(env!("CARGO_BIN_EXE_yoke"))
+    let mut child = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), &home)
         .args(["memory", "digest", "fixture", "--transcript"])
         .arg(&fifo)
         .env("HOME", &home)
+        .env("CLAUDECODE", "1")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_SESSION_ID")
         .current_dir(&project)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -314,7 +368,8 @@ fn digest_rejects_fifo_without_waiting_for_a_writer() {
     }
     let output = child.wait_with_output().unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("regular file"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("regular file"), "{stderr}");
 }
 
 #[test]
@@ -353,7 +408,7 @@ fn stop_schedules_bounded_digest_with_off_and_debounces_repeat() {
     fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' \"$YOKE_OFF\" >> \"$HOME/digest-calls\"\nprintf '%s\\n' \"$@\" > \"$HOME/digest-args\"\n/bin/cat > \"$HOME/digest-input\"\nprintf '%s' '{{\"memories\":[{{\"text\":\"Fixture digest\",\"fact_ids\":[{fact}]}}]}}'\n")).unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     for _ in 0..2 {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_yoke"))
+        let mut child = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), &home)
             .args(["run-hook", "Stop", "--agent", "codex"])
             .env("HOME", &home)
             .env("PATH", &bin)
@@ -1000,7 +1055,7 @@ fn console_refuses_agent_processes_before_serving_or_printing_a_url() {
     let project = temp.path().join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir(&project).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_yoke"))
+    let mut child = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), &home)
         .args(["console", "--no-open"])
         .env("HOME", &home)
         .current_dir(&project)
@@ -1209,7 +1264,7 @@ fn digest_with_more_than_one_batch_queues_a_follow_up_until_drained() {
     )
     .unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_yoke"))
+    let mut child = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), &home)
         .args(["run-hook", "Stop", "--agent", "codex"])
         .env("HOME", &home)
         .env("PATH", &bin)

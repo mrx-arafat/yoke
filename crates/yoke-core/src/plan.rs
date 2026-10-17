@@ -48,6 +48,9 @@ pub struct PlanCheck {
     pub timeout: u64,
     #[serde(default)]
     pub artifacts: Vec<String>,
+    /// Project-local files whose exact bytes a human approves before the check may run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
 }
 fn blocking_default() -> bool {
     true
@@ -174,6 +177,7 @@ pub fn create(
             blocking: true,
             timeout: 30,
             artifacts: Vec::new(),
+            inputs: Vec::new(),
         }],
         requirements: Vec::new(),
         tasks: Vec::new(),
@@ -199,7 +203,8 @@ pub fn list(store: &Store, project: &Path) -> Result<Vec<PlanRecord>> {
 
 pub fn get(store: &Store, project: &Path, slug: &str) -> Result<PlanRecord> {
     files::validate_slug(slug)?;
-    storage::find(store, &files::project(project)?, slug)?.context("plan not found")
+    storage::find(store, &files::project(project)?, slug)?
+        .context("plan not found in this project; run yoke plan list to find the slug in this project, or change to the project's directory")
 }
 
 pub fn detail(store: &Store, project: &Path, slug: &str) -> Result<PlanDetail> {
@@ -259,7 +264,8 @@ pub fn prepare_approval(store: &Store, project: &Path, slug: &str) -> Result<Pre
         ));
     }
     let content = files::read(&plan)?;
-    let (header, _) = files::parse(&content)?;
+    let (header, parsed) = files::parse(&content)?;
+    let header = files::approval_header(&plan, header, &parsed)?;
     feedback::ensure_unblocked(store.connection(), &plan)?;
     let open_feedback = feedback::list(store, &plan, &content)?
         .into_iter()
@@ -288,10 +294,11 @@ pub fn approve(store: &Store, prepared: &PreparedApproval) -> Result<PlanRecord>
         files::hash(prepared.header.as_bytes()) == prepared.digest,
         "approval digest mismatch"
     );
-    let (header, _) = files::parse(&files::read(&prepared.plan)?)?;
+    let (header, parsed) = files::parse(&files::read(&prepared.plan)?)?;
+    let header = files::approval_header(&prepared.plan, header, &parsed)?;
     ensure!(
         header == prepared.header,
-        "plan header changed after it was displayed; review it again"
+        "plan header or check inputs changed after they were displayed; run yoke plan approve again in your own terminal"
     );
     storage::approve(store, &prepared.plan, &header, |tx| {
         feedback::ensure_unblocked(tx, &prepared.plan)
@@ -326,6 +333,19 @@ fn wrong_state(plan: &PlanRecord, rule: &str) -> anyhow::Error {
 /// Plans compare against HEAD, so a repository without a first commit cannot review or start one.
 pub fn has_head(project: &Path) -> bool {
     files::head(project).is_ok()
+}
+
+/// Session bindings for this project's plans, read in one query for CLI summaries.
+pub fn bound_sessions(store: &Store, project: &Path) -> Result<BTreeMap<i64, String>> {
+    let project = files::project(project)?;
+    let mut query = store.connection().prepare(
+        "SELECT active_plan,id FROM sessions WHERE active_plan IS NOT NULL AND active_plan IN (SELECT id FROM plans WHERE project=?1) ORDER BY id"
+    )?;
+    let rows = query.query_map(
+        [project.to_str().context("project path must be UTF-8")?],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
 /// What to tell a user whose repository has no commit yet.

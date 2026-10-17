@@ -36,11 +36,11 @@ fn entries(raw: &str) -> Result<Vec<Entry>> {
     let mut result = Vec::new();
     let mut keys = HashSet::new();
     loop {
+        let start = position;
         skip_space(raw, &mut position);
         if matches!(raw.as_bytes().get(position), Some(b'}' | b']')) {
             break;
         }
-        let start = position;
         let key = if object {
             let end = value_end(raw, position)?;
             let key: String = serde_json::from_str(&raw[position..end])?;
@@ -87,6 +87,11 @@ pub(super) fn render(raw: &str, after: &Value) -> Result<String> {
     let content = match (&before, after) {
         (Value::Object(old), Value::Object(new)) => {
             let spans = entries(trimmed)?;
+            let trailing = spans
+                .last()
+                .map_or(&trimmed[1..trimmed.len() - 1], |entry| {
+                    &trimmed[entry.value.end..trimmed.len() - 1]
+                });
             let mut result = String::from("{");
             let mut count = 0;
             for entry in spans {
@@ -111,6 +116,7 @@ pub(super) fn render(raw: &str, after: &Value) -> Result<String> {
                     count += 1;
                 }
             }
+            result.push_str(trailing);
             result.push('}');
             result
         }
@@ -125,19 +131,28 @@ pub(super) fn render(raw: &str, after: &Value) -> Result<String> {
                     .find(|(i, v)| !used.contains(i) && *v == value)
                 {
                     used.insert(index);
-                    parts.push(trimmed[spans[index].value.clone()].to_owned());
+                    parts.push(trimmed[spans[index].start..spans[index].value.end].to_owned());
                 } else if old.len() == new.len()
                     && !used.contains(&new_index)
                     && old[new_index].is_object()
                     && value.is_object()
                 {
                     used.insert(new_index);
-                    parts.push(render(&trimmed[spans[new_index].value.clone()], value)?);
+                    parts.push(format!(
+                        "{}{}",
+                        &trimmed[spans[new_index].start..spans[new_index].value.start],
+                        render(&trimmed[spans[new_index].value.clone()], value)?
+                    ));
                 } else {
                     parts.push(serde_json::to_string(value)?);
                 }
             }
-            format!("[{}]", parts.join(","))
+            let trailing = spans
+                .last()
+                .map_or(&trimmed[1..trimmed.len() - 1], |entry| {
+                    &trimmed[entry.value.end..trimmed.len() - 1]
+                });
+            format!("[{}{}]", parts.join(","), trailing)
         }
         _ => serde_json::to_string(after)?,
     };

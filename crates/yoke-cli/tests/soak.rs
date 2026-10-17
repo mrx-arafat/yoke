@@ -37,6 +37,27 @@ struct Expect(Option<&'static str>, Out);
 
 const ALLOW: Expect = Expect(Some("allow"), Out::Silent);
 
+fn isolated_command(bin: &Path, home: &Path) -> Command {
+    let home = home.canonicalize().expect("fixture home must exist");
+    let temporary = std::env::temp_dir().canonicalize().unwrap();
+    assert!(
+        home.starts_with(&temporary) && home != temporary,
+        "fixture HOME must be inside a temporary directory"
+    );
+    let curl = home.parent().unwrap().join(".fixture-curl");
+    if !curl.exists() {
+        fs::write(&curl, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut command = Command::new(bin);
+    command
+        .env("HOME", &home)
+        .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env("YOKE_CURL", curl);
+    command
+}
+
 fn classify(stdout: &[u8]) -> Result<Out, String> {
     if stdout.iter().all(u8::is_ascii_whitespace) {
         return Ok(Out::Silent);
@@ -122,7 +143,7 @@ fn run_hook(
     cwd: &Path,
 ) -> (Output, f64) {
     let (bin, home, path) = trial;
-    let mut command = Command::new(bin);
+    let mut command = isolated_command(bin, home);
     command
         .args(["run-hook", "--agent", agent, event])
         .current_dir(cwd)
@@ -219,7 +240,7 @@ impl Trial {
         let bin = std::env::var_os("YOKE_SOAK_BIN")
             .map_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_yoke")), PathBuf::from);
         // The first exec of a fresh build pays one-time OS checks that installed hooks never see.
-        assert!(Command::new(&bin)
+        assert!(isolated_command(&bin, &home)
             .arg("--version")
             .output()
             .unwrap()
@@ -251,7 +272,13 @@ impl Trial {
     }
 
     fn session(&self, agent: &'static str, id: &str, cwd: &Path) -> Session {
-        let transcript = self.home.join(format!("{id}.jsonl"));
+        let directory = self.home.join(if agent == "codex" {
+            ".codex/sessions"
+        } else {
+            ".claude/projects/soak"
+        });
+        fs::create_dir_all(&directory).unwrap();
+        let transcript = directory.join(format!("{id}.jsonl"));
         let header = if agent == "codex" {
             format!(
                 "{}\n{}\n",
@@ -358,7 +385,7 @@ impl Trial {
     }
 
     fn cli(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
-        Command::new(&self.bin)
+        isolated_command(&self.bin, &self.home)
             .args(args)
             .envs(envs.iter().copied())
             .current_dir(&self.project)
@@ -745,7 +772,7 @@ fn observe_day() {
     trial.finish(&report);
 }
 
-const ENFORCE: &str = "mode='enforce'\n[stop]\nmax_blocks=2\n[memory]\ndigest=true\ndigest_agent='codex'\n[[gate]]\nname='no-force-push'\non='pre_tool_use'\nmatch_tool='Bash'\nmatch_contains='push --force'\naction='deny'\nmessage='Force push is blocked by Yoke.'\n[[gate]]\nname='quiet-tests'\non='pre_tool_use'\nmatch_tool='Bash'\naction='rewrite'\nrewrite_pattern='^cargo test$'\nrewrite_to='cargo test --quiet'\n[[gate]]\nname='readme-present'\non='stop'\nrun='test -f README.md'\nmessage='README.md is missing'\n";
+const ENFORCE: &str = "mode='enforce'\n[stop]\nmax_blocks=2\n[memory]\ndigest=true\ndigest_agent='codex'\n[[gate]]\nname='no-force-push'\non='pre_tool_use'\nmatch_tool='Bash'\nmatch_contains='push --force'\naction='deny'\nmessage='Force push is blocked by Yoke.'\n[[gate]]\nname='quiet-tests'\non='pre_tool_use'\nmatch_tool='Bash'\nmatch_contains='cargo test'\naction='rewrite'\nrewrite_pattern='^cargo test$'\nrewrite_to='cargo test --quiet'\n[[gate]]\nname='readme-present'\non='stop'\nrun='test -f README.md'\nmessage='README.md is missing'\n";
 
 #[test]
 #[ignore = "synthetic soak trial; run explicitly with --ignored"]
@@ -792,7 +819,7 @@ fn enforce_week() {
             }
             let ended = trial.end(&session, ALLOW);
             if session.id == "codex-enforce-day2" {
-                trial.expect_stderr(&ended, "usage ingestion failed");
+                assert!(!String::from_utf8_lossy(&ended.stderr).contains("usage ingestion failed"));
             }
         }
     }
@@ -818,7 +845,7 @@ fn plan_stalls_and_resumes(trial: &mut Trial, session: &mut Session) {
 fn interrupted_check_resumes(trial: &mut Trial, session: &mut Session) {
     trial.approved_plan("soak-interrupted");
     trial.plan_start(session, "soak-interrupted");
-    let mut check = Command::new(&trial.bin)
+    let mut check = isolated_command(&trial.bin, &trial.home)
         .args(["plan", "check", "soak-interrupted", "--agent", "claude"])
         .current_dir(&trial.project)
         .env("HOME", &trial.home)
@@ -851,8 +878,22 @@ fn interrupted_check_resumes(trial: &mut Trial, session: &mut Session) {
     trial.hour(session, ALLOW);
 }
 
+#[test]
+#[ignore = "oversized transcript scenario; run explicitly with --ignored"]
+fn oversized_transcripts_remain_non_fatal() {
+    let mut trial = Trial::new("oversized-transcripts", true);
+    let project = trial.project.clone();
+    trial.trust(&project, "mode='enforce'");
+    let mut session = trial.session("codex", "oversized", &project);
+    trial.start(&session, "startup");
+    oversized_transcripts(&mut trial, &mut session);
+    let report = trial.trial_report();
+    trial.finish(&report);
+}
+
 fn oversized_transcripts(trial: &mut Trial, session: &mut Session) {
-    // Usage accounting never decides or errors a hook event; every event only warns.
+    // The incremental importer skips oversized non-usage lines and reads beyond the old
+    // whole-file bound, so these transcripts must not fail accounting or block hooks.
     for (name, contents) in [
         ("long-line", format!("{}\n", " ".repeat(MIB + 1))),
         (
@@ -860,12 +901,14 @@ fn oversized_transcripts(trial: &mut Trial, session: &mut Session) {
             format!("{}\n", " ".repeat(MIB / 2 - 1)).repeat(65),
         ),
     ] {
-        session.transcript = trial.home.join(format!("{}-{name}.jsonl", session.id));
+        session.transcript = session
+            .transcript
+            .with_file_name(format!("{}-{name}.jsonl", session.id));
         fs::write(&session.transcript, contents).unwrap();
         let stopped = trial.hour_returning_stop(session);
-        trial.expect_stderr(&stopped, "usage ingestion failed");
+        assert!(!String::from_utf8_lossy(&stopped.stderr).contains("usage ingestion failed"));
         let compacted = trial.compact(session, ALLOW);
-        trial.expect_stderr(&compacted, "usage ingestion failed");
+        assert!(!String::from_utf8_lossy(&compacted.stderr).contains("usage ingestion failed"));
     }
 }
 
@@ -991,22 +1034,24 @@ fn session_moves_between_projects(trial: &mut Trial, session: &mut Session) {
     trial.prompt(session, "Deploy from here.");
     trial.tool(session, "bash", "make deploy", ALLOW);
     trial.stop(session, ALLOW);
-    // The same session continues in another project, whose trusted gates now apply.
+    // A cd cannot replace this session's anchored policy with another project's policy.
     session.cwd = other.clone();
     trial.prompt(session, "Deploy from the other repo.");
+    trial.tool(session, "bash", "make deploy", ALLOW);
     trial.tool(
         session,
         "bash",
-        "make deploy",
+        "git push --force origin main",
         Expect(Some("deny"), Out::Deny),
     );
     trial.stop(session, ALLOW);
     let sessions = trial.store.sessions(None, 1000).unwrap();
     let moved = sessions.iter().find(|row| row.id == session.id).unwrap();
-    if moved.project != other.display().to_string() {
-        trial
-            .mismatches
-            .push(format!("moved session kept project {}", moved.project));
+    if moved.project != trial.project.display().to_string() {
+        trial.mismatches.push(format!(
+            "cd changed the anchored project to {}",
+            moved.project
+        ));
     }
     session.cwd = trial.project.clone();
 }

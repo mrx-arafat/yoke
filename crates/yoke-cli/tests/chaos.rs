@@ -209,30 +209,48 @@ fn an_oversized_payload_is_refused_with_advice_and_the_writer_is_not_cut_off() {
 }
 
 #[test]
-fn a_tool_input_too_big_for_a_gate_environment_is_explained_and_nul_is_scrubbed() {
+fn a_large_gate_input_is_marked_and_bounded_and_nul_is_scrubbed() {
     let f = Fixture::new();
-    f.trust("mode='enforce'\n[[gate]]\nname='lint'\non='PreToolUse'\nrun='true'\n");
+    f.trust(r#"mode='enforce'
+[[gate]]
+name='lint'
+on='PreToolUse'
+match_contains='chaos-large-input-tail'
+run='''test "$YOKE_TOOL_INPUT_TRUNCATED" = 1 && test "${#YOKE_TOOL_INPUT}" -le 32768 && test -z "${CHAOS_PAD+x}" && case "$YOKE_TOOL_INPUT" in *"[YOKE TOOL INPUT TRUNCATED]") exit 0;; *) exit 9;; esac'''
+"#);
     let mut command = f.command("PreToolUse");
-    // Pads the environment so that the payload alone cannot fit on any platform.
+    // Undeclared inherited variables must not inflate the gate's environment.
     command.env("CHAOS_PAD", "x".repeat(16 * 1024));
     let mut child = command.spawn().unwrap();
     child
         .stdin
         .take()
         .unwrap()
-        .write_all(bash(&"a".repeat(1_040_000)).to_string().as_bytes())
+        .write_all(
+            bash(&format!("{}chaos-large-input-tail", "a".repeat(1_040_000)))
+                .to_string()
+                .as_bytes(),
+        )
         .unwrap();
-    let reason = denial(&child.wait_with_output().unwrap()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
     assert!(
-        reason.contains("gate 'lint'") && reason.contains("too large"),
-        "{reason}"
+        output.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
     );
+    let decisions = f.store().decisions(&DecisionFilter::default()).unwrap();
+    assert_eq!(decisions[0].outcome, "allow");
+    assert_eq!(decisions[0].gates[0]["name"], "lint");
+    assert_eq!(decisions[0].gates[0]["result"], "pass");
 
+    f.trust("mode='enforce'\n[[gate]]\nname='nul'\non='PreToolUse'\nrun='test \"$YOKE_TOOL_INPUT_TRUNCATED\" = 0 && test \"$YOKE_SESSION\" = ab && test \"$YOKE_TOOL_NAME\" = Bash'\n");
     let output = f.hook(
         "PreToolUse",
         br#"{"session_id":"a\u0000b","tool_name":"Ba\u0000sh","tool_input":{"command":"ls"}}"#,
     );
     assert!(output.stdout.is_empty(), "{}", stderr(&output));
+    assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(f.outcomes()[0].0, "allow");
 }
 

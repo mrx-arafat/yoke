@@ -149,12 +149,15 @@ impl Actions {
                         );
                         let snapshot = memory::forget_with_snapshot(store, id)?
                             .context("Memory no longer exists.")?;
+                        let message = if snapshot.memory.shared {
+                            "Memory forgotten. Undo is available for 30 seconds. The shared entry remains in .yoke/knowledge.md; remove it by hand and run yoke trust in your own terminal to stop sharing it."
+                        } else {
+                            "Memory forgotten. Undo is available for 30 seconds."
+                        };
                         let ticket = random_token()?;
                         self.forgotten
                             .insert(ticket.clone(), (Instant::now(), snapshot));
-                        Ok(
-                            json!({"data":{"message":"Memory forgotten. Undo is available for 30 seconds.","undo":ticket}}),
-                        )
+                        Ok(json!({"data":{"message":message,"undo":ticket}}))
                     }
                 }
             }

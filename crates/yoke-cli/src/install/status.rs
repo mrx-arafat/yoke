@@ -1,6 +1,7 @@
 //! Read-only inspection of what installation left in place, for `yoke health`.
 
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -76,6 +77,9 @@ fn agent_status(options: &InstallOptions, agent: Agent, project: &Path) -> Agent
         ));
     }
     status.executable = Some(executable.clone());
+    let (problems, guidance) = super::executable::diagnostics(executable);
+    status.problems.extend(problems);
+    status.notes.extend(guidance);
     status.statusline = receipt.statusline.is_some();
     let mut hooks_file = None;
     match files::read(&status.settings).and_then(|raw| settings(raw.as_deref())) {
@@ -275,11 +279,16 @@ pub(super) fn claude_blockers(managed: &Path, layers: &[&Path]) -> Vec<String> {
 
 /// Inspected settings may be links an administrator manages, so they are followed but bounded.
 fn read_json(path: &Path) -> Result<Option<Value>> {
-    let file = match std::fs::File::open(path) {
+    let file = match std::fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
+    ensure!(file.metadata()?.is_file(), "settings {} must be a regular file; replace the special file before running yoke health again", path.display());
     let mut raw = String::new();
     file.take(MAX_SETTINGS_BYTES + 1).read_to_string(&mut raw)?;
     ensure!(

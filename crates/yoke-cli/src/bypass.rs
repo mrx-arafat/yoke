@@ -504,7 +504,10 @@ mod tests {
         }
         // The shipped configuration: feature off, debug assertions off.
         let shipped = honours_home(false, false);
-        let (account, injected) = (PathBuf::from("/users/real"), PathBuf::from("/tmp/isolated"));
+        let (account, injected) = (
+            PathBuf::from("/account/home"),
+            PathBuf::from("/tmp/isolated"),
+        );
         let chosen =
             choose_home(Some(injected.clone()), Some(account.clone()), true, shipped).unwrap();
         assert_eq!(chosen, (account, Some(injected)));
@@ -512,7 +515,10 @@ mod tests {
 
     #[test]
     fn hooks_ignore_a_different_home_only_when_the_account_home_holds_state() {
-        let (account, injected) = (PathBuf::from("/users/real"), PathBuf::from("/tmp/injected"));
+        let (account, injected) = (
+            PathBuf::from("/account/home"),
+            PathBuf::from("/tmp/injected"),
+        );
         let choose = |environment: Option<&Path>, state, honour| {
             choose_home(
                 environment.map(Path::to_path_buf),

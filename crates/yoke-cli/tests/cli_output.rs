@@ -337,8 +337,16 @@ fn install_dry_run_shows_readable_changed_lines_not_escaped_files() {
         "{dry}"
     );
     assert!(!dry.contains("\\\""), "escaped JSON leaked:\n{dry}");
-    assert!(dry.lines().any(|line| line == "+   \"hooks\": {"), "{dry}");
-    assert!(dry.contains("  \"model\": \"opus\""), "{dry}");
+    assert!(
+        dry.lines().any(|line| {
+            line.starts_with("+ hooks.PreToolUse: ")
+                && line.contains("\"command\":")
+                && line.contains(" run-hook --agent claude ")
+        }),
+        "{dry}"
+    );
+    // SEC24 previews show owned changes without exposing neighboring settings.
+    assert!(!dry.contains("model") && !dry.contains("opus"), "{dry}");
     assert_eq!(
         fs::read_to_string(home.join(".claude/settings.json")).unwrap(),
         "{\"model\":\"opus\"}\n",

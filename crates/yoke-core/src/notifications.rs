@@ -75,14 +75,63 @@ pub struct HelpTopic {
 
 macro_rules! troubleshooting {
     ($anchor:literal) => {
-        concat!(
-            "https://github.com/mrx-arafat/yoke/blob/main/docs/troubleshooting.md",
-            $anchor
-        )
+        if release_ref(
+            option_env!("GITHUB_REF_TYPE"),
+            option_env!("GITHUB_REF_NAME"),
+            concat!("v", env!("CARGO_PKG_VERSION")),
+        ) {
+            concat!(
+                "https://github.com/mrx-arafat/yoke/blob/v",
+                env!("CARGO_PKG_VERSION"),
+                "/docs/troubleshooting.md",
+                $anchor
+            )
+        } else {
+            concat!(
+                "https://github.com/mrx-arafat/yoke/blob/main/docs/troubleshooting.md",
+                $anchor
+            )
+        }
     };
 }
 
+// Release packaging runs on vMAJOR.MINOR.PATCH tags; local and manual builds use main.
+const fn release_ref(kind: Option<&str>, name: Option<&str>, expected: &str) -> bool {
+    let (Some(kind), Some(name)) = (kind, name) else {
+        return false;
+    };
+    let kind = kind.as_bytes();
+    if kind.len() != 3 || kind[0] != b't' || kind[1] != b'a' || kind[2] != b'g' {
+        return false;
+    }
+    let name = name.as_bytes();
+    let expected = expected.as_bytes();
+    if name.len() != expected.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < name.len() {
+        if name[index] != expected[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 pub const HELP: &[HelpTopic] = &[
+    HelpTopic {
+        id: "usage-partial",
+        title: "Session usage is only partly counted",
+        summary: "An import skipped older transcript bytes. Its token and cost totals under-report that session.",
+        steps: &[
+            "Run yoke usage to see each session's coverage.",
+            "Keep the original transcript. Later imports add new usage but cannot recover bytes already skipped.",
+            "A full import of a replaced transcript clears this notification; acknowledgement alone does not change totals.",
+        ],
+        commands: &["yoke usage"],
+        doc: troubleshooting!("#usage-looks-frozen-or-incomplete"),
+    },
     HelpTopic {
         id: "observe-mode",
         title: "Enforcement is inactive (observe mode)",
@@ -215,6 +264,7 @@ pub fn help_for(kind: &str) -> &'static HelpTopic {
         "plan_waiting" | "plan_stalled" => "plan-recovery",
         "check_failed" => "check-failed",
         "config_stale" => "stale-trust",
+        "usage_partial" => "usage-partial",
         _ => "untrusted-config",
     };
     HELP.iter()
@@ -238,22 +288,32 @@ pub fn sync(store: &Store, loaded: &LoadedConfig, now: i64) -> Result<bool> {
     sync_bounded(store, loaded, now, BATCH_IDS, BUDGET, PAUSE)
 }
 
-/// `sync` for a hook: one window per table and no pause, so the hook stays in milliseconds and
-/// never sleeps. Older history drains over later hooks and `yoke notifications` runs.
+/// `sync` for a hook: one window per table, then a durable job for remaining history.
 pub fn sync_for_hook(store: &Store, loaded: &LoadedConfig, now: i64) -> Result<bool> {
-    sync_bounded(
+    let pending = sync_bounded(
         store,
         loaded,
         now,
         HOOK_BATCH_IDS,
         Duration::ZERO,
         Duration::ZERO,
-    )
+    )?;
+    if pending {
+        crate::jobs::enqueue(store, HISTORY_JOB, HISTORY_JOB, "", "{}", now)?;
+    }
+    Ok(pending)
 }
 
-fn sync_bounded(
+/// Durable job kind consumed by the existing CLI job worker.
+pub const HISTORY_JOB: &str = "notifications-drain";
+
+/// Drain old events in paced transactions; true requests another leased job pass.
+pub fn drain_background(store: &Store, now: i64) -> Result<bool> {
+    sync_history(store, now, BATCH_IDS, Duration::from_secs(10), PAUSE)
+}
+
+fn sync_history(
     store: &Store,
-    loaded: &LoadedConfig,
     now: i64,
     batch: i64,
     budget: Duration,
@@ -279,9 +339,24 @@ fn sync_bounded(
         pace,
         |tx, from, to| checks(tx, from, to, now),
     )?;
+    Ok(pending)
+}
+
+fn sync_bounded(
+    store: &Store,
+    loaded: &LoadedConfig,
+    now: i64,
+    batch: i64,
+    budget: Duration,
+    pause: Duration,
+) -> Result<bool> {
+    let pending = sync_history(store, now, batch, budget, pause)?;
     store.transaction(|tx| {
         plans(tx, now)?;
         configs(tx, loaded, now)?;
+        if !budget.is_zero() {
+            usage_conditions(store, tx, now)?;
+        }
         let cutoff = now.saturating_sub(i64::from(loaded.config.log.retention_days) * 86_400);
         let project = scope(&loaded.project_root)?;
         tx.execute(
@@ -324,7 +399,12 @@ fn drain(
             if from == max {
                 return Ok(false);
             }
-            let to = max.min(from.saturating_add(batch));
+            // Count actual rows so retention's deleted-id gaps cost no extra hook starts.
+            let to = tx.query_row(
+                &format!("SELECT id FROM {table} WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 1 OFFSET ?3"),
+                params![from, max, batch.saturating_sub(1)],
+                |row| row.get::<_, i64>(0),
+            ).optional()?.unwrap_or(max);
             apply(tx, from, to)?;
             advance(tx, cursor, from, to)?;
             Ok(to < max)
@@ -562,6 +642,64 @@ fn cap(text: &str) -> String {
         Some((at, _)) => format!("{}...", &text[..at]),
         None => text,
     }
+}
+
+/// Keep the accounting condition in the import transaction, including its resolution.
+pub(crate) fn usage_partial(
+    tx: &Transaction<'_>,
+    agent: &str,
+    session: &str,
+    project: &str,
+    partial: Option<&crate::usage::PartialImport>,
+    now: i64,
+) -> Result<()> {
+    let key = format!("usage-partial:{}", digest(&[agent, session]));
+    if let Some(partial) = partial {
+        record(tx, &Occurrence {
+            key, kind: "usage_partial", project, subject: &format!("{agent}.{session}"), plan_id: None,
+            title: "Session usage is only partly counted".into(),
+            detail: format!("{agent} session {session}: {} of {} transcript bytes were skipped. Totals under-report. Run yoke usage for coverage; keep the original transcript for a complete reimport.", partial.skipped_bytes, partial.transcript_bytes),
+            count: 1, first_seen: now, last_seen: now,
+        }, Repeat::Condition)?;
+    } else {
+        let id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM notifications WHERE key=?1 AND resolved_at IS NULL",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = id {
+            resolve(tx, id, now)?;
+        }
+    }
+    Ok(())
+}
+
+// Backfill existing partial sessions in bounded key order; new imports record atomically.
+fn usage_conditions(store: &Store, tx: &Transaction<'_>, now: i64) -> Result<()> {
+    let after: String = tx.query_row(
+        "SELECT coalesce((SELECT value FROM kv WHERE key='notifications.usage_key'),'')",
+        [],
+        |row| row.get(0),
+    )?;
+    let partials = crate::usage::partial_imports_after(store, &after)?;
+    let mut last = String::new();
+    for ((agent, session), partial) in &partials {
+        last = format!("usage.partial.{agent}.{session}");
+        let project: Option<String> = tx.query_row(
+            "SELECT coalesce((SELECT root FROM session_anchors WHERE agent=?1 AND session_id=?2),(SELECT project FROM sessions WHERE agent=?1 AND id=?2))",
+            params![agent, session], |row| row.get(0))?;
+        if let Some(project) = project.filter(|project| !project.contains("[REDACTED]")) {
+            usage_partial(tx, agent, session, &project, Some(partial), now)?;
+        }
+    }
+    if partials.len() < 1000 {
+        last.clear();
+    }
+    tx.execute("INSERT INTO kv(key,value) VALUES('notifications.usage_key',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE kv.value<>excluded.value", [last])?;
+    tx.execute("UPDATE notifications SET resolved_at=?1,state='acknowledged',acknowledged_at=coalesce(acknowledged_at,?1),actor=coalesce(actor,'yoke') WHERE kind='usage_partial' AND resolved_at IS NULL AND NOT EXISTS(SELECT 1 FROM kv WHERE key='usage.partial.'||notifications.subject)", [now])?;
+    Ok(())
 }
 
 fn digest(parts: &[&str]) -> String {
@@ -864,15 +1002,24 @@ fn configs(tx: &Transaction<'_>, loaded: &LoadedConfig, now: i64) -> Result<()> 
     for status in &loaded.snapshots {
         let global = status.scope == "global";
         let file = status.file.to_str().context("config path must be UTF-8")?;
-        let root = if global {
+        let root = if global
+            || status
+                .file
+                .file_name()
+                .is_some_and(|name| name == "knowledge.md")
+        {
             status
                 .file
                 .parent()
                 .and_then(Path::parent)
                 .and_then(Path::to_str)
-                .context("global config path has no home")?
+                .context("configuration path has no trust root")?
         } else {
-            project_root
+            status
+                .file
+                .parent()
+                .and_then(Path::to_str)
+                .context("configuration path has no trust root")?
         };
         let project = if global { "" } else { project_root };
         let trust = if global {

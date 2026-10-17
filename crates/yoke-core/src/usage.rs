@@ -286,12 +286,6 @@ fn fingerprint(meta: &Metadata) -> Fingerprint {
     )
 }
 
-/// The newest quota reading in a transcript, dated by its line's timestamp.
-struct QuotaSeen {
-    quota: Quota,
-    ts: String,
-}
-
 /// A transcript larger than the import bound is counted from its newest bytes only. The
 /// usage in the skipped older part is not counted, and this says how much was skipped.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,7 +387,7 @@ struct Snapshot {
     /// The transcript's size when it was opened.
     size: u64,
     samples: BTreeMap<String, Sample>,
-    quota: Option<QuotaSeen>,
+    quota: Option<Quota>,
     /// The part skipped by this read, if any; for a resumed read the commit adds it to the
     /// skipped part already recorded.
     partial: Option<PartialImport>,
@@ -470,6 +464,7 @@ fn ingest_bounded(
         matches!(agent, "claude" | "codex"),
         "unsupported transcript agent"
     );
+    let notification_project = project;
     let session = identifier(session)?;
     let project = identifier(project)?;
     let cursor_key = cursor_key(agent, &session);
@@ -479,7 +474,14 @@ fn ingest_bounded(
             // The samples the cursor counted are gone, and resuming would skip them for good.
             cursor = None;
         }
-        let snapshot = read_snapshot_from(agent, &session, transcript, limit, cursor.as_ref())?;
+        let snapshot = read_snapshot_from(
+            store.connection(),
+            agent,
+            &session,
+            transcript,
+            limit,
+            cursor.as_ref(),
+        )?;
         if snapshot.base.as_ref() == Some(&snapshot.next) && snapshot.quota.is_none() {
             // Nothing was appended since the last import.
             return summaries(store, Some(&project), Some(&session));
@@ -492,7 +494,15 @@ fn ingest_bounded(
             }
             return Ok(Vec::new());
         }
-        if commit_snapshot(store, agent, &session, &project, transcript, &snapshot)? {
+        if commit_snapshot(
+            store,
+            agent,
+            &session,
+            &project,
+            notification_project,
+            transcript,
+            &snapshot,
+        )? {
             return summaries(store, Some(&project), Some(&session));
         }
     }
@@ -501,6 +511,7 @@ fn ingest_bounded(
 
 /// Read the transcript from `resume` when that cursor still fits the file, else from its start.
 fn read_snapshot_from(
+    clock: &rusqlite::Connection,
     agent: &str,
     session: &str,
     transcript: &Path,
@@ -608,11 +619,17 @@ fn read_snapshot_from(
             }
             // Read before the counters are skipped: a repeated or counter-less event still
             // carries the account's current limits.
-            if let (Some(found), Some(ts)) = (
-                Quota::from_codex(&payload.rate_limits, 0),
-                timestamp(&row.timestamp),
-            ) {
-                quota = Some(QuotaSeen { quota: found, ts });
+            if !payload.rate_limits.is_null() {
+                if let Some(ts) = timestamp(&row.timestamp) {
+                    let observed_at: Option<i64> = clock
+                        .prepare_cached("SELECT unixepoch(?1)")?
+                        .query_row([ts], |row| row.get(0))?;
+                    if let Some(found) =
+                        observed_at.and_then(|at| Quota::from_codex(&payload.rate_limits, at))
+                    {
+                        quota = Some(found);
+                    }
+                }
             }
             let usage = &payload.info["total_token_usage"];
             if usage.is_null() {
@@ -701,6 +718,7 @@ fn commit_snapshot(
     agent: &str,
     session: &str,
     project: &str,
+    notification_project: &str,
     transcript: &Path,
     snapshot: &Snapshot,
 ) -> Result<bool> {
@@ -754,12 +772,14 @@ fn commit_snapshot(
                 })
             }
         };
-        match marker {
-            Some(marker) => put_kv(tx, &key, &serde_json::to_string(&marker)?)?,
+        match &marker {
+            Some(marker) => put_kv(tx, &key, &serde_json::to_string(marker)?)?,
             None => {
                 tx.execute("DELETE FROM kv WHERE key=?1", [key])?;
             }
         }
+        let now = tx.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+        crate::notifications::usage_partial(tx, agent, session, notification_project, marker.as_ref(), now)?;
         put_kv(tx, &cursor_key, &serde_json::to_string(&snapshot.next)?)?;
         Ok(true)
     })
@@ -772,19 +792,8 @@ fn put_kv(tx: &rusqlite::Connection, key: &str, value: &str) -> Result<()> {
 
 /// Merge a transcript's newest quota reading into the state. SQLite dates it so the one
 /// RFC 3339 reader already used for samples decides what the timestamp means.
-fn record_quota(tx: &rusqlite::Connection, seen: &QuotaSeen) -> Result<()> {
-    let observed_at: Option<i64> =
-        tx.query_row("SELECT unixepoch(?1)", [&seen.ts], |row| row.get(0))?;
-    if let Some(observed_at) = observed_at {
-        quota::record_in(
-            tx,
-            &Quota {
-                observed_at,
-                ..seen.quota.clone()
-            },
-        )?;
-    }
-    Ok(())
+fn record_quota(tx: &rusqlite::Connection, seen: &Quota) -> Result<()> {
+    quota::record_in(tx, seen)
 }
 
 /// Group by session and exact model; a partially priced group has unknown total cost.
@@ -946,12 +955,19 @@ pub struct AgentTotals {
 
 /// Sessions whose transcript was only partly counted, by agent and session id.
 pub fn partial_imports(store: &Store) -> Result<BTreeMap<(String, String), PartialImport>> {
+    partial_imports_after(store, "")
+}
+
+pub(crate) fn partial_imports_after(
+    store: &Store,
+    after: &str,
+) -> Result<BTreeMap<(String, String), PartialImport>> {
     let mut query = store
         .connection()
         // GLOB, unlike LIKE, is case-sensitive and so can use the key's index; `kv` also holds
         // a cursor per imported session.
-        .prepare("SELECT key,value FROM kv WHERE key GLOB 'usage.partial.*' LIMIT 1000")?;
-    let rows = query.query_map([], |row| {
+        .prepare("SELECT key,value FROM kv WHERE key GLOB 'usage.partial.*' AND key>?1 ORDER BY key LIMIT 1000")?;
+    let rows = query.query_map([after], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
     let mut found = BTreeMap::new();
@@ -988,10 +1004,21 @@ pub struct SessionUsage {
 
 /// Per-agent totals of samples at or after `since` (Unix seconds); undated samples are left out.
 pub fn totals_by_agent(store: &Store, since: i64) -> Result<Vec<AgentTotals>> {
-    let mut query = store.connection().prepare(&format!(
-        "SELECT agent,{TOTALS} FROM usage_samples WHERE ts>=?1 GROUP BY agent ORDER BY agent"
-    ))?;
-    let rows = query.query_map([since], |row| {
+    let summarized = store.schema_version()?.0 >= 15;
+    let boundary = since
+        .saturating_sub(since.rem_euclid(86_400))
+        .saturating_add(86_400);
+    let sql = if summarized {
+        format!("SELECT agent,sum(samples),sum(input_tokens),sum(output_tokens),sum(cache_read_tokens),sum(cache_write_tokens),sum(known_cost),sum(unknown_pricing_samples)
+            FROM (SELECT agent,samples,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,CASE WHEN samples>unknown_pricing_samples THEN cost_nano_usd END AS known_cost,unknown_pricing_samples
+                  FROM usage_day_totals WHERE day>=?2
+                  UNION ALL SELECT agent,{TOTALS} FROM usage_samples WHERE ts>=?1 AND ts<?2 GROUP BY agent)
+            GROUP BY agent ORDER BY agent")
+    } else {
+        format!("SELECT agent,{TOTALS} FROM usage_samples WHERE ts>=?1 AND ?2 IS NOT NULL GROUP BY agent ORDER BY agent")
+    };
+    let mut query = store.connection().prepare(&sql)?;
+    let rows = query.query_map([since, boundary], |row| {
         Ok(AgentTotals {
             agent: row.get(0)?,
             totals: read_totals(row, 1)?,
@@ -1002,11 +1029,22 @@ pub fn totals_by_agent(store: &Store, since: i64) -> Result<Vec<AgentTotals>> {
 
 /// The sessions with the newest usage first; sessions without dated samples come last.
 pub fn recent_sessions(store: &Store, limit: usize) -> Result<Vec<SessionUsage>> {
-    let mut query = store.connection().prepare(&format!(
+    let sql = if store.schema_version()?.0 >= 15 {
+        "SELECT u.agent,u.session_id,u.project,
+         (SELECT json_group_array(model) FROM usage_session_models m WHERE m.agent=u.agent AND m.session_id=u.session_id),
+         coalesce(min(s.started_at,u.first_at),s.started_at,u.first_at),u.last_at,
+         u.samples,u.input_tokens,u.output_tokens,u.cache_read_tokens,u.cache_write_tokens,
+         CASE WHEN u.samples>u.unknown_pricing_samples THEN u.cost_nano_usd END,u.unknown_pricing_samples
+         FROM usage_session_totals u LEFT JOIN sessions s ON s.id=u.session_id
+         ORDER BY u.last_at IS NULL,u.last_at DESC,u.session_id LIMIT ?1".to_owned()
+    } else {
+        format!(
         "SELECT u.agent,u.session_id,u.project,json_group_array(DISTINCT u.model),coalesce(min(s.started_at,min(u.ts)),s.started_at,min(u.ts)),max(u.ts),{TOTALS}
          FROM usage_samples u LEFT JOIN sessions s ON s.id=u.session_id
          GROUP BY u.agent,u.session_id ORDER BY max(u.ts) IS NULL,max(u.ts) DESC,u.session_id LIMIT ?1"
-    ))?;
+        )
+    };
+    let mut query = store.connection().prepare(&sql)?;
     let partial = partial_imports(store)?;
     let rows = query.query_map([limit.min(1000) as i64], |row| {
         let models: String = row.get(3)?;
@@ -1165,16 +1203,21 @@ mod tests {
         let path = dir.path().join("fixture.jsonl");
         let message = |id: &str, input: u64| json!({"type":"assistant","sessionId":"s","message":{"id":id,"model":"unknown","usage":{"input_tokens":input,"output_tokens":1}}});
         let commit = |snapshot: &Snapshot| {
-            commit_snapshot(&store, "claude", "s", "/project", &path, snapshot).unwrap()
+            commit_snapshot(
+                &store, "claude", "s", "/project", "/project", &path, snapshot,
+            )
+            .unwrap()
         };
         std::fs::write(&path, format!("{}\n", message("m1", 10))).unwrap();
-        let older = read_snapshot_from("claude", "s", &path, MAX_BYTES, None).unwrap();
+        let older =
+            read_snapshot_from(store.connection(), "claude", "s", &path, MAX_BYTES, None).unwrap();
         std::fs::write(
             &path,
             format!("{}\n{}\n", message("m1", 10), message("m2", 20)),
         )
         .unwrap();
-        let newer = read_snapshot_from("claude", "s", &path, MAX_BYTES, None).unwrap();
+        let newer =
+            read_snapshot_from(store.connection(), "claude", "s", &path, MAX_BYTES, None).unwrap();
         assert!(commit(&newer));
         assert!(!commit(&older), "the older snapshot must not be written");
         assert_eq!(
@@ -1672,10 +1715,23 @@ mod tests {
             lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
         )
         .unwrap();
-        let read = || read_snapshot_from("codex", "s", &path, MAX_BYTES, cursor.as_ref()).unwrap();
+        let read = || {
+            read_snapshot_from(
+                store.connection(),
+                "codex",
+                "s",
+                &path,
+                MAX_BYTES,
+                cursor.as_ref(),
+            )
+            .unwrap()
+        };
         let (first, second) = (read(), read());
         let commit = |snapshot: &Snapshot| {
-            commit_snapshot(&store, "codex", "s", "/project", &path, snapshot).unwrap()
+            commit_snapshot(
+                &store, "codex", "s", "/project", "/project", &path, snapshot,
+            )
+            .unwrap()
         };
         assert!(commit(&first));
         assert!(!commit(&second), "the cursor moved, so this read is stale");

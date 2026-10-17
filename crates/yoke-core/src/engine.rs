@@ -1,5 +1,6 @@
 use std::io;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -9,11 +10,13 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::config::{Config, Gate, GateAction};
-use crate::event::{AgentEvent, EventKind};
+use crate::event::{Agent, AgentEvent, EventKind};
 
 #[path = "review/process.rs"]
 mod process;
-pub use process::{execute_bounded, kill_running_groups, ProcessOutput};
+pub use process::{
+    execute_bounded, execute_bounded_with_optional_stdin, kill_running_groups, ProcessOutput,
+};
 
 /// Paths supplied by the hook integration, independent of the process cwd.
 #[derive(Debug, Clone)]
@@ -83,6 +86,81 @@ fn matches(gate: &Gate, ev: &AgentEvent, haystack: &str) -> Result<bool, regex::
 }
 
 const OUTPUT_CAP: usize = 4096;
+const TOOL_INPUT_CAP: usize = 32 * 1024;
+
+fn gate_input(input: &Value) -> (String, bool) {
+    let mut text = input.to_string();
+    if text.len() <= TOOL_INPUT_CAP {
+        return (text, false);
+    }
+    const MARKER: &str = "\n[YOKE TOOL INPUT TRUNCATED]";
+    let mut end = TOOL_INPUT_CAP - MARKER.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push_str(MARKER);
+    (text, true)
+}
+
+fn gate_environment_key(key: &std::ffi::OsStr) -> bool {
+    matches!(
+        key.to_str(),
+        Some(
+            "PATH"
+                | "TMPDIR"
+                | "TMP"
+                | "TEMP"
+                | "LANG"
+                | "LC_ALL"
+                | "LC_CTYPE"
+                | "LC_MESSAGES"
+                | "TZ"
+                | "USER"
+                | "LOGNAME"
+                | "SHELL"
+                | "TERM"
+                | "COLORTERM"
+                | "NO_COLOR"
+                | "CI"
+                | "XDG_CONFIG_HOME"
+                | "XDG_CACHE_HOME"
+                | "XDG_DATA_HOME"
+                | "XDG_STATE_HOME"
+                | "XDG_RUNTIME_DIR"
+                | "CARGO_HOME"
+                | "RUSTUP_HOME"
+                | "RUSTUP_TOOLCHAIN"
+                | "GOPATH"
+                | "GOROOT"
+                | "GOCACHE"
+                | "GOMODCACHE"
+                | "GOFLAGS"
+                | "NVM_DIR"
+                | "NODE_OPTIONS"
+                | "VOLTA_HOME"
+                | "PNPM_HOME"
+                | "BUN_INSTALL"
+                | "PYENV_ROOT"
+                | "VIRTUAL_ENV"
+                | "CONDA_PREFIX"
+                | "UV_CACHE_DIR"
+                | "JAVA_HOME"
+                | "GRADLE_USER_HOME"
+                | "MAVEN_OPTS"
+                | "ANDROID_HOME"
+                | "DOTNET_ROOT"
+                | "SSL_CERT_FILE"
+                | "SSL_CERT_DIR"
+                | "NODE_EXTRA_CA_CERTS"
+                | "REQUESTS_CA_BUNDLE"
+                | "CURL_CA_BUNDLE"
+                | "NO_PROXY"
+                | "no_proxy"
+                | "PKG_CONFIG_PATH"
+        )
+    )
+}
 
 struct CheckResult {
     reason: Option<String>,
@@ -100,9 +178,34 @@ fn run_gate(
     kind: EventKind,
     ev: &AgentEvent,
     ctx: &EvaluationContext,
+    pass_env: &[String],
 ) -> io::Result<CheckResult> {
-    let mut command = Command::new(gate.shell.as_deref().unwrap_or("sh"));
+    let (input, truncated) = gate_input(&ev.tool_input);
+    let shell = gate.shell.as_deref().unwrap_or("/bin/sh");
+    let shell = if std::path::Path::new(shell).is_absolute() {
+        PathBuf::from(shell)
+    } else {
+        crate::process::executable(shell)
+            .map_err(|error| io::Error::new(io::ErrorKind::NotFound, error.to_string()))?
+    };
+    let mut command = Command::new(shell);
+    let inherited: Vec<_> = std::env::vars_os().collect();
+    let allowed = |key: &std::ffi::OsStr| {
+        gate_environment_key(key)
+            || pass_env
+                .iter()
+                .chain(&gate.pass_env)
+                .any(|name| key == std::ffi::OsStr::new(name))
+    };
     command
+        .env_clear()
+        .envs(
+            inherited
+                .iter()
+                .filter(|(key, _)| allowed(key))
+                .map(|(key, value)| (key, value)),
+        )
+        .env("HOME", &ctx.home)
         .arg("-c")
         .arg(&gate.run)
         .current_dir(&ctx.policy_root)
@@ -112,10 +215,28 @@ fn run_gate(
             "YOKE_TOOL_NAME",
             env_text(ev.tool_name.as_deref().unwrap_or_default()),
         )
-        .env("YOKE_TOOL_INPUT", ev.tool_input.to_string())
+        .env("YOKE_TOOL_INPUT", input)
+        .env(
+            "YOKE_TOOL_INPUT_TRUNCATED",
+            if truncated { "1" } else { "0" },
+        )
         .env("YOKE_SESSION", env_text(&ev.session_id))
         .env("YOKE_CWD", &ctx.cwd)
         .env("YOKE_PROJECT", &ctx.project);
+    // SAFETY: this child-only callback calls only async-signal-safe libc functions.
+    // Existing stricter hard limits are preserved; no process-wide limit is changed.
+    unsafe {
+        command.pre_exec(move || {
+            let limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::setrlimit(libc::RLIMIT_CORE, &limit) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let output = execute_bounded(
         &mut command,
         &[],
@@ -145,7 +266,7 @@ fn run_gate(
             error
         }
     })?;
-    let reason = if output.timed_out {
+    let mut reason = if output.timed_out {
         Some(format!(
             "gate '{}' timed out after {}s",
             gate.name, gate.timeout
@@ -171,6 +292,30 @@ fn run_gate(
             }
         }))
     };
+    if let Some(reason) = &mut reason {
+        let mut withheld: Vec<_> = inherited
+            .iter()
+            .filter_map(|(key, _)| {
+                let name = key.to_str()?;
+                (!allowed(key) && crate::config::environment_name(name) && name != "HOME")
+                    .then_some(name)
+            })
+            .collect();
+        withheld.sort_unstable();
+        if !withheld.is_empty() {
+            let count = withheld.len();
+            withheld.truncate(12);
+            let diagnostic = format!("\nWithheld environment names: {}{}; pass only required names with [gates].pass_env or this [[gate]].pass_env, then run yoke trust in your own terminal.", withheld.join(", "), if count > 12 { " (first 12)" } else { "" });
+            let mut start = reason
+                .len()
+                .saturating_sub(OUTPUT_CAP.saturating_sub(diagnostic.len()));
+            while !reason.is_char_boundary(start) {
+                start += 1;
+            }
+            reason.drain(..start);
+            reason.push_str(&diagnostic);
+        }
+    }
     Ok(CheckResult {
         reason,
         exit_code: output.exit_code,
@@ -209,6 +354,17 @@ pub fn evaluate_with_context(
     ev: &AgentEvent,
     ctx: &EvaluationContext,
 ) -> Outcome {
+    evaluate_for_agent_with_context(cfg, kind, ev, ctx, Agent::Claude)
+}
+
+/// Evaluate gates using the vendor's rewrite contract and explicit trusted paths.
+pub fn evaluate_for_agent_with_context(
+    cfg: &Config,
+    kind: EventKind,
+    ev: &AgentEvent,
+    ctx: &EvaluationContext,
+    agent: Agent,
+) -> Outcome {
     let mut out = Outcome {
         allow: true,
         ..Default::default()
@@ -229,6 +385,20 @@ pub fn evaluate_with_context(
     let mut rewrites = Vec::new();
     for gate in cfg.gates.iter().filter(|g| g.on == kind) {
         let start = Instant::now();
+        if agent == Agent::Codex
+            && gate.action == GateAction::Rewrite
+            && (gate
+                .match_tool
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+                || gate
+                    .match_contains
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty()))
+        {
+            out.record(&gate.name, "error", start, None, Some(format!("Codex rewrite gate '{}' requires nonempty match_tool and match_contains; add both matchers to yoke.toml and approve the updated policy with yoke trust", gate.name)), kind);
+            continue;
+        }
         match matches(gate, ev, &haystack) {
             Ok(false) => continue,
             Err(e) => {
@@ -268,33 +438,35 @@ pub fn evaluate_with_context(
                 ),
                 kind,
             ),
-            GateAction::Check => match run_gate(gate, kind, ev, ctx) {
-                Ok(check) => {
-                    let result = if check.timed_out {
-                        "timeout"
-                    } else if check.reason.is_some() {
-                        "fail"
-                    } else {
-                        "pass"
-                    };
-                    out.record(
+            GateAction::Check => {
+                match run_gate(gate, kind, ev, ctx, &cfg.gate_environment.pass_env) {
+                    Ok(check) => {
+                        let result = if check.timed_out {
+                            "timeout"
+                        } else if check.reason.is_some() {
+                            "fail"
+                        } else {
+                            "pass"
+                        };
+                        out.record(
+                            &gate.name,
+                            result,
+                            start,
+                            check.exit_code,
+                            check.reason,
+                            kind,
+                        );
+                    }
+                    Err(e) => out.record(
                         &gate.name,
-                        result,
+                        "error",
                         start,
-                        check.exit_code,
-                        check.reason,
+                        None,
+                        Some(format!("gate '{}' could not run: {e}", gate.name)),
                         kind,
-                    );
+                    ),
                 }
-                Err(e) => out.record(
-                    &gate.name,
-                    "error",
-                    start,
-                    None,
-                    Some(format!("gate '{}' could not run: {e}", gate.name)),
-                    kind,
-                ),
-            },
+            }
         }
     }
     if out.reasons.is_empty() && kind == EventKind::PreToolUse {
@@ -467,6 +639,146 @@ mod tests {
     }
 
     #[test]
+    fn check_input_is_bounded_without_losing_full_match() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = Config::parse("[[gate]]\nname='bounded'\non='pre_tool_use'\nmatch_contains='TAIL'\nrun='test ${#YOKE_TOOL_INPUT} -lt 65536 && test \"$YOKE_TOOL_INPUT_TRUNCATED\" = 1 && case \"$YOKE_TOOL_INPUT\" in *\"[YOKE TOOL INPUT TRUNCATED]\"*) exit 0;; *) exit 1;; esac'").unwrap();
+        let out = evaluate_with_context(
+            &cfg,
+            EventKind::PreToolUse,
+            &bash_event(&format!("{}TAIL", "界".repeat(100_000))),
+            &context(root.path()),
+        );
+        assert!(out.allow, "{:?}", out.reasons);
+        assert_eq!(out.ran, ["bounded"]);
+    }
+
+    #[test]
+    fn check_environment_and_resource_limits_are_restricted() {
+        let root = tempfile::tempdir().unwrap();
+        let limits = "printf '%s\\n' \"$(ulimit -f)\" \"$(ulimit -t)\" \"$(ulimit -n)\"";
+        let parent = Command::new("/bin/sh")
+            .args(["-c", limits])
+            .output()
+            .unwrap();
+        assert!(parent.status.success());
+        let mut cfg =
+            Config::parse("[[gate]]\nname='restricted'\non='pre_tool_use'\nrun='true'").unwrap();
+        cfg.gates[0].run = format!("test \"$(ulimit -c)\" = 0 && {limits} > limits.txt");
+        let out = evaluate_with_context(
+            &cfg,
+            EventKind::PreToolUse,
+            &bash_event("ls"),
+            &context(root.path()),
+        );
+        assert!(out.allow, "{:?}", out.reasons);
+        assert_eq!(
+            std::fs::read(root.path().join("limits.txt")).unwrap(),
+            parent.stdout,
+            "file size, CPU and descriptor limits must stay inherited"
+        );
+    }
+
+    #[test]
+    fn gate_environment_keeps_toolchains_and_passes_only_trusted_names() {
+        const CHILD: &str = "YOKE_TEST_GATE_ENV";
+        if std::env::var_os(CHILD).is_none() {
+            let out = Command::new(std::env::current_exe().unwrap())
+                .env_clear().env("HOME", std::env::var_os("HOME").unwrap())
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .args(["--exact", "engine::tests::gate_environment_keeps_toolchains_and_passes_only_trusted_names", "--quiet"])
+                .env(CHILD, "1").env("CARGO_HOME", "/gate-cargo")
+                .env("VIRTUAL_ENV", "/gate-python")
+                .env("AWS_SECRET_ACCESS_KEY", "cx3-test-secret")
+                .env("GITHUB_TOKEN", "cx3-test-token")
+                .output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        for (settings, command) in [
+            ("", "test \"$CARGO_HOME\" = /gate-cargo && test \"$VIRTUAL_ENV\" = /gate-python && test -z \"${AWS_SECRET_ACCESS_KEY+x}\" && test -z \"${GITHUB_TOKEN+x}\""),
+            ("[gates]\npass_env=['AWS_SECRET_ACCESS_KEY']\n", "test \"$AWS_SECRET_ACCESS_KEY\" = cx3-test-secret && test -z \"${GITHUB_TOKEN+x}\""),
+        ] {
+            let mut cfg = Config::parse(&format!("{settings}[[gate]]\nname='env'\non='pre_tool_use'\nrun='true'")).unwrap();
+            cfg.gates[0].run = command.into();
+            let out = evaluate_with_context(&cfg, EventKind::PreToolUse, &bash_event("ls"), &context(root.path()));
+            assert!(out.allow, "{:?}", out.reasons);
+        }
+        let cfg = Config::parse("[[gate]]\nname='env'\non='pre_tool_use'\npass_env=['GITHUB_TOKEN']\nrun='test \"$GITHUB_TOKEN\" = cx3-test-token && test -z \"${AWS_SECRET_ACCESS_KEY+x}\"'").unwrap();
+        assert!(
+            evaluate_with_context(
+                &cfg,
+                EventKind::PreToolUse,
+                &bash_event("ls"),
+                &context(root.path())
+            )
+            .allow
+        );
+        let cfg = Config::parse("[[gate]]\nname='env'\non='pre_tool_use'\nrun='exit 3'").unwrap();
+        let out = evaluate_with_context(
+            &cfg,
+            EventKind::PreToolUse,
+            &bash_event("ls"),
+            &context(root.path()),
+        );
+        let reason = out.reasons.join(" ");
+        assert!(
+            reason.contains("AWS_SECRET_ACCESS_KEY")
+                && reason.contains("GITHUB_TOKEN")
+                && reason.contains("pass_env"),
+            "{reason}"
+        );
+        assert!(!reason.contains("cx3-test-secret") && !reason.contains("cx3-test-token"));
+    }
+
+    #[test]
+    fn codex_rewrite_requires_both_matchers_without_breaking_claude() {
+        let root = tempfile::tempdir().unwrap();
+        let mut cfg = Config::parse("[[gate]]\nname='rewrite'\non='pre_tool_use'\naction='rewrite'\nrewrite_pattern='safe'\nrewrite_to='safer'").unwrap();
+        let event = bash_event("safe");
+        let ctx = context(root.path());
+        let out = evaluate_for_agent_with_context(
+            &cfg,
+            EventKind::PreToolUse,
+            &event,
+            &ctx,
+            Agent::Codex,
+        );
+        assert!(out.blocked());
+        assert!(out.error);
+        assert!(out.reasons[0].contains("match_tool and match_contains"));
+        assert!(
+            evaluate_with_context(&cfg, EventKind::PreToolUse, &event, &ctx)
+                .updated_input
+                .is_some()
+        );
+        cfg.gates[0].match_tool = Some("Bash".into());
+        cfg.gates[0].match_contains = Some("safe".into());
+        assert!(evaluate_for_agent_with_context(
+            &cfg,
+            EventKind::PreToolUse,
+            &event,
+            &ctx,
+            Agent::Codex
+        )
+        .updated_input
+        .is_some());
+        cfg.gates[0].match_contains = Some(" ".into());
+        assert!(evaluate_for_agent_with_context(
+            &cfg,
+            EventKind::PreToolUse,
+            &event,
+            &ctx,
+            Agent::Codex
+        )
+        .blocked());
+    }
+
+    #[test]
     fn failing_gate_vetoes_matching_pre_tool_use() {
         let out = evaluate(
             &guard(),
@@ -474,7 +786,8 @@ mod tests {
             &bash_event("git push --force"),
         );
         assert!(out.blocked());
-        assert_eq!(out.reasons, vec!["force push blocked"]);
+        assert_eq!(out.reasons.len(), 1);
+        assert_eq!(out.reasons[0].lines().next(), Some("force push blocked"));
     }
 
     #[test]
@@ -641,7 +954,7 @@ mod tests {
         assert_eq!(out.gates[1].exit_code, Some(2));
         assert_eq!(out.reasons.len(), 1);
         assert!(out.reasons[0].len() <= OUTPUT_CAP);
-        assert!(out.reasons[0].ends_with("TAIL"));
+        assert!(out.reasons[0].contains("TAIL"));
     }
 
     #[test]
@@ -653,7 +966,7 @@ mod tests {
             name = "timeout"
             on = "pre_tool_use"
             timeout = 1
-            run = "sleep 30 & child=$!; printf '%s' $child > child.pid; wait $child"
+            run = '''sh -c 'sleep 30 & child=$!; printf "%s" "$child" > child.pid; wait "$child"' '''
         "#,
         )
         .unwrap();
@@ -793,6 +1106,10 @@ mod tests {
         .unwrap();
         let out = evaluate(&cfg, EventKind::PostToolUse, &bash_event("ls"));
         assert!(!out.blocked());
-        assert_eq!(out.reasons, vec!["gate 'lint' failed (exit 3)"]);
+        assert_eq!(out.reasons.len(), 1);
+        assert_eq!(
+            out.reasons[0].lines().next(),
+            Some("gate 'lint' failed (exit 3)")
+        );
     }
 }

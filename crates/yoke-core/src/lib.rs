@@ -11,6 +11,8 @@ pub mod notifications;
 pub mod plan;
 pub mod preset;
 pub mod private;
+pub mod process;
+pub mod project;
 pub mod quota;
 pub mod redact;
 pub mod review;

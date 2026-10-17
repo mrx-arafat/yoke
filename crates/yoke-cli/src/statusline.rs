@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
-use yoke_core::engine::execute_bounded;
+use yoke_core::engine::execute_bounded_with_optional_stdin;
 use yoke_core::notifications;
 use yoke_core::quota;
 use yoke_core::store::Store;
@@ -367,7 +367,7 @@ fn run_wrapper(wrap: &str, input: &[u8]) -> Result<String> {
         !wrap.trim().is_empty() && wrap.len() <= 4096 && !wrap.contains('\0'),
         "invalid statusline wrapper"
     );
-    let output = execute_bounded(
+    let output = execute_bounded_with_optional_stdin(
         Command::new("/bin/sh")
             .arg("-c")
             .arg(wrap)

@@ -124,6 +124,22 @@ pub(crate) fn first_problem() -> Result<Option<String>> {
     Ok(report.problems.into_iter().next())
 }
 
+fn check_private_permissions(path: &Path, required: &str, problems: &mut Vec<String>) {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => problems.push(format!(
+            "{} is a symlink; move it aside in your own terminal and restore private Yoke state at this path", path.display()
+        )),
+        Ok(meta) if meta.permissions().mode() & 0o077 != 0 => problems.push(format!(
+            "{} permits group or other access (mode {:03o}); run chmod {required} {} in your own terminal",
+            path.display(), meta.permissions().mode() & 0o777, commands::quote(&path.display().to_string())
+        )),
+        Ok(_) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => problems.push(format!("cannot inspect permissions of {}: {error}; check this path in your own terminal", path.display())),
+    }
+}
+
 fn collect(inputs: Inputs) -> Result<Report> {
     let Inputs {
         home,
@@ -134,6 +150,8 @@ fn collect(inputs: Inputs) -> Result<Report> {
     let mut problems = Vec::new();
     let mut guidance = Vec::new();
     let path = home.join(".yoke/state.db");
+    check_private_permissions(&home.join(".yoke"), "700", &mut problems);
+    check_private_permissions(&path, "600", &mut problems);
     // A missing database stays missing: an empty in-memory store answers with defaults.
     let opened = if path.exists() {
         Store::open_read_only(&path)

@@ -22,7 +22,9 @@ pub(crate) fn managed(options: &InstallOptions, agent: Agent) -> Result<Option<M
         return Ok(None);
     };
     let mut stale = Vec::new();
-    if receipt.executable != options.executable {
+    if receipt.executable != options.executable
+        && receipt.executable.canonicalize().ok() != options.executable.canonicalize().ok()
+    {
         stale.push((
             "executable".into(),
             format!(

@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use serde_json::{json, Value};
@@ -44,7 +45,11 @@ impl Fixture {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_yoke"));
+        self.command_at(Path::new(env!("CARGO_BIN_EXE_yoke")), args)
+    }
+
+    fn command_at(&self, bin: &Path, args: &[&str]) -> Command {
+        let mut cmd = isolated_command(bin, &self.home);
         cmd.args(args)
             .current_dir(&self.project)
             .env("HOME", &self.home)
@@ -78,6 +83,27 @@ impl Fixture {
     fn hook(&self, agent: &str, event: &str, payload: Value) -> Output {
         self.run(&["run-hook", "--agent", agent, event], &payload.to_string())
     }
+}
+
+fn isolated_command(bin: &Path, home: &Path) -> Command {
+    let home = home.canonicalize().expect("fixture home must exist");
+    let temporary = std::env::temp_dir().canonicalize().unwrap();
+    assert!(
+        home.starts_with(&temporary) && home != temporary,
+        "fixture HOME must be inside a temporary directory"
+    );
+    let curl = home.parent().unwrap().join(".fixture-curl");
+    if !curl.exists() {
+        fs::write(&curl, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut command = Command::new(bin);
+    command
+        .env("HOME", &home)
+        .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env("YOKE_CURL", curl);
+    command
 }
 
 fn payload() -> Value {
@@ -311,7 +337,7 @@ fn readonly_state_preserves_trusted_tool_decisions_without_audit_writes() {
         ("codex", true),
     ] {
         let f = Fixture::new();
-        f.snapshot("mode='enforce'\n[[gate]]\nname='review'\non='PreToolUse'\naction='deny'\nmatch_tool='Bash'\nmessage='review required'\n[[gate]]\nname='rewrite'\non='PreToolUse'\naction='rewrite'\nmatch_tool='exec_command'\nrewrite_pattern='test'\nrewrite_to='safe'");
+        f.snapshot("mode='enforce'\n[[gate]]\nname='review'\non='PreToolUse'\naction='deny'\nmatch_tool='Bash'\nmessage='review required'\n[[gate]]\nname='rewrite'\non='PreToolUse'\naction='rewrite'\nmatch_tool='exec_command'\nmatch_contains='test'\nrewrite_pattern='test'\nrewrite_to='safe'");
         // A disk edit must never replace approved bytes during recovery.
         fs::write(f.project.join("yoke.toml"), "mode='observe'").unwrap();
         for args in [
@@ -507,7 +533,7 @@ fn writer_lock_uses_committed_trust_without_bypassing_denials() {
 #[test]
 fn hook_uses_payload_cwd_and_preserves_permission_checks_on_rewrites() {
     let f = Fixture::new();
-    f.snapshot("mode='enforce'\n[[gate]]\nname='rewrite'\non='pre_tool_use'\naction='rewrite'\nrewrite_pattern='test'\nrewrite_to='safe'");
+    f.snapshot("mode='enforce'\n[[gate]]\nname='rewrite'\non='pre_tool_use'\naction='rewrite'\nmatch_tool='Bash|exec_command'\nmatch_contains='test'\nrewrite_pattern='test'\nrewrite_to='safe'");
     let mut event = payload();
     event["cwd"] = json!(f.project);
     for agent in ["claude", "codex"] {
@@ -1013,12 +1039,44 @@ fn completed_plan_reopens_when_its_tree_changes_and_a_fresh_check_completes_it_a
 
 #[test]
 fn install_follows_agent_config_dirs_and_health_stays_read_only() {
+    use std::os::unix::fs::MetadataExt;
     let f = Fixture::new();
+    // Health correctly warns about target/ executables; exercise a stable installed copy.
+    let bin = f.home.join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o775)).unwrap();
+    let executable = bin.join("yoke");
+    fs::copy(env!("CARGO_BIN_EXE_yoke"), &executable).unwrap();
+    // Sticky temporary ancestors protect owned entries; group write is guidance only.
+    let canonical = executable.canonicalize().unwrap();
+    let mut shared_locations = Vec::new();
+    let mut group_locations = Vec::new();
+    // SAFETY: geteuid only reads the process's effective user ID.
+    let uid = unsafe { libc::geteuid() };
+    let mut child: Option<&Path> = None;
+    for path in canonical.ancestors() {
+        let meta = fs::metadata(path).unwrap();
+        let mode = meta.permissions().mode();
+        let protected = meta.is_dir()
+            && mode & 0o1000 != 0
+            && child.is_some_and(|child| {
+                let owner = fs::metadata(child).unwrap().uid();
+                owner == uid || owner == 0
+            });
+        if mode & 0o002 != 0 {
+            if !protected {
+                shared_locations.push(path.to_path_buf());
+            }
+        } else if mode & 0o020 != 0 {
+            group_locations.push(path.to_path_buf());
+        }
+        child = Some(path);
+    }
     let claude = f.home.join("claude-work");
     let codex = f.home.join("codex-home");
     let state = f.home.join(".yoke/state.db");
     let run = |args: &[&str]| {
-        f.command(args)
+        f.command_at(&executable, args)
             .env("CLAUDE_CONFIG_DIR", &claude)
             .env("CODEX_HOME", &codex)
             .output()
@@ -1037,15 +1095,56 @@ fn install_follows_agent_config_dirs_and_health_stays_read_only() {
     };
     let missing = health(1);
     assert_eq!(missing["status"], "failing");
-    assert!(missing["problems"][0]
-        .as_str()
-        .unwrap()
-        .contains("not installed for any agent"));
+    assert!(
+        missing["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|problem| problem
+                .as_str()
+                .unwrap()
+                .contains("not installed for any agent")),
+        "{missing}"
+    );
 
     success(&run(&["install", "--agent", "claude,codex"]));
     assert!(!f.home.join(".claude").exists() && !f.home.join(".codex").exists());
-    let installed = health(0);
-    assert_eq!(installed["status"], "attention");
+    let installed = health(i32::from(!shared_locations.is_empty()));
+    assert_eq!(
+        installed["status"],
+        if shared_locations.is_empty() {
+            "attention"
+        } else {
+            "failing"
+        }
+    );
+    let problems = installed["problems"].as_array().unwrap();
+    assert_eq!(problems.len(), shared_locations.len() * 2, "{installed}");
+    for problem in problems {
+        let problem = problem.as_str().unwrap();
+        assert!(problem.contains("writable by others"), "{problem}");
+        assert!(
+            shared_locations
+                .iter()
+                .any(|path| problem.contains(&path.display().to_string())),
+            "{problem}"
+        );
+    }
+    for path in group_locations {
+        assert!(
+            installed["guidance"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|line| {
+                    let line = line.as_str().unwrap();
+                    line.contains(&path.display().to_string())
+                        && line.contains("group-writable")
+                        && line.contains("chmod g-w")
+                }),
+            "{installed}"
+        );
+    }
     for agent in installed["agents"].as_array().unwrap() {
         assert_eq!(agent["installed"], true, "{agent}");
         assert!(agent["settings"].as_str().unwrap().starts_with(
@@ -1072,7 +1171,7 @@ fn install_follows_agent_config_dirs_and_health_stays_read_only() {
             .to_owned();
         assert!(command.contains(&format!("--agent {agent} PreToolUse")));
         for (tool, denied) in [("Bash", true), ("Read", false)] {
-            let mut child = Command::new("sh")
+            let mut child = isolated_command(Path::new("sh"), &f.home)
                 .args(["-c", &command])
                 .current_dir(&f.project)
                 .env("HOME", &f.home)
@@ -1235,6 +1334,9 @@ fn extensions_inventory_never_creates_or_migrates_state() {
     let writer = rusqlite::Connection::open(&state).unwrap();
     writer.pragma_update(None, "foreign_keys", false).unwrap();
     for down in [
+        include_str!("../../yoke-core/src/store/015-usage-summaries.down.sql"),
+        include_str!("../../yoke-core/src/store/014-session-anchors.down.sql"),
+        include_str!("../../yoke-core/src/store/013-scale-indexes.down.sql"),
         include_str!("../../yoke-core/src/store/012-usage-time.down.sql"),
         include_str!("../../yoke-core/src/store/011-notifications.down.sql"),
         include_str!("../../yoke-core/src/store/010-jobs-recall.down.sql"),

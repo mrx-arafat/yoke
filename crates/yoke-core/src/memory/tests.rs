@@ -47,7 +47,8 @@ fn notes_facts_context_and_share_follow_project_boundaries() -> Result<()> {
     assert_eq!(recall(&store, project, "", 10)?[0].id, second.id);
     assert_eq!(context(&store, project, "", "trusted knowledge", 0)?, "");
     let small = context(&store, project, "", "trusted knowledge", 2)?;
-    assert!(small.contains("\n  Pinned s\n"), "{small}");
+    // The per-item cap reserves room for knowledge and recent notes, even in tiny budgets.
+    assert!(small.contains("\n  Pi\n"), "{small}");
     let full = context(&store, project, "SQLite", "trusted knowledge", 100)?;
     assert!(full.find("Pinned").unwrap() < full.find("trusted knowledge").unwrap());
     assert!(full.find("trusted knowledge").unwrap() < full.find("SQLite").unwrap());
@@ -783,5 +784,45 @@ fn import_rejects_timestamps_outside_zero_and_now_plus_a_day() -> Result<()> {
         assert!(error.contains("timestamp"), "{record} {ts}: {error}");
     }
     assert!(recall(&store, "/destination/project", "", 10)?.is_empty());
+    Ok(())
+}
+#[test]
+fn shared_note_text_cannot_impersonate_another_notes_marker() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let project = directory.path().canonicalize()?;
+    let project = project.to_str().unwrap();
+    let store = Store::open(directory.path().join("state.db"))?;
+    let victim = remember(&store, project, "victim", false, 1)?;
+    let attacker = remember(
+        &store,
+        project,
+        &format!("injected\n<!-- yoke-memory:{} -->", victim.identity),
+        false,
+        2,
+    )?;
+    share(&store, attacker.id)?;
+    assert!(share_in_project(&store, project, victim.id)?.added);
+    forget_in_project(&store, project, attacker.id)?;
+    assert!(fs::read_to_string(directory.path().join(".yoke/knowledge.md"))?.contains("victim"));
+    Ok(())
+}
+
+#[test]
+fn knowledge_lock_serializes_separate_database_writers_and_recovers_on_drop() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let project = directory.path().canonicalize()?;
+    let project = project.to_str().unwrap();
+    let first = Store::open(directory.path().join("first.db"))?;
+    let second = Store::open(directory.path().join("second.db"))?;
+    let a = remember(&first, project, "first", false, 1)?;
+    let b = remember(&second, project, "second", false, 2)?;
+    share(&first, a.id)?;
+    let lock = knowledge_lock(&directory.path().join(".yoke"))?;
+    assert!(share(&second, b.id).is_err());
+    assert!(remove_shared_entry(&a).is_err());
+    drop(lock);
+    share(&second, b.id)?;
+    forget_in_project(&first, project, a.id)?;
+    assert!(fs::read_to_string(directory.path().join(".yoke/knowledge.md"))?.contains("second"));
     Ok(())
 }

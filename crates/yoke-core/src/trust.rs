@@ -261,9 +261,10 @@ fn select_policy(
 /// Canonical project identity survives deletion of the trusted config on disk.
 pub fn project_root(store: &Store, cwd: &Path) -> Result<PathBuf> {
     discover_root(cwd, home_directory().as_deref(), |root, file| {
-        Ok(store
-            .get_trust("project", path_key(root)?, path_key(file)?)?
-            .is_some())
+        let (Some(root), Some(file)) = (root.to_str(), file.to_str()) else {
+            return Ok(false);
+        };
+        Ok(store.get_trust("project", root, file)?.is_some())
     })
 }
 
@@ -338,6 +339,11 @@ fn snapshot(store: &Store, scope: &str, root: &Path, file: &Path) -> Result<Opti
 /// The snapshot that applies to `file`: its own, else the one approved for the repository a
 /// linked worktree belongs to when the worktree holds those exact bytes.
 fn trusted_row(store: &Store, scope: &str, root: &Path, file: &Path) -> Result<Option<TrustRow>> {
+    // Never alias an unrepresentable project to another project's lossy display name.
+    // Ancestor discovery continues, so trusted parent and global policy still apply.
+    if scope == "project" && (root.to_str().is_none() || file.to_str().is_none()) {
+        return Ok(None);
+    }
     match snapshot(store, scope, root, file)? {
         Some(row) => Ok(Some(row)),
         None if scope == "project" => inherited(store, root, file),
@@ -507,6 +513,58 @@ mod tests {
         fn load(&self) -> LoadedConfig {
             load_trusted(&self.store, &self.project, &self.home).unwrap()
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_project_scope_keeps_global_enforcement_without_lossy_trust_keys() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let f = Fixture::new();
+        fs::write(f.home.join(".yoke/config.toml"), "mode='enforce'").unwrap();
+        prepare_global(&f.store, &f.home)
+            .unwrap()
+            .commit(&f.store)
+            .unwrap();
+        let project = f
+            .temp
+            .path()
+            .join(OsString::from_vec(b"project-\xff".to_vec()));
+        let lossy = PathBuf::from(project.to_string_lossy().into_owned());
+        let content = "mode='observe'";
+        f.store
+            .put_trust_batch(&[TrustRow {
+                scope: "project".into(),
+                root: lossy.to_str().unwrap().into(),
+                file: lossy.join("yoke.toml").to_str().unwrap().into(),
+                sha256: sha256(content.as_bytes()),
+                content: content.into(),
+                trusted_at: 0,
+            }])
+            .unwrap();
+        let loaded = load_policy(&f.store, &project, &project, &project, &f.home)
+            .unwrap()
+            .loaded;
+        assert_eq!(loaded.config.mode, Mode::Enforce);
+        assert!(!loaded
+            .snapshots
+            .iter()
+            .any(|snapshot| snapshot.scope == "project" && snapshot.trusted));
+
+        fs::write(f.project.join("yoke.toml"), "mode='enforce'").unwrap();
+        prepare_project(&f.store, &f.project)
+            .unwrap()
+            .commit(&f.store)
+            .unwrap();
+        let nested = f
+            .project
+            .canonicalize()
+            .unwrap()
+            .join(OsString::from_vec(b"nested-\xff".to_vec()));
+        let policy = load_policy(&f.store, &nested, &f.project, &nested, &f.home).unwrap();
+        assert_eq!(policy.policy_root, f.project.canonicalize().unwrap());
+        assert_eq!(policy.loaded.config.mode, Mode::Enforce);
     }
 
     #[test]

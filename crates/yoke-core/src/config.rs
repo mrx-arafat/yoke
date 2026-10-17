@@ -31,12 +31,15 @@ pub struct Config {
     pub meta: Meta,
     pub mode: Mode,
     pub log: LogConfig,
+    pub update: UpdateConfig,
     pub stop: StopConfig,
     pub plans: PlansConfig,
     pub memory: MemoryConfig,
     pub review: ReviewConfig,
     #[serde(rename = "gate")]
     pub gates: Vec<Gate>,
+    #[serde(rename = "gates")]
+    pub gate_environment: GateEnvironment,
     #[serde(skip)]
     pub(crate) specified: BTreeSet<String>,
 }
@@ -45,6 +48,33 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct Meta {
     pub name: String,
+}
+
+/// Additional inherited environment names explicitly approved by a human.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GateEnvironment {
+    pub pass_env: Vec<String>,
+}
+
+pub(crate) fn environment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+        })
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdateConfig {
+    pub check: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self { check: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -156,6 +186,8 @@ pub enum GateAction {
 #[serde(deny_unknown_fields)]
 pub struct Gate {
     pub name: String,
+    #[serde(default)]
+    pub pass_env: Vec<String>,
     pub on: EventKind,
     #[serde(default)]
     pub action: GateAction,
@@ -257,6 +289,11 @@ impl Config {
 
     /// Validate before accepting a snapshot and before using persisted data.
     pub fn validate(&self) -> Result<()> {
+        for names in std::iter::once(&self.gate_environment.pass_env)
+            .chain(self.gates.iter().map(|gate| &gate.pass_env))
+        {
+            ensure!(names.len() <= 64 && names.iter().all(|name| environment_name(name)), "pass_env requires at most 64 exact environment names (letters, digits and underscores, not starting with a digit); replace globs or invalid names and run yoke trust");
+        }
         ensure!(
             matches!(self.memory.digest_agent.as_str(), "claude" | "codex"),
             "memory.digest_agent must be claude or codex"
@@ -398,6 +435,8 @@ impl Config {
         merge!("mode", mode);
         merge!("log.retention_days", log.retention_days);
         merge!("log.payload_cap", log.payload_cap);
+        merge!("update.check", update.check);
+        merge!("gates.pass_env", gate_environment.pass_env);
         merge!("stop.max_blocks", stop.max_blocks);
         merge!("plans.dir", plans.dir);
         merge!("memory.digest", memory.digest);
@@ -443,6 +482,8 @@ impl Config {
             "mode",
             "log.retention_days",
             "log.payload_cap",
+            "update.check",
+            "gates.pass_env",
             "stop.max_blocks",
             "plans.dir",
             "memory.digest",
@@ -502,6 +543,35 @@ pub fn find_project_config(start: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_environment_names_are_exact_and_global_overrides_merge_explicitly() {
+        let mut config = Config::parse("[gates]\npass_env=['DATABASE_URL']").unwrap();
+        config.merge(Config::parse("[meta]\nname='project'").unwrap());
+        assert_eq!(config.gate_environment.pass_env, ["DATABASE_URL"]);
+        config.merge(Config::parse("[gates]\npass_env=[]").unwrap());
+        assert!(config.gate_environment.pass_env.is_empty());
+        for name in ["*", "DATABASE_*", "1NAME", "NAME=VALUE", ""] {
+            let value = serde_json::to_string(name).unwrap();
+            assert!(Config::parse(&format!("[gates]\npass_env=[{value}]")).is_err());
+            assert!(Config::parse(&format!(
+                "[[gate]]\nname='env'\non='stop'\nrun='true'\npass_env=[{value}]"
+            ))
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn update_checks_default_on_and_only_explicit_layers_override_them() {
+        let mut config = Config::default();
+        assert!(config.update.check);
+        config.merge(Config::parse("[update]\ncheck = false").unwrap());
+        assert!(!config.update.check);
+        config.merge(Config::parse("mode = 'observe'").unwrap());
+        assert!(!config.update.check);
+        config.merge(Config::parse("[update]\ncheck = true").unwrap());
+        assert!(config.update.check);
+    }
 
     #[test]
     fn home_requires_an_absolute_home_and_never_falls_back() {

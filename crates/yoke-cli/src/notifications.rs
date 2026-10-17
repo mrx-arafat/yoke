@@ -34,6 +34,7 @@ pub(crate) fn next_command(notification: &Notification) -> String {
     match notification.kind.as_str() {
         "hook_error" => "yoke log --outcome error --limit 10".into(),
         "observe_would_deny" => "yoke log --outcome would_deny --limit 20".into(),
+        "usage_partial" => "yoke usage".into(),
         "plan_waiting" | "plan_stalled" | "check_failed" => {
             format!("yoke plan status {}", notification.subject)
         }
@@ -135,6 +136,7 @@ mod tests {
 
     #[test]
     fn every_help_and_next_command_parses_with_the_real_cli() {
+        assert_eq!(super::next_command(&sample("usage_partial")), "yoke usage");
         let mut commands: Vec<String> = yoke_core::notifications::HELP
             .iter()
             .flat_map(|topic| topic.commands.iter().map(|command| command.to_string()))

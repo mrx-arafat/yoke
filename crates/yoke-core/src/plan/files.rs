@@ -5,7 +5,6 @@ use std::io::Read;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
@@ -127,12 +126,24 @@ pub(super) fn claim_check(plan: &PlanRecord) -> Result<Option<fs::File>> {
 
 pub(super) fn read(plan: &PlanRecord) -> Result<String> {
     let path = resolved(plan)?;
-    let metadata = fs::metadata(&path)?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)?;
+    let metadata = file.metadata()?;
     ensure!(
         metadata.is_file() && metadata.len() <= 1024 * 1024,
         "plan must be a regular file of at most 1 MiB"
     );
-    fs::read_to_string(&path).context("reading plan")
+    let mut text = String::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_string(&mut text)
+        .context("reading plan")?;
+    ensure!(
+        text.len() <= 1024 * 1024,
+        "plan grew beyond 1 MiB; shorten it before retrying"
+    );
+    Ok(text)
 }
 
 pub(super) fn parse(content: &str) -> Result<(String, PlanHeader)> {
@@ -162,6 +173,19 @@ pub(super) fn parse(content: &str) -> Result<(String, PlanHeader)> {
     );
     let mut names = BTreeSet::new();
     for check in &header.checks {
+        ensure!(
+            check.inputs.len() <= 64,
+            "check {} has more than 64 inputs; split it into smaller checks",
+            check.name
+        );
+        let mut inputs = BTreeSet::new();
+        for input in &check.inputs {
+            ensure!(
+                relative(Path::new(input)) && inputs.insert(input),
+                "check {} inputs must be unique project-relative file paths without traversal",
+                check.name
+            );
+        }
         ensure!(
             !check.name.trim().is_empty() && check.name != "review" && names.insert(&check.name),
             "check names must be unique, nonempty, and not reserved review"
@@ -193,11 +217,69 @@ pub(super) fn approved(plan: &PlanRecord) -> Result<PlanHeader> {
         return Err(super::wrong_state(plan, "it has no approved header yet"));
     };
     let (raw, header) = parse(&read(plan)?)?;
+    let raw = approval_header(plan, raw, &header)?;
     ensure!(
         &raw == frozen,
-        "plan header changed; human re-approval required"
+        "plan header changed or check inputs changed; human re-approval required: run yoke plan approve in your own terminal to approve the current files"
     );
     Ok(header)
+}
+
+/// Append deterministic, human-visible input hashes without rewriting the editable plan.
+pub(super) fn approval_header(
+    plan: &PlanRecord,
+    mut raw: String,
+    header: &PlanHeader,
+) -> Result<String> {
+    let root = project(Path::new(&plan.project))?;
+    let mut total = 0usize;
+    let mut hashes = BTreeMap::new();
+    for name in header.checks.iter().flat_map(|check| &check.inputs) {
+        if hashes.contains_key(name) {
+            continue;
+        }
+        ensure!(
+            relative(Path::new(name)),
+            "check input must stay inside the project"
+        );
+        let path = root.join(name);
+        let parent = path
+            .parent()
+            .context("check input has no parent")?
+            .canonicalize()?;
+        ensure!(
+            parent.starts_with(&root),
+            "check input escapes project; use a regular project-local file"
+        );
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)
+            .with_context(|| {
+                format!(
+                    "open check input {name}; restore the file or update inputs before approval"
+                )
+            })?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "check input {name} must be a regular file"
+        );
+        let mut bytes = Vec::new();
+        file.take(10 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+        total = total.saturating_add(bytes.len());
+        ensure!(
+            bytes.len() <= 10 * 1024 * 1024 && total <= 64 * 1024 * 1024,
+            "check inputs exceed 10 MiB per file or 64 MiB total; split checks or narrow inputs"
+        );
+        hashes.insert(name, hash(&bytes));
+    }
+    for (name, hash) in hashes {
+        raw.push_str(&format!(
+            "\n# yoke-approved-input {} sha256={hash}\n",
+            serde_json::to_string(name)?
+        ));
+    }
+    Ok(raw)
 }
 
 pub(super) fn hash(bytes: &[u8]) -> String {
@@ -206,7 +288,7 @@ pub(super) fn hash(bytes: &[u8]) -> String {
 
 fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = execute_bounded(
-        Command::new("git").current_dir(root).args(args),
+        crate::process::git()?.current_dir(root).args(args),
         &[],
         Duration::from_secs(30),
         16 * 1024 * 1024,
@@ -268,9 +350,12 @@ pub fn content_fingerprint(project_path: &Path, base: &str) -> Result<Option<Str
     let root = toplevel(project_path)?;
     let commit = format!("{base}^{{commit}}");
     let found = execute_bounded(
-        Command::new("git")
-            .current_dir(&root)
-            .args(["rev-parse", "--verify", "--quiet", &commit]),
+        crate::process::git()?.current_dir(&root).args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &commit,
+        ]),
         &[],
         Duration::from_secs(30),
         4096,
@@ -347,7 +432,6 @@ fn hash_changes(hash: &mut Sha256, root: &Path, base: &str) -> Result<()> {
 /// time above the limit), a link by target, and a nested repository by its checked-out commit,
 /// as git records a submodule.
 fn hash_entry(hash: &mut Sha256, full: &Path) -> Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let metadata = match fs::symlink_metadata(full) {
         Ok(metadata) => metadata,
         // Removed after git listed it: changed, like any other concurrent edit.
@@ -357,6 +441,12 @@ fn hash_entry(hash: &mut Sha256, full: &Path) -> Result<()> {
         }
         Err(error) => return Err(error.into()),
     };
+    hash_listed_entry(hash, full, &metadata)
+}
+
+/// The entry may change type between listing and opening, so validate the opened descriptor.
+fn hash_listed_entry(hash: &mut Sha256, full: &Path, metadata: &fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     let kind = metadata.file_type();
     if kind.is_symlink() {
         field(hash, b"120000");
@@ -370,7 +460,14 @@ fn hash_entry(hash: &mut Sha256, full: &Path) -> Result<()> {
             field(hash, &metadata.mtime().to_le_bytes());
             field(hash, &metadata.mtime_nsec().to_le_bytes());
         } else {
-            hash_content(hash, fs::File::open(full)?, metadata.len())?;
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(full)
+                .context("working-tree entry changed or cannot be opened safely; restore a regular file and retry the command")?;
+            let opened = file.metadata()?;
+            ensure!(opened.is_file(), "working-tree entry changed to a special file while hashing; restore a regular file and retry the command");
+            hash_content(hash, file, opened.len())?;
         }
     } else if kind.is_dir() {
         field(hash, b"160000");
@@ -399,7 +496,7 @@ fn nested_head(directory: &Path) -> Result<Vec<u8>> {
         return Ok(b"directory".to_vec());
     }
     let output = execute_bounded(
-        Command::new("git").current_dir(directory).args([
+        crate::process::git()?.current_dir(directory).args([
             "rev-parse",
             "--verify",
             "--quiet",
@@ -461,13 +558,18 @@ pub(super) fn artifacts(root: &Path, declared: &[String]) -> Result<Vec<(String,
 
 /// Hash one regular, non-symlink file of at most 10 MiB through a single open handle.
 fn file_hash(path: &Path) -> Result<String> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .context("artifact changed or cannot be opened safely; regenerate the declared image and rerun the check")?;
+    let metadata = file.metadata()?;
     ensure!(
-        fs::symlink_metadata(path)?.is_file(),
-        "artifact is no longer a regular file"
+        metadata.is_file(),
+        "artifact changed to a special file; regenerate the declared image and rerun the check"
     );
-    let mut file = fs::File::open(path)?;
     ensure!(
-        file.metadata()?.len() <= MAX_ARTIFACT_BYTES,
+        metadata.len() <= MAX_ARTIFACT_BYTES,
         "artifact exceeds its size limit"
     );
     let mut hash = Sha256::new();

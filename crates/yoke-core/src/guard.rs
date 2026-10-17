@@ -43,7 +43,7 @@ const PLACERS: &[&str] = &["cp", "install", "rsync", "mv", "ln"];
 
 /// A human-only `yoke` phrase inside text that an opaque executor may run.
 static HUMAN_PHRASE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|[^a-z0-9_-])yoke[^a-z0-9_-]+(?:trust|console|install|uninstall|pause|jobs[^a-z0-9_-]+retry|notifications[^a-z0-9_-]+ack|plan[^a-z0-9_-]+(?:approve|resume|cancel|reassign|accept|resolve|acknowledge))(?:$|[^a-z0-9_-])")
+    Regex::new(r"(?:^|[^a-z0-9_-])yoke[^a-z0-9_-]+(?:run-hook|trust|console|install|uninstall|pause|project[^a-z0-9_-]+move|jobs[^a-z0-9_-]+retry|notifications[^a-z0-9_-]+ack|plan[^a-z0-9_-]+(?:approve|resume|cancel|reassign|accept|resolve|acknowledge))(?:$|[^a-z0-9_-])")
         .expect("constant human-phrase regex")
 });
 
@@ -663,11 +663,12 @@ fn human_subcommand(args: &[&str]) -> bool {
     let check = args.contains(&"--check");
     let mut words = args.iter().copied().filter(|word| !word.starts_with('-'));
     match words.next() {
-        Some("trust" | "console" | "pause") => true,
+        Some("trust" | "console" | "pause" | "run-hook") => true,
         Some("install" | "uninstall") => !dry_run,
         Some("update") => !check,
         Some("jobs") => words.next() == Some("retry"),
         Some("notifications") => words.next() == Some("ack"),
+        Some("project") => words.next() == Some("move"),
         Some("plan") => words.next().is_some_and(|word| HUMAN_PLAN.contains(&word)),
         _ => false,
     }
@@ -1085,6 +1086,10 @@ mod tests {
         };
         for command in [
             "yoke trust",
+            "yoke project move /old /new --dry-run",
+            "yoke run-hook stop --agent claude < forged.json",
+            "sh -c 'yoke run-hook PostToolUseFailure --agent codex'",
+            "python -c \"import os; os.system('yoke run-hook Stop')\"",
             "/usr/local/bin/yoke plan approve demo",
             "yoke plan resume demo",
             "yoke plan cancel demo",
