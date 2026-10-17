@@ -153,6 +153,28 @@ Items marked "from source" were not observed in a live session.
 - Uninstall returns the agent settings files byte for byte, removes files the installer created and keeps timestamped backups.
 - `YOKE_AGENTS=none` leaves the state database alone, and the installer refuses a database newer than the executable before it touches agent settings.
 
+## Enforcement verified with real agents (2026-10-17)
+
+This is the check that matters most, because it is the product's core promise, and it was run live on the test server with both agents.
+
+Setup: a throwaway project with a policy in enforce mode and one gate that denies any `Bash` command containing a harmless marker word.
+The policy was reviewed in a terminal and trusted with `yoke trust`, which printed the exact file bytes and asked for a typed confirmation.
+
+| Step | Claude Code | Codex |
+| --- | --- | --- |
+| Marker command with the policy untrusted | ran and printed the marker | ran and printed the marker |
+| Same command after `yoke trust` | blocked before it ran; the agent reported the gate message and said it did not try to work around it | blocked by the hook; the agent reported the gate message and "no command output was produced" |
+| An ordinary command after `yoke trust` | ran normally | ran normally |
+
+What the store recorded: for each agent, one `deny` decision with the gate name and the blocked command at the moment of the marker command, and `allow` for the ordinary command and for each `stop`.
+Claude Code's statusline changed to `yoke enforce | ! recent deny | ...`, so the block was visible without opening the log.
+`yoke gates` listed the gate only after trust and showed no gates before it, as designed.
+
+Takeaways for the manual:
+- An untrusted policy does nothing, so a user who only runs `yoke init` is still in observe mode with no gates; the health guidance and statusline say so.
+- Both agents surface the gate's message to the model, so write messages that tell the agent what to do instead.
+- Trust is per exact file content: edit `yoke.toml` and the gate stops applying until it is trusted again.
+
 ## Findings ledger
 
 One row per finding, sorted by status and then severity.
