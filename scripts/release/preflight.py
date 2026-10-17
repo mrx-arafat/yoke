@@ -117,23 +117,6 @@ def check_tag(tag: str, version: str) -> Check:
     return Check(name, PASS, f"{tag} matches the yoke-cli version {version}")
 
 
-def check_pinned_commit(run: Runner, install_script: str, head: str) -> Check:
-    """install.sh builds this commit from source before any release exists."""
-    name = "install.sh pinned commit"
-    match = re.search(r"^PINNED_COMMIT=([0-9a-f]{40})$", install_script, re.MULTILINE)
-    if match is None:
-        return Check(
-            name, FAIL, "install.sh has no PINNED_COMMIT=<40-character commit>"
-        )
-    pinned = match.group(1)
-    done = run(["git", "merge-base", "--is-ancestor", pinned, head])
-    if done.code == 0:
-        return Check(name, PASS, f"{pinned[:7]} is part of HEAD's history")
-    if done.code == 1:
-        return Check(name, FAIL, f"{pinned[:7]} is not an ancestor of HEAD {head[:7]}")
-    return Check(name, FAIL, f"{pinned[:7]} cannot be checked: {first_line(done.err)}")
-
-
 def check_clean_tree(run: Runner) -> Check:
     name = "clean tree"
     done = run(["git", "status", "--porcelain"])
@@ -297,10 +280,6 @@ def main(argv: list[str] | None = None) -> int:
     head = head_done.out.strip()
 
     try:
-        install_script = (ROOT / "install.sh").read_text(encoding="utf-8")
-    except OSError:
-        install_script = ""
-    try:
         version: str | None = cli_version(ROOT)
         tag_check = check_tag(args.tag, version)
     except (OSError, ValueError) as error:
@@ -312,7 +291,6 @@ def main(argv: list[str] | None = None) -> int:
         tag_check,
         check_clean_tree(run),
         check_pushed(run, head),
-        check_pinned_commit(run, install_script, head),
         check_changelog(run, ROOT, version),
         check_ci(run, head),
         check_release_run(run, head),

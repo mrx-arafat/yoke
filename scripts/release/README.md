@@ -18,7 +18,7 @@ The generator reproduces license files and nested NOTICE files from the download
 It never edits generated artifacts by hand.
 The full `cargo deny check` (advisories, bans, licenses, sources) must pass in the `lint` job before any package is built, and a tag builds only a commit that is in `main` and passed `ci.yml` there.
 The toolchain is pinned in `release.yml` (`RUST_TOOLCHAIN`); raise it deliberately.
-`install.sh` pins a commit (`PINNED_COMMIT`) for source builds before a release exists; the preflight checks it is part of `HEAD`'s history, so update it with the release commit if it has gone stale.
+Before a release exists, `install.sh` builds the commit `main` points to when it runs, and `installer.yml` passes `YOKE_COMMIT` so that CI builds the commit under test; no commit is hard-coded in the script.
 
 The workflow creates a draft release only after all four targets succeed.
 Tag/version agreement is checked before release compilation.

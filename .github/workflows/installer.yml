@@ -66,14 +66,29 @@ jobs:
           REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
           YOKE_YES: "1"
+          # Build exactly the commit this run tests: with no release yet the installer would
+          # otherwise build whatever main is now, and CI would not be testing this change.
+          YOKE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           mkdir -p "$HOME/.claude"
           curl -fsSL "https://raw.githubusercontent.com/$REPOSITORY/$COMMIT/install.sh" -o /tmp/install.sh
-          if command -v bash >/dev/null 2>&1; then bash </tmp/install.sh; else sh </tmp/install.sh; fi
+          run_install() { if command -v bash >/dev/null 2>&1; then bash </tmp/install.sh; else sh </tmp/install.sh; fi; }
+          # sh has no pipefail, so keep the installer's own exit status.
+          { run_install 2>&1; echo $? >/tmp/install.status; } | tee /tmp/install.log
+          test "$(cat /tmp/install.status)" -eq 0
       - name: Check the executable, the Claude hooks and the state schema
+        env:
+          REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           test "$(command -v yoke)" = /usr/local/bin/yoke
-          yoke --version
+          # The installer built the commit under test, and the binary is that commit's version.
+          grep -F "building the commit you asked for: $COMMIT" /tmp/install.log
+          expected=$(curl -fsSL "https://raw.githubusercontent.com/$REPOSITORY/$COMMIT/Cargo.toml" | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
+          test -n "$expected"
+          version=$(yoke --version)
+          echo "$version"
+          case $version in *"$expected"*) ;; *) echo "yoke --version is not $expected"; exit 1 ;; esac
           grep -F "/usr/local/bin/yoke' run-hook --agent claude PreToolUse" "$HOME/.claude/settings.json"
           # A fresh install gives Claude Code Yoke's statusline, which is also what records its quota.
           grep -F '"statusLine"' "$HOME/.claude/settings.json"
@@ -114,10 +129,17 @@ jobs:
         run: curl -fsSL "https://raw.githubusercontent.com/$REPOSITORY/$COMMIT/install.sh" -o /tmp/install.sh
       # YOKE_FROM_SOURCE keeps the compiler path under test once a release is published.
       - name: Install Yoke as that user with every question answered yes
-        run: su - dev -c 'YOKE_YES=1 YOKE_FROM_SOURCE=1 bash </tmp/install.sh' 2>&1 | tee /tmp/install-user.log
+        env:
+          YOKE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        # YOKE_COMMIT builds the commit under test from source, so the compiler path stays tested.
+        run: su - dev -c "YOKE_YES=1 YOKE_COMMIT=$YOKE_COMMIT bash </tmp/install.sh" 2>&1 | tee /tmp/install-user.log
       - name: Check the sudo compiler install, the user binary, PATH, hooks and schema
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           grep -F 'installing a C compiler with sudo' /tmp/install-user.log
+          grep -F "building the commit you asked for: $COMMIT" /tmp/install-user.log
+          su - dev -c '/home/dev/.local/bin/yoke --version'
           command -v cc
           test -x /home/dev/.local/bin/yoke
           test ! -e /usr/local/bin/yoke
@@ -138,8 +160,10 @@ jobs:
           # YOKE_YES answers the installer's questions but never trusts a policy.
           grep -F '/.yoke/config.toml",false,false' /tmp/health.txt
       - name: Rerun with the install directory off PATH to check the PATH line stays single
+        env:
+          YOKE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          su - dev -c 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin YOKE_YES=1 YOKE_FROM_SOURCE=1 bash </tmp/install.sh' 2>&1 | tee /tmp/install-user2.log
+          su - dev -c "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin YOKE_YES=1 YOKE_COMMIT=$YOKE_COMMIT bash </tmp/install.sh" 2>&1 | tee /tmp/install-user2.log
           grep -F 'already adds /home/dev/.local/bin to PATH' /tmp/install-user2.log
           grep -F 'changes: 0' /tmp/install-user2.log
           test "$(grep -c 'added by yoke install.sh' /home/dev/.bashrc)" = 1
@@ -222,19 +246,33 @@ jobs:
         env:
           # A directory off PATH, so the PATH question is asked as well.
           YOKE_INSTALL_DIR: /opt/yoke/bin
-          YOKE_FROM_SOURCE: "1"
+          YOKE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
           DRIVE_CMD: cat /tmp/install.sh | bash
           DRIVE_EXPECT: "{C compiler} Cargo PATH {wrap it so Yoke's line comes first} {global policy}"
-        run: expect /tmp/drive.exp
+        run: expect /tmp/drive.exp 2>&1 | tee /tmp/install-terminal.log
       - name: Check that the typed confirmation trusted the starter global policy
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           test -x /opt/yoke/bin/yoke
+          grep -F "building the commit you asked for: $COMMIT" /tmp/install-terminal.log
+          /opt/yoke/bin/yoke --version
           grep -F '# Yoke preset: git-safety' "$HOME/.yoke/config.toml"
           # Enter at the statusline question keeps the user's own command untouched.
           grep -F 'echo user-statusline' "$HOME/.claude/settings.json"
-          ! grep -F "yoke' statusline" "$HOME/.claude/settings.json"
+          # bash -e ignores a bare "! grep", so test the match explicitly.
+          if grep -F "yoke' statusline" "$HOME/.claude/settings.json"; then
+            echo "the installer replaced the user's own statusline"
+            exit 1
+          fi
           # shellcheck disable=SC2016 # the line is written with a literal $PATH
           grep -Fx 'export PATH="/opt/yoke/bin:$PATH"  # added by yoke install.sh' "$HOME/.bashrc"
           /opt/yoke/bin/yoke health >/tmp/health.txt || true
           cat /tmp/health.txt
+          # The installed executable and its database agree on the schema.
+          line=$(grep '^state:' /tmp/health.txt)
+          schema=${line##* schema=}
+          schema=${schema%% *}
+          supported=${line##* supported=}
+          test -n "$schema" && test "$schema" = "$supported"
           grep -F '/.yoke/config.toml",true,false' /tmp/health.txt

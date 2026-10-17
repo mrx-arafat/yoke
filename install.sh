@@ -6,8 +6,8 @@
 # Downloads the release executable for this platform and verifies its SHA-256
 # checksum, or builds from source with Cargo when no release asset exists,
 # installing a C compiler and Rust first when they are missing. A source build
-# uses the newest release tag, or a pinned commit before any release exists, and
-# never a moving branch. Then connects
+# uses the newest release tag, or before any release exists the commit main points
+# to right now, which it prints and builds as that one commit. Then connects
 # the agent hooks, creates or migrates the state database, adds Yoke's line to
 # Claude Code's status bar when you have none, offers a starter global policy for
 # you to trust, and checks health. It uses sudo only to install a C compiler,
@@ -31,12 +31,11 @@
 #   YOKE_AGENTS           agents to connect, for example claude,codex, or none
 #                         (default: each of claude and codex that is found)
 
-# The commit a source build uses before any release exists. A release tag replaces it as soon
-# as one is published; scripts/release/preflight.py checks that it is part of main's history.
-PINNED_COMMIT=dea9c381002be73a82b586ac1a7b2312c064ba3d
-
 # Protocols fetch() may use. download_release widens it for a mirror on this machine only.
 fetch_proto='=https'
+
+# An Accept header for fetch() to send, for the one request that asks GitHub for a bare hash.
+fetch_accept=
 
 say() { printf 'yoke-install: %s\n' "$*"; }
 err() { printf 'yoke-install: error: %s\n' "$*" >&2; }
@@ -134,18 +133,22 @@ loopback_http() {
 # accepts (64 MiB).
 fetch() {
     if command -v curl >/dev/null 2>&1; then
-        code=$(curl -sSL --proto "$fetch_proto" --proto-redir '=https' --tlsv1.2 --retry 3 --max-time 600 --max-filesize 67108864 -o "$2" -w '%{http_code}' "$1") || return 1
+        url=$1
+        set -- -sSL --proto "$fetch_proto" --proto-redir '=https' --tlsv1.2 --retry 3 --max-time 600 --max-filesize 67108864 -o "$2" -w '%{http_code}'
+        if [ -n "$fetch_accept" ]; then set -- "$@" -H "Accept: $fetch_accept"; fi
+        code=$(curl "$@" "$url") || return 1
         case $code in
             200) return 0 ;;
             404) return 2 ;;
             *)
-                err "HTTP $code from $1"
+                err "HTTP $code from $url"
                 return 1
                 ;;
         esac
     elif command -v wget >/dev/null 2>&1; then
         url=$1
         set -- -q -S -O "$2"
+        if [ -n "$fetch_accept" ]; then set -- "$@" --header "Accept: $fetch_accept"; fi
         # Older wget has no --https-only; the URL itself is already checked to be https.
         if [ "$fetch_proto" = '=https' ] && wget --help 2>&1 | grep -q -e '--https-only'; then
             set -- "$@" --https-only
@@ -327,9 +330,33 @@ latest_release_tag() {
     printf '%s\n' "$tag"
 }
 
+# True when $1 is a full lowercase commit hash.
+is_commit() {
+    case $1 in *[!0-9a-f]*) return 1 ;; esac
+    [ "${#1}" -eq 40 ]
+}
+
+# Prints the commit hash main points to right now. One request to GitHub's commits API with the
+# sha media type returns just that hash; when the API does not answer (a rate limit, say) and git
+# is installed, git ls-remote asks instead. Fails when neither gives a hash.
+main_commit() {
+    commit=
+    fetch_accept='application/vnd.github.sha'
+    if fetch https://api.github.com/repos/mrx-arafat/yoke/commits/main "$tmp/main.sha"; then
+        commit=$(tr -d '[:space:]' <"$tmp/main.sha")
+    fi
+    if ! is_commit "$commit" && command -v git >/dev/null 2>&1; then
+        listing=$(GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/mrx-arafat/yoke refs/heads/main 2>/dev/null || true)
+        commit=${listing%%[[:space:]]*}
+    fi
+    is_commit "$commit" || return 1
+    printf '%s\n' "$commit"
+}
+
 # Sets $candidate to an executable built by cargo install into a temporary root. The source is
 # always one exact revision: YOKE_COMMIT, YOKE_VERSION, the newest release tag, or before any
-# release exists the pinned commit. Never a branch, which moves.
+# release exists the commit main points to when this runs. It is looked up, printed and built as
+# that one hash, so a later push to main cannot change what is built mid-install.
 build_from_source() {
     if [ -n "${YOKE_COMMIT:-}" ]; then
         set -- --rev "$YOKE_COMMIT"
@@ -342,8 +369,9 @@ build_from_source() {
             set -- --tag "$latest"
             say "building the newest release, $latest"
         else
-            set -- --rev "$PINNED_COMMIT"
-            say "no release is published yet, so building the pinned commit $PINNED_COMMIT; set YOKE_COMMIT to build another"
+            commit=$(main_commit) || die "no release is published yet and the newest commit of main could not be found, so nothing was built; to build a commit you choose, run: curl -fsSL https://raw.githubusercontent.com/mrx-arafat/yoke/main/install.sh | YOKE_COMMIT=<40-character commit hash> bash   (commits: https://github.com/mrx-arafat/yoke/commits/main)"
+            set -- --rev "$commit"
+            say "no release is published yet, so building the current commit of main, $commit; set YOKE_COMMIT to build another"
         fi
     fi
     ensure_cc

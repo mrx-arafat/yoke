@@ -5,7 +5,6 @@ import http.server
 import json
 import os
 import platform
-import re
 import shutil
 import stat
 import subprocess
@@ -107,23 +106,31 @@ install)
 health) echo '  "/h/.yoke/config.toml",true,false' ;;
 esac
 """
-# Stands in for GitHub's API and records every other request, then lets real curl run it.
+# Sends the installer's requests for api.github.com to the loopback mirror, under /api/, and lets
+# real curl make every request, so the headers the installer sends are the real ones.
 CURL_SHIM = """#!/bin/sh
-for last; do :; done
+count=$#
+i=1
+while [ "$i" -lt "$count" ]; do
+    set -- "$@" "$1"
+    shift
+    i=$((i + 1))
+done
+last=$1
+shift
+echo "$* $last" >> "$YOKE_TEST_CURL_LOG"
 case $last in
-https://api.github.com/*)
-    echo "api $last" >> "$YOKE_TEST_CURL_LOG"
-    prev=
-    for argument in "$@"; do
-        if [ "$prev" = -o ]; then out=$argument; fi
-        prev=$argument
-    done
-    printf '%s' "$YOKE_TEST_API_BODY" > "$out"
-    printf '%s' "$YOKE_TEST_API_CODE"
-    exit 0 ;;
+https://api.github.com/repos/mrx-arafat/yoke/*)
+    last="$YOKE_TEST_MIRROR/api/${last#https://api.github.com/repos/mrx-arafat/yoke/}"
+    set -- "$@" --proto '=http,https' ;;
 esac
-echo "$*" >> "$YOKE_TEST_CURL_LOG"
-exec "$YOKE_TEST_REAL_CURL" "$@"
+exec "$YOKE_TEST_REAL_CURL" "$@" "$last"
+"""
+# Answers `git ls-remote` with $YOKE_TEST_GIT_SHA, the way a reachable GitHub would, or fails when
+# it is empty; it is always on PATH so that a real git never reaches the network from a test.
+GIT_SHIM = """#!/bin/sh
+[ -n "$YOKE_TEST_GIT_SHA" ] || exit 1
+printf '%s\\trefs/heads/main\\n' "$YOKE_TEST_GIT_SHA"
 """
 # Records its arguments and builds a fake executable into the --root it was given.
 CARGO_SHIM = """#!/bin/sh
@@ -142,6 +149,20 @@ RELEASE_JSON = json.dumps({"tag_name": "v1.2.3", "draft": False, "prerelease": F
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         pass
+
+    def do_GET(self) -> None:
+        # /api/... stands in for api.github.com: the test sets what each path answers and reads
+        # back what was asked, including the Accept header.
+        if not self.path.startswith("/api/"):
+            super().do_GET()
+            return
+        self.server.requests.append((self.path, self.headers.get("Accept")))  # type: ignore[attr-defined]
+        code, body = self.server.canned.get(self.path, (404, ""))  # type: ignore[attr-defined]
+        payload = body.encode()
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
 
 class InstallScriptTests(unittest.TestCase):
@@ -163,6 +184,9 @@ class InstallScriptTests(unittest.TestCase):
         server = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0), partial(QuietHandler, directory=str(self.mirror))
         )
+        server.canned = {}  # type: ignore[attr-defined]
+        server.requests = []  # type: ignore[attr-defined]
+        self.server = server
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -190,83 +214,152 @@ class InstallScriptTests(unittest.TestCase):
             start_new_session=True,
         )
 
-    def shimmed(self, api_code: str = "404", api_body: str = "") -> dict[str, str]:
-        """An environment whose curl answers GitHub's API from the test and whose cargo builds
-        a fake executable, so the source build's choice of revision can be read from its log."""
+    def shimmed(self, git_sha: str | None = None) -> dict[str, str]:
+        """An environment whose curl reaches GitHub's API through the mirror and whose cargo
+        builds a fake executable, so the source build's choice of revision can be read from
+        its log. A `git` on PATH answers `ls-remote` with `git_sha`, or fails when it is None."""
         shims = self.home / "shims"
         shims.mkdir(exist_ok=True)
         for name, body in (
             ("curl", CURL_SHIM),
             ("cargo", CARGO_SHIM),
             ("cc", "#!/bin/sh\n"),
+            ("git", GIT_SHIM),
         ):
             (shims / name).write_text(body)
             (shims / name).chmod(0o755)
         return {
             "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
             "YOKE_TEST_REAL_CURL": shutil.which("curl") or "curl",
+            "YOKE_TEST_MIRROR": self.url,
             "YOKE_TEST_CURL_LOG": str(self.home / "curl.log"),
             "YOKE_TEST_CARGO_LOG": str(self.home / "cargo.log"),
-            "YOKE_TEST_API_CODE": api_code,
-            "YOKE_TEST_API_BODY": api_body,
+            "YOKE_TEST_GIT_SHA": git_sha or "",
         }
 
     def cargo_calls(self) -> list[str]:
         log = self.home / "cargo.log"
         return log.read_text().splitlines() if log.exists() else []
 
-    def test_source_build_uses_the_newest_release_tag_or_a_pinned_commit_never_a_branch(
+    def test_source_build_uses_one_exact_revision_resolved_at_install_time(
         self,
     ) -> None:
-        pinned = re.search(
-            r"^PINNED_COMMIT=([0-9a-f]{40})$", (ROOT / "install.sh").read_text(), re.M
+        self.assertNotIn(
+            "PINNED_COMMIT",
+            (ROOT / "install.sh").read_text(),
+            "a hard-coded commit goes stale; the installer resolves main when it runs",
         )
-        self.assertIsNotNone(
-            pinned, "install.sh must pin a commit for use before any release"
-        )
-        commit = "a" * 40
+        main = "b" * 40
+        elsewhere = "c" * 40
+        explicit = "a" * 40
+        no_release = (404, "")
+        release = (200, RELEASE_JSON)
+        # (label, answers by API path, extra env, git sha, expected cargo flag or None)
         cases = [
-            ("newest release", ("200", RELEASE_JSON), {}, "--tag v1.2.3", True),
-            ("no release yet", ("404", ""), {}, f"--rev {pinned.group(1)}", True),
+            ("newest release", {"releases/latest": release}, {}, None, "--tag v1.2.3"),
+            (
+                "no release yet builds main as it is now",
+                {"releases/latest": no_release, "commits/main": (200, main + "\n")},
+                {},
+                None,
+                f"--rev {main}",
+            ),
             (
                 "explicit version",
-                ("500", ""),
+                {"releases/latest": (500, "")},
                 {"YOKE_VERSION": "v9.9.9"},
+                None,
                 "--tag v9.9.9",
-                True,
             ),
             (
-                "explicit commit",
-                ("500", ""),
-                {"YOKE_COMMIT": commit},
-                f"--rev {commit}",
-                True,
+                "explicit commit overrides main and asks nothing",
+                {"releases/latest": no_release, "commits/main": (200, main)},
+                {"YOKE_COMMIT": explicit},
+                None,
+                f"--rev {explicit}",
             ),
-            ("lookup failed", ("500", ""), {}, "", False),
-            ("garbage tag", ("200", '{"tag_name": "main"}'), {}, "", False),
+            (
+                "git answers when the API does not",
+                {"releases/latest": no_release, "commits/main": (500, "")},
+                {},
+                elsewhere,
+                f"--rev {elsewhere}",
+            ),
+            ("release lookup failed", {"releases/latest": (500, "")}, {}, None, None),
+            (
+                "garbage tag",
+                {"releases/latest": (200, '{"tag_name": "main"}')},
+                {},
+                None,
+                None,
+            ),
+            (
+                "main lookup failed",
+                {"releases/latest": no_release, "commits/main": (500, "")},
+                {},
+                None,
+                None,
+            ),
+            (
+                "main lookup answered garbage",
+                {"releases/latest": no_release, "commits/main": (200, "<html>")},
+                {},
+                None,
+                None,
+            ),
+            (
+                "neither API nor git answers",
+                {"releases/latest": no_release, "commits/main": (500, "")},
+                {},
+                "not-a-commit",
+                None,
+            ),
         ]
-        for label, api, extra, expected, builds in cases:
+        for label, answers, extra, git_sha, expected in cases:
             with self.subTest(label):
                 (self.home / "cargo.log").unlink(missing_ok=True)
                 (self.mirror / self.name).unlink(missing_ok=True)
+                self.server.canned = {f"/api/{path}": a for path, a in answers.items()}
+                self.server.requests.clear()
                 result = self.install(
-                    hashlib.sha256(FAKE_YOKE).hexdigest(), **self.shimmed(*api), **extra
+                    hashlib.sha256(FAKE_YOKE).hexdigest(),
+                    **self.shimmed(git_sha),
+                    **extra,
                 )
                 calls = self.cargo_calls()
-                if builds:
+                asked = [path for path, _ in self.server.requests]
+                if expected is not None:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(len(calls), 1, calls)
                     self.assertIn(expected, calls[0])
                     self.assertNotIn("--branch", calls[0])
+                    self.assertIn(expected.split()[-1], result.stdout)
                 else:
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(calls, [])
-                    self.assertIn("YOKE_VERSION", result.stderr)
+                    self.assertIn("YOKE_", result.stderr)
+                if "YOKE_COMMIT" in extra or "YOKE_VERSION" in extra:
+                    self.assertEqual(asked, [], "an explicit revision needs no lookup")
+                if label == "no release yet builds main as it is now":
+                    # The sha media type returns the bare hash, never the commit JSON.
+                    self.assertEqual(
+                        self.server.requests[-1],
+                        ("/api/commits/main", "application/vnd.github.sha"),
+                    )
+                if label == "main lookup failed":
+                    # Nothing is built and the message gives the command to run instead.
+                    self.assertIn(
+                        "YOKE_COMMIT=<40-character commit hash>", result.stderr
+                    )
+                    self.assertIn("bash", result.stderr)
+                    # The failed request is named by its URL, not by curl's options.
+                    self.assertIn(
+                        "HTTP 500 from https://api.github.com/repos/mrx-arafat/yoke/commits/main",
+                        result.stderr,
+                    )
 
     def test_downloads_use_tls_1_2_and_size_and_time_limits(self) -> None:
-        result = self.install(
-            hashlib.sha256(FAKE_YOKE).hexdigest(), **self.shimmed("404")
-        )
+        result = self.install(hashlib.sha256(FAKE_YOKE).hexdigest(), **self.shimmed())
 
         self.assertEqual(result.returncode, 0, result.stderr)
         downloads = [
