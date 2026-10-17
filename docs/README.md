@@ -9,6 +9,7 @@ It runs as a command rather than a background daemon; the optional console runs 
 | Guide | Use it to |
 | --- | --- |
 | [Getting started](getting-started.md) | Build, install, trust a policy, and inspect your first decision |
+| [User guide](user-guide.md) | Follow one practical path from install through observe and enforce to daily use, memory, plans, usage and troubleshooting |
 | [Configuration](configuration.md) | Understand defaults, layered trust, gates, and event behavior |
 | [CLI reference](cli.md) | Find commands, arguments, and machine-readable output |
 | [Workflows](workflows.md) | Use plans, independent review, memory, presets, and the console |

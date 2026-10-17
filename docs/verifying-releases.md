@@ -72,7 +72,8 @@ If it needs Rust and you let it, the installer runs rustup's own installer witho
 
 ## Building from source
 
-When `install.sh` builds from source it uses one exact revision, never a branch that moves: the commit in `YOKE_COMMIT`, the tag in `YOKE_VERSION`, the newest release tag, or, while no release exists, the commit pinned in `install.sh`.
+When `install.sh` builds from source it builds one exact commit or tag: the commit in `YOKE_COMMIT`, the tag in `YOKE_VERSION`, the newest release tag, or, while no release exists, the commit `main` points to when the installer runs.
+That last case is only as trustworthy as `main` itself, which also serves the installer script, so it adds no new trust.
 To see which one it used, read the line it prints before `cargo install`.
 A tag can in principle be moved by someone who can write tags, so protect `v*` tags (see below) or build a full commit hash with `YOKE_COMMIT`.
 

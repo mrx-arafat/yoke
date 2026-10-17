@@ -190,6 +190,8 @@ Shared knowledge in `.yoke/knowledge.md` is injected only after `yoke trust` has
   Choose another absolute path.
 - `could not look up the newest Yoke release, so nothing was built`: a source build needs an exact revision and GitHub's release lookup failed, often a rate limit.
   Rerun later, or set `YOKE_VERSION=<release tag>` or `YOKE_COMMIT=<40-character commit>`.
+- `no release is published yet and the newest commit of main could not be found, so nothing was built`: with no release the installer builds the commit `main` points to, asks GitHub's API for it (and `git ls-remote` when git is installed), and neither answered, often because of a rate limit.
+  The message prints the command to run with a hash you choose, `curl -fsSL https://raw.githubusercontent.com/mrx-arafat/yoke/main/install.sh | YOKE_COMMIT=<40-character commit hash> bash`; the hashes are at https://github.com/mrx-arafat/yoke/commits/main.
 - `invalid YOKE_COMMIT`: it must be a full lowercase commit hash, and it cannot be combined with `YOKE_VERSION`.
 
 ## Memory digests do not appear

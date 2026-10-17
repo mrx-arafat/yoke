@@ -418,7 +418,7 @@ A path anywhere else in a job, such as one a forged hook event named, is ignored
 Release executables are checked against a SHA-256 file from the same release, which catches a damaged download but not a replaced release.
 Each release also carries signed build provenance that you can verify yourself with `gh attestation verify`; `install.sh` and `yoke update` do not verify it for you.
 [Verifying releases](verifying-releases.md) has the commands and the limits.
-`install.sh` builds from source at one exact revision and never at a moving branch.
+`install.sh` builds from source at one exact revision: a release tag, a commit you name, or the one commit `main` pointed to when it ran.
 A gate, an approved plan check or `yoke update` still runs code with your full privileges, outside your agent's sandbox.
 
 What Yoke writes to disk is private to your user and bounded.

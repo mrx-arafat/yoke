@@ -22,8 +22,8 @@ On Alpine, use `| sh` instead of `| bash`, because Alpine ships without bash.
 It uses `sudo` only to install a C compiler, after asking.
 Every question defaults to yes and is read from your terminal, so it works through the pipe.
 It downloads `yoke-<target>` and `yoke-<target>.sha256` from the latest GitHub release, the same assets `yoke update` uses, and refuses to install unless the SHA-256 checksum matches.
-When the release has no executable for your platform, including while no release is published, it builds from source with `cargo install --locked --git https://github.com/mrx-arafat/yoke yoke-cli`, always at one exact revision: `YOKE_COMMIT` or `YOKE_VERSION` if you set one, otherwise the newest release tag, and while no release exists the commit pinned in `install.sh`.
-It never builds a moving branch, and it stops instead of guessing when it cannot look up the newest release.
+When the release has no executable for your platform, including while no release is published, it builds from source with `cargo install --locked --git https://github.com/mrx-arafat/yoke yoke-cli`, always at one exact revision: `YOKE_COMMIT` or `YOKE_VERSION` if you set one, otherwise the newest release tag, and while no release exists the commit `main` points to when the installer runs, which it looks up, prints and builds as that one hash.
+It stops instead of guessing when it cannot look up the newest release or that commit, and its message gives the `YOKE_COMMIT=` command to run with a hash you choose.
 Downloads use TLS 1.2 or newer, time out after ten minutes and stop at 64 MiB.
 The SHA-256 file comes from the same place as the executable, so it catches a corrupt download but not a replaced release; [Verifying releases](verifying-releases.md) shows how to check the signed build provenance.
 Release executables need glibc, so on Alpine and other musl systems it always builds from source.

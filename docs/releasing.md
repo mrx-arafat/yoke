@@ -45,7 +45,7 @@ In the repository settings, give the `release` environment required reviewers an
 [Verifying releases](verifying-releases.md) says how a user checks the result and what that check does not prove.
 A draft is invisible to the two things users run.
 `yoke update` reads GitHub's latest-release endpoint, which never returns a draft or a prerelease.
-`install.sh` downloads `https://github.com/mrx-arafat/yoke/releases/latest/download/yoke-<target>`, builds the newest release tag from source when that asset does not exist (the commit pinned in `install.sh` while no release is published), and always builds from source on musl systems such as Alpine, because no musl executable is released.
+`install.sh` downloads `https://github.com/mrx-arafat/yoke/releases/latest/download/yoke-<target>`, builds the newest release tag from source when that asset does not exist (the commit `main` points to when it runs, while no release is published), and always builds from source on musl systems such as Alpine, because no musl executable is released.
 
 ## Choose the tag
 
@@ -198,18 +198,17 @@ It runs `git` and `gh` with argument lists and timeouts, writes nothing, and cre
 uv run --no-project python scripts/release/preflight.py --tag "$TAG"
 ```
 
-It prints `PASS`, `FAIL` or `SKIP` for eight checks and exits 1 when any check fails.
+It prints `PASS`, `FAIL` or `SKIP` for seven checks and exits 1 when any check fails.
 
 | Check | Passes when |
 | --- | --- |
 | 1. tag format | the tag follows the rule in [Choose the tag](#choose-the-tag) and equals the `yoke-cli` version |
 | 2. clean tree | `git status` shows no change, ignoring untracked `.codegraph/` and `.lavish/` |
 | 3. HEAD is pushed | `HEAD` equals its upstream branch |
-| 4. install.sh pinned commit | `PINNED_COMMIT` in `install.sh` is a commit in `HEAD`'s history |
-| 5. changelog | `scripts/changelog.py --check` passes and the change record is dated |
-| 6. CI green for HEAD | the latest `CI` and `Installer` runs for `HEAD` both concluded `success` |
-| 7. release workflow evidence | a successful `release.yml` run exists for `HEAD` |
-| 8. tag not yet used | the tag exists neither locally nor on `origin` |
+| 4. changelog | `scripts/changelog.py --check` passes and the change record is dated |
+| 5. CI green for HEAD | the latest `CI` and `Installer` runs for `HEAD` both concluded `success` |
+| 6. release workflow evidence | a successful `release.yml` run exists for `HEAD` |
+| 7. tag not yet used | the tag exists neither locally nor on `origin` |
 
 Continue only when the summary reports no failure and no skip.
 A `SKIP` means a check could not run, for example `gh` is missing or not signed in, and is not a pass.
@@ -359,7 +358,7 @@ Stop distribution first, then fix forward.
 
    `/releases/latest` then names the previous published release, or returns 404 when there is none.
    `yoke update` stops offering the bad version, and `install.sh` stops downloading it.
-   With no published release left, `install.sh` builds the commit pinned in it from source, so check that `PINNED_COMMIT` is still a commit you stand behind before telling anyone to reinstall.
+   With no published release left, `install.sh` builds the commit `main` points to at that moment, so make sure `main` is a commit you stand behind before telling anyone to reinstall.
    If GitHub refuses the edit, the release is immutable (`gh release view "$TAG" --json isImmutable`), and you can only supersede it.
 2. Never move or reuse a published tag, and never replace assets under the same version.
    Ship the fix as the next patch version through this whole runbook.

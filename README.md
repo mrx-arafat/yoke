@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/mrx-arafat/yoke/main/install.sh | b
 ```
 
 It works on macOS and on common Linux distributions, including a fresh server: run as root, it installs `yoke` into `/usr/local/bin`, and otherwise into `~/.local/bin`, offering to add that to your `PATH`.
-It downloads the release executable for your platform and refuses it unless its SHA-256 checksum matches, and when it has to build from source (on Alpine and other musl systems, or when the release has no executable for your platform) it builds the newest release tag, or a pinned commit while no release exists, never a moving branch, offering to install a C compiler and Rust when they are missing.
+It downloads the release executable for your platform and refuses it unless its SHA-256 checksum matches, and when it has to build from source (on Alpine and other musl systems, or when the release has no executable for your platform) it builds the newest release tag, or while no release exists the commit `main` points to when it runs (it prints the commit and builds exactly that one), offering to install a C compiler and Rust when they are missing.
 To check what you downloaded rather than trust the page it came from, see [Verifying releases](docs/verifying-releases.md).
 It uses `sudo` only to install a C compiler, after asking; every question defaults to yes, and `YOKE_YES=1` answers them without a terminal.
 It then connects the Claude Code and Codex hooks it finds, creates or upgrades the state database once those hooks run the new binary, adds Yoke's line (mode, context, 5-hour and weekly quota) to Claude Code's status bar when you have no statusline, offers a starter global policy for you to review and trust, and runs `yoke health`.

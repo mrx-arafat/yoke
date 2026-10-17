@@ -208,7 +208,7 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 
 ### The installer builds one exact revision, and the updater tests what it downloads
 
-- What changed: when `install.sh` builds from source it uses `YOKE_COMMIT`, `YOKE_VERSION`, the newest release tag, or, while no release exists, a commit pinned in the script; it no longer builds the moving default branch, and it stops when it cannot look up the newest release.
+- What changed: when `install.sh` builds from source it uses `YOKE_COMMIT`, `YOKE_VERSION`, the newest release tag, or, while no release exists, the commit `main` points to when the installer runs; it looks that hash up, prints it and builds exactly it (so a push to `main` mid-install cannot change what is built), and it stops, with the `YOKE_COMMIT=` command to run, when it cannot look the hash up.
   It rejects a plain `http://` `YOKE_DOWNLOAD_URL` unless the host is `localhost`, `127.0.0.1` or `[::1]`, refuses an install directory that contains a double quote, dollar sign, backtick, backslash or newline, and limits downloads to TLS 1.2 or newer, ten minutes and 64 MiB.
   `yoke update` runs curl from a fixed system path when there is one, asks for TLS 1.2 or newer, and runs the downloaded executable once with `--version` before it replaces the installed one.
   Release archives no longer carry the builder's owner or file times, and releases gain a `SHA256SUMS` asset and signed build provenance (see [Verifying releases](verifying-releases.md)).
