@@ -90,6 +90,7 @@ To build straight from GitHub without the script: `cargo install --locked --git 
 Cargo installs the executable into its configured binary directory, normally `~/.cargo/bin`.
 Ensure that directory is on your PATH.
 The remaining commands run from the project you want Yoke to govern, which need not be Yoke's own repository.
+`yoke --help` shows the setup sequence; `yoke init --help`, `yoke trust --help`, `yoke install --help` and `yoke health --help` include examples without reading or creating state.
 
 ## 2. Create and approve a project policy
 
@@ -176,6 +177,7 @@ For Codex, open Codex itself, run `/hooks` and approve the Yoke hooks: Codex ski
 If you run Claude Code with `CLAUDE_CONFIG_DIR` or Codex with `CODEX_HOME`, keep the same variable set when you run `yoke install`, so the hooks land in the files the agent reads.
 Restart or reload your agent's hook configuration as appropriate, perform a normal tool action, and inspect `yoke log` for the resulting decision.
 Run `yoke health` to confirm that each agent reports installed, enabled hooks and a recorded event; it exits 1 when a check fails.
+If an installed agent has no recorded event, health names its launch command and the `yoke log --limit 10` and `yoke health` checks to run after a tool action.
 
 Claude's statusline is the way to see Yoke inside the agent: it puts the mode (and whether any trusted policy applies), your git branch and changed-file count, this session's allowed and blocked actions, the plan state, your 5-hour and weekly quota, the session's cost and context use, and alerts such as `! 2 unread` in Claude Code's prompt bar, dropping the least important parts when the terminal is narrow.
 Add `--style detailed` to either command below for a second line, and see [Statusline](cli.md#statusline) for every segment, `NO_COLOR` and `YOKE_ASCII=1`.
@@ -212,6 +214,8 @@ For example, Claude Code settings can include:
 ## 5. Enable enforcement when ready
 
 Set the top-level `mode` in `yoke.toml` to `"enforce"`, then run `yoke trust` again from your own terminal.
+If you use global policy instead, `yoke health` names the file supplying the mode and the matching `yoke trust --global` command.
+For stale policy, follow the scope-specific trust command in health; restore a missing trusted file before approving new bytes.
 Repeat the simulated payload above to inspect the agent-specific denial response.
 Only `pre_tool_use`, `user_prompt_submit`, and `stop` can block; other events report failures without vetoing the action.
 

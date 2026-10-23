@@ -28,7 +28,12 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use yoke_core::event::Agent;
 
 #[derive(Parser)]
-#[command(name = "yoke", version, about)]
+#[command(
+    name = "yoke",
+    version,
+    about,
+    after_help = "Getting started:\n  yoke init                                # create a project policy in observe mode\n  yoke trust                               # review and approve it in your own terminal\n  yoke install --agent claude --dry-run     # preview hooks for your agent\n  yoke install --agent claude               # connect hooks (or use --agent codex)\n  yoke health                              # diagnose setup and see next steps\n\nCodex hooks also need approval with /hooks inside Codex.\nObserve mode records decisions but blocks nothing. Run yoke <command> --help for details."
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -162,6 +167,9 @@ enum Cmd {
         command: presets::PresetCommand,
     },
     /// Write a starter yoke.toml at the project root without replacing an existing file.
+    #[command(
+        after_help = "Examples:\n  yoke init\n  yoke trust\n\nReview the generated yoke.toml, then run yoke trust in your own interactive terminal.\nCreating the file alone does not activate its policy."
+    )]
     Init,
     /// List effective, trusted gates in this project.
     Gates,
@@ -174,6 +182,9 @@ enum Cmd {
         agent: AgentArg,
     },
     /// Review and trust captured config bytes. Requires a human terminal.
+    #[command(
+        after_help = "Examples:\n  yoke trust\n  yoke trust --global\n\nRun from the project in your own interactive terminal; an agent tool process or piped\nconfirmation cannot approve trust. Review the displayed bytes before confirming.\nEdits stay inactive until trusted again."
+    )]
     Trust {
         /// Trust the global ~/.yoke/config.toml instead of the project policy.
         #[arg(long)]
@@ -210,6 +221,9 @@ enum Cmd {
         json: bool,
     },
     /// Install managed hooks. Use --dry-run to inspect all changes first.
+    #[command(
+        after_help = "Examples:\n  yoke install --agent claude --dry-run\n  yoke install --agent claude\n  yoke install --agent codex\n\nRun in your own terminal. Keep CLAUDE_CONFIG_DIR or CODEX_HOME set to the same absolute\ndirectory your agent uses. Restart the agent after installing; in Codex, approve the\nYoke hooks with /hooks. Run yoke health to check setup. This does not install the agents."
+    )]
     Install {
         /// Agents to install for, comma separated.
         #[arg(
@@ -247,6 +261,9 @@ enum Cmd {
         dry_run: bool,
     },
     /// Show installation health, hook status and actionable guidance.
+    #[command(
+        after_help = "Examples:\n  yoke health\n  yoke health --json\n\nThis report is read-only: it never creates or migrates state or changes settings.\nIt exits 1 when a check fails; ok or attention exits 0. Observe mode, untrusted policy\nand no recorded event are guidance. Run from the project you want to diagnose."
+    )]
     Health {
         /// Print the report as JSON.
         #[arg(long)]
