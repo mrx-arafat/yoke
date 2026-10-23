@@ -239,6 +239,100 @@ fn guidance_with(report: &Report, needle: &str) -> bool {
 }
 
 #[test]
+fn stale_policy_guidance_uses_its_scope_and_restores_missing_files_before_trust() {
+    use yoke_core::trust;
+    let (dir, options) = fixture();
+    let root = dir.path();
+    let global = root.join(".yoke/config.toml");
+    let project = root.join("yoke.toml");
+    let knowledge = root.join(".yoke/knowledge.md");
+    put(&global, "mode='observe'\n");
+    put(&project, "mode='observe'\n");
+    put(&knowledge, "# Notes\n");
+    let store = Store::open(root.join(".yoke/state.db")).unwrap();
+    trust::prepare_global(&store, root)
+        .unwrap()
+        .commit(&store)
+        .unwrap();
+    trust::prepare_project(&store, root)
+        .unwrap()
+        .commit(&store)
+        .unwrap();
+    for path in [&global, &project, &knowledge] {
+        fs::write(path, "# changed\n").unwrap();
+    }
+    for missing in [false, true] {
+        if missing {
+            for path in [&global, &project, &knowledge] {
+                fs::remove_file(path).unwrap();
+            }
+        }
+        let report = collect(inputs(root, options.clone())).unwrap();
+        for (path, command) in [
+            (&global, "`yoke trust --global`"),
+            (&project, "`yoke trust`"),
+            (&knowledge, "`yoke trust`"),
+        ] {
+            let line = report
+                .guidance
+                .iter()
+                .find(|line| {
+                    line.starts_with(&path.display().to_string()) && line.contains("trusted bytes")
+                })
+                .unwrap();
+            assert!(line.contains(command), "{line}");
+            assert_eq!(line.contains("restore"), missing, "{line}");
+        }
+    }
+}
+
+#[test]
+fn observe_guidance_names_the_effective_mode_source_or_an_existing_policy() {
+    use yoke_core::trust;
+    for (global, project, scope) in [
+        ("mode='observe'", Some("[meta]\nname='demo'"), "global"),
+        ("mode='enforce'", Some("mode='observe'"), "project"),
+        ("[meta]\nname='demo'", None, "global"),
+        (
+            "[meta]\nname='demo'",
+            Some("[meta]\nname='demo'"),
+            "project",
+        ),
+    ] {
+        let (dir, options) = fixture();
+        let root = dir.path();
+        let global_path = root.join(".yoke/config.toml");
+        let project_path = root.join("yoke.toml");
+        put(&global_path, global);
+        let store = Store::open(root.join(".yoke/state.db")).unwrap();
+        trust::prepare_global(&store, root)
+            .unwrap()
+            .commit(&store)
+            .unwrap();
+        if let Some(project) = project {
+            put(&project_path, project);
+            trust::prepare_project(&store, root)
+                .unwrap()
+                .commit(&store)
+                .unwrap();
+        }
+        let report = collect(inputs(root, options)).unwrap();
+        let line = report
+            .guidance
+            .iter()
+            .find(|line| line.starts_with("Observe mode records"))
+            .unwrap();
+        let (path, command) = if scope == "global" {
+            (&global_path, "`yoke trust --global`")
+        } else {
+            (&project_path, "`yoke trust`")
+        };
+        assert!(line.contains(&path.display().to_string()), "{line}");
+        assert!(line.contains(command), "{line}");
+    }
+}
+
+#[test]
 fn untrusted_files_are_named_with_their_own_trust_command_and_absent_ones_are_not_listed_as_work() {
     let (dir, options) = fixture();
     let root = dir.path();
@@ -400,6 +494,19 @@ fn codex_approval_records_are_counted_and_silence_is_explained() {
         "{:?}",
         none.guidance
     );
+    for (name, start) in [("claude", "`claude`"), ("codex", "`codex`")] {
+        let line = none
+            .guidance
+            .iter()
+            .find(|line| line.starts_with(&format!("No {name} hook event")))
+            .unwrap();
+        assert!(
+            line.contains(start)
+                && line.contains("`yoke log --limit 10`")
+                && line.contains("`yoke health`"),
+            "{line}"
+        );
+    }
 
     let hooks = options.codex_hooks.display().to_string();
     let mut config = fs::read_to_string(&options.codex_config).unwrap();

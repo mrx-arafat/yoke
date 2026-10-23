@@ -3,6 +3,8 @@
 [Documentation index](README.md)
 
 Run `yoke --help` or `yoke <command> --help` for installed-version usage.
+Top-level help includes a getting-started sequence; `init`, `trust`, `install` and `health` help include examples and setup constraints.
+Help reads no policy or state and works before installation.
 Without a command, Yoke displays the current mode, project, and trusted gates.
 `yoke --version` prints the package version.
 Angle-bracket values below are placeholders to replace, not literal arguments.
@@ -71,6 +73,9 @@ It is information, so it does not change the status.
 It exits 1 when no agent has Yoke hooks installed, an installation receipt or settings file cannot be read, an installed agent's hook executable or settings entries are missing, Claude settings disable the hooks, Codex `config.toml` turns hooks off or allows managed hooks only, or the state database cannot be read.
 Observe mode, untrusted or stale policy, an agent without a recorded hook event, and unfinished plans (one next step per plan state, or `yoke plan new` when there is none) are reported as guidance with exit 0.
 Guidance names each untrusted policy file that exists with its own trust command; the `policy` rows carry an `exists` column, and a file that is not on disk is not work to do.
+For stale policy, guidance uses `yoke trust --global` for global configuration and `yoke trust` for project configuration and knowledge; a missing trusted file must be restored before new bytes can be approved.
+Observe-mode guidance names the file that supplies the effective mode and its trust command; when mode is the default, it suggests an existing project policy, then global policy.
+With no recorded event for an installed agent, guidance says to start or restart `claude` or `codex` in the project, perform a tool action, then run `yoke log --limit 10` and `yoke health`.
 Times in the text report are local time as `YYYY-MM-DD HH:MM`; `--json` keeps epoch seconds.
 For Codex, `health` counts the approval records Codex keeps for the Yoke hooks in `config.toml` and reports how many are missing; it can see that a record exists, not whether it is current.
 A WAL database whose `-wal` and `-shm` files were deleted by another SQLite client is reported as a problem that names `yoke log --limit 1` as the way back; the read-only open creates no file (see [troubleshooting](troubleshooting.md#storage-failures-block-work)).

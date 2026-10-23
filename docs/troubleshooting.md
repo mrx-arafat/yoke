@@ -7,6 +7,7 @@ Read them with `yoke notifications` or on the console Notifications page, which 
 Recovery links in tagged release builds point to that release's documentation.
 Local builds and manual packages without a matching release tag use the documentation on `main`; no release needs to exist for those links to work.
 Each notification names the section of this page that explains it.
+For command examples and setup constraints, use `yoke --help` or `yoke <command> --help`; help works without state or trusted policy.
 On session start, hooks materialize at most 2,000 old decisions and queue one `notifications-drain` job for the rest.
 The existing job worker drains that history in paced transactions, so catching up does not require hundreds of later session starts.
 Run `yoke jobs --all` to inspect the job; failed jobs retry with backoff, and a human can run `yoke jobs retry <id>` for a dead job.
@@ -40,6 +41,7 @@ Use `pre_tool_use`, `user_prompt_submit`, or `stop` when the action must be bloc
 Observe mode still runs shell checks; it suppresses blocking and rewrites, not execution.
 It also does not block Stop and does not inject plan or memory context into the agent.
 Review what enforce mode would have denied with `yoke log --outcome would_deny --limit 20`, then confirm the active mode and its source file with `yoke config`.
+`yoke health` names the policy supplying observe mode and the trust command to use after changing it; global policy requires `yoke trust --global`.
 
 ## Configuration changed after it was trusted
 
@@ -49,6 +51,7 @@ Compare trusted and disk content on the console Trust & config page, or look for
 If the edit is intended, run `yoke trust` (or `yoke trust --global` for `~/.yoke/config.toml`) in your own terminal.
 If it is not intended, restore the file.
 A deleted file cannot be trusted; the trusted snapshot keeps applying meanwhile.
+Health names the scope-specific trust command and tells you to restore a missing trusted file before reviewing and approving new bytes.
 
 ## Configuration is not trusted
 
@@ -64,6 +67,7 @@ Agents cannot trust configuration.
 
 Yoke protects nothing when its hooks do not run.
 Run `yoke health` to see which agents have Yoke hooks installed and what stops them.
+When an installed agent has no recorded event, follow health's launch command (`claude` or `codex`) from the project, perform a normal tool action, then run `yoke log --limit 10` and `yoke health` again.
 Health also reports group or other access to `~/.yoke` or `state.db`, with the exact `chmod 700` or `chmod 600` command to restore private permissions.
 It reports these permissions without changing them.
 For hook executable paths, unprotected world-write access is a problem; a sticky directory such as `/tmp` is accepted when its next path component is owned by you or root.

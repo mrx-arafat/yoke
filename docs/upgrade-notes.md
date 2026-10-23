@@ -274,6 +274,13 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 
 ## Installation and health
 
+### Setup help and policy recovery guidance
+
+- What changed: top-level help shows the setup sequence, and `init`, `trust`, `install` and `health` help include examples and constraints.
+  Health uses the correct trust command for stale global or project policy, asks you to restore missing trusted files, names the policy supplying observe mode, and gives launch and verification commands when an agent has no recorded event.
+- Who is affected: anyone setting up or diagnosing an installation; report fields and exit codes are unchanged.
+- What to do: run `yoke health` in the project and follow its guidance from your own terminal.
+
 ### The installer builds one exact revision, and the updater tests what it downloads
 
 - What changed: when `install.sh` builds from source it uses `YOKE_COMMIT`, `YOKE_VERSION`, the newest release tag, or, while no release exists, the commit `main` points to when the installer runs; it looks that hash up, prints it and builds exactly it (so a push to `main` mid-install cannot change what is built), and it stops, with the `YOKE_COMMIT=` command to run, when it cannot look the hash up.

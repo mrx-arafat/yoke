@@ -256,7 +256,7 @@ fn collect(inputs: Inputs) -> Result<Report> {
         }
         if agent.event_readable && agent.last_event.is_none() {
             guidance.push(format!(
-                "No {name} hook event is recorded yet; start {name} in a project to confirm its hooks run.{}",
+                "No {name} hook event is recorded yet; restart or start `{name}` in this project, perform a normal tool action, then run `yoke log --limit 10` and `yoke health` to confirm its hooks run.{}",
                 if name == "codex" {
                     " Codex skips hooks you have not approved, with no warning, including in `codex exec`."
                 } else {
@@ -387,6 +387,10 @@ fn now_secs() -> i64 {
 }
 
 fn policy_guidance(loaded: &config::LoadedConfig, guidance: &mut Vec<String>) {
+    let trust_command = |scope: &str| match scope {
+        "global" => "yoke trust --global",
+        _ => "yoke trust",
+    };
     // Only files that exist are work for the user; the project and knowledge files usually do not.
     let mut waiting = false;
     for snapshot in loaded
@@ -395,11 +399,7 @@ fn policy_guidance(loaded: &config::LoadedConfig, guidance: &mut Vec<String>) {
         .filter(|snapshot| !snapshot.trusted && snapshot.exists)
     {
         waiting = true;
-        let trust = if snapshot.scope == "global" {
-            "yoke trust --global"
-        } else {
-            "yoke trust"
-        };
+        let trust = trust_command(&snapshot.scope);
         guidance.push(format!(
             "{} is not trusted, so Yoke ignores it; review it and run `{trust}` in your own terminal.",
             snapshot.file.display()
@@ -409,13 +409,42 @@ fn policy_guidance(loaded: &config::LoadedConfig, guidance: &mut Vec<String>) {
         guidance.push("No policy exists yet: run `yoke init` in a project to write a starter yoke.toml, then `yoke trust`; or run `yoke preset add git-safety --global`, then `yoke trust --global`, to cover every project.".into());
     }
     for snapshot in loaded.snapshots.iter().filter(|snapshot| snapshot.stale) {
+        let trust = trust_command(&snapshot.scope);
+        let change = if snapshot.exists {
+            "changed after it was trusted"
+        } else {
+            "is missing from disk after it was trusted"
+        };
+        let restore = if snapshot.exists { "" } else { "restore it, " };
         guidance.push(format!(
-            "{} changed after it was trusted; Yoke keeps using the trusted bytes until you review it and run `yoke trust`.",
+            "{} {change}; Yoke keeps using the trusted bytes. If the change is intended, {restore}review it and run `{trust}` in your own terminal.",
             snapshot.file.display()
         ));
     }
     if loaded.config.mode == Mode::Observe {
-        guidance.push("Observe mode records what would be denied but blocks nothing; review `yoke log --outcome would_deny`, then set mode = \"enforce\" in yoke.toml and run `yoke trust` in your own terminal.".into());
+        // An explicit mode can come from global policy even when project policy exists.
+        // With the default mode, prefer an existing project policy over the global one.
+        let source = loaded
+            .snapshots
+            .iter()
+            .find(|snapshot| {
+                loaded.origins.get("mode") == Some(&snapshot.file.display().to_string())
+            })
+            .or_else(|| {
+                loaded.snapshots.iter().rev().find(|snapshot| {
+                    snapshot.exists
+                        && (snapshot.scope == "global" || snapshot.file.ends_with("yoke.toml"))
+                })
+            });
+        let next = source.map_or_else(String::new, |snapshot| {
+            format!(
+                " To enable blocking, {}set mode = \"enforce\" in {} and run `{}` in your own terminal.",
+                if snapshot.exists { "" } else { "restore the policy file first, then " },
+                snapshot.file.display(),
+                trust_command(&snapshot.scope)
+            )
+        });
+        guidance.push(format!("Observe mode records what would be denied but blocks nothing; review `yoke log --outcome would_deny`.{next}"));
     }
 }
 

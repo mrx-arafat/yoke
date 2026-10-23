@@ -91,6 +91,7 @@ yoke health                                   # exits 1 when installed hooks can
 Pass `--agent claude` or `--agent codex` to install for one agent.
 Codex runs new hooks only after you approve them with `/hooks` inside Codex.
 If you start an agent with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, keep the same variable set when you run `yoke install`.
+If health reports no recorded event, start or restart the agent in the project, perform a tool action, then run `yoke log --limit 10` and `yoke health` again.
 
 **4. Watch before you block:**
 
@@ -104,7 +105,9 @@ This simulates a hook event; it does not run Git.
 In observe mode Yoke prints nothing and records a `would_deny` decision.
 After a period of normal work, review `yoke log --outcome would_deny`, set top-level `mode = "enforce"` in `yoke.toml`, and run `yoke trust` again.
 The same simulated event then returns a denial, as shown in [Gates](#gates-observe-then-enforce).
+For global policy, health names the file supplying observe mode and the matching `yoke trust --global` command; its stale-policy guidance also names the correct trust command and says to restore a missing trusted file first.
 
+`yoke --help` shows the setup sequence; `init`, `trust`, `install` and `health` help include examples and setup constraints.
 [Getting started](docs/getting-started.md) walks through every step, and [uninstalling](docs/uninstalling.md) reverses the installer.
 
 ## How it works

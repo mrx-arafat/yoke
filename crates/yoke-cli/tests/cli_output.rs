@@ -28,6 +28,64 @@ fn text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+#[test]
+fn onboarding_help_shows_examples_and_boundaries_without_creating_state() {
+    let home = tempfile::tempdir().unwrap();
+    for (args, expected) in [
+        (
+            vec!["--help"],
+            vec!["Getting started:", "yoke init", "yoke trust", "yoke health"],
+        ),
+        (
+            vec!["init", "--help"],
+            vec!["Examples:", "yoke init", "yoke trust"],
+        ),
+        (
+            vec!["trust", "--help"],
+            vec![
+                "Examples:",
+                "yoke trust --global",
+                "interactive",
+                "agent tool process",
+            ],
+        ),
+        (
+            vec!["install", "--help"],
+            vec![
+                "Examples:",
+                "yoke install --agent claude --dry-run",
+                "CLAUDE_CONFIG_DIR",
+                "CODEX_HOME",
+                "/hooks",
+                "own terminal",
+            ],
+        ),
+        (
+            vec!["health", "--help"],
+            vec![
+                "Examples:",
+                "yoke health --json",
+                "read-only",
+                "exits 1",
+                "exits 0",
+            ],
+        ),
+    ] {
+        let output = yoke(home.path(), home.path(), &args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+        let help = text(&output);
+        for phrase in expected {
+            assert!(
+                help.contains(phrase),
+                "{args:?}: missing {phrase:?}\n{help}"
+            );
+        }
+    }
+    assert!(!home.path().join(".yoke").exists());
+    assert!(!home.path().join("yoke.toml").exists());
+}
+
 fn record(
     store: &Store,
     cap: usize,
@@ -336,7 +394,13 @@ fn install_dry_run_shows_readable_changed_lines_not_escaped_files() {
         dry.contains("changes: 1") && dry.contains("dry_run: true"),
         "{dry}"
     );
-    assert!(!dry.contains("\\\""), "escaped JSON leaked:\n{dry}");
+    // Diagnostics quote paths too; only changed settings must be unescaped JSON.
+    assert!(
+        dry.lines()
+            .filter(|line| line.starts_with("+ ") || line.starts_with("- "))
+            .all(|line| !line.contains("\\\"")),
+        "escaped JSON leaked:\n{dry}"
+    );
     assert!(
         dry.lines().any(|line| {
             line.starts_with("+ hooks.PreToolUse: ")
