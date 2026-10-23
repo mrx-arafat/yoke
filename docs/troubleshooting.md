@@ -234,6 +234,7 @@ The database file does not shrink after a cleanup: SQLite reuses the freed pages
 ## Usage looks frozen or incomplete
 
 Usage is imported from the agent's transcript on Stop, SessionEnd and PreCompact, and an import never decides a hook event.
+Codex also imports on start and prompt hooks and at most once per minute after tools complete, so quota warnings can arrive during a turn.
 A failed import prints `yoke: usage ingestion failed: <reason>` on the hook's stderr and appends it to `~/.yoke/error.log`; the session's usage stays at its last successful import until a later import succeeds.
 A transcript containing a malformed line fails every import from the last good one on, so that session's usage stays incomplete; usage counted by earlier imports stays.
 Each import resumes where the previous one of that session stopped, so a long session's Stop reads only what was appended and does not get slower as the transcript grows.
@@ -246,6 +247,9 @@ A full import after a transcript replacement resolves it.
 Keep the original transcript: incremental imports add new usage but cannot recover the bytes already skipped.
 Quota resets more than the advertised window plus five minutes after the observation are ignored.
 An invalid stored quota record is replaced when the agent next reports valid limits; no manual deletion is needed.
+Quota projections need at least a minute of same-reset readings within an hour and a latest reading no older than five minutes.
+`usage_limit` warns at `usage.warn_percent` (85 by default), earlier projected exhaustion, and 100%; it never blocks a hook.
+Codex's interactive CLI shows quota through hook `systemMessage` output. If absent, check `/hooks` trust and `yoke usage` freshness. Codex 0.164.0 does not include these messages in `exec --json`.
 Totals for such a session under-report, most for a session that has run for days.
 A Codex rollout whose cumulative token total restarts when Codex begins a new conversation segment, for example after a thread settings change, starts a new accounting segment instead of failing, and the next import catches up.
 A restart that neither decreases the total nor is reported as the last turn's usage counts only the difference from the previous total.

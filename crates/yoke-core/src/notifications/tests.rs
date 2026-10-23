@@ -56,6 +56,57 @@ fn by_kind<'a>(rows: &'a [Notification], kind: &str) -> &'a Notification {
 }
 
 #[test]
+fn quota_alerts_deduplicate_across_projects_preserve_ack_and_escalate() {
+    let (_directory, store) = store();
+    let at = 1_792_144_800;
+    let reading = |used, reset, time| {
+        crate::quota::Quota::from_codex(&serde_json::json!({"primary":{"used_percent":used,"window_minutes":300,"resets_at":reset}}), time).unwrap()
+    };
+    let mut quota = reading(40, at + 7200, at);
+    quota.absorb(&reading(50, at + 7200, at + 600));
+    assert_eq!(
+        quota_warning(&store, &quota, 85, at + 600).unwrap().len(),
+        1
+    );
+    assert!(quota_warning(&store, &quota, 85, at + 600)
+        .unwrap()
+        .is_empty());
+    let rows = list(&store, Path::new("/another/project"), true, 100).unwrap();
+    let id = by_kind(&rows, "usage_limit").id;
+    acknowledge(
+        &store,
+        Path::new("/another/project"),
+        &Target::Ids(vec![id]),
+        at + 601,
+    )
+    .unwrap();
+    assert!(quota_warning(&store, &quota, 85, at + 601)
+        .unwrap()
+        .is_empty());
+    quota.absorb(&reading(90, at + 7200, at + 660));
+    assert_eq!(
+        quota_warning(&store, &quota, 85, at + 660).unwrap().len(),
+        1
+    );
+    quota.absorb(&reading(100, at + 7200, at + 720));
+    assert_eq!(
+        quota_warning(&store, &quota, 85, at + 720).unwrap().len(),
+        1
+    );
+    assert!(quota_warning(&store, &quota, 85, at + 1021)
+        .unwrap()
+        .is_empty());
+    assert!(list(&store, Path::new("/another/project"), true, 100)
+        .unwrap()
+        .is_empty());
+    quota.absorb(&reading(90, at + 10000, at + 1100));
+    assert_eq!(
+        quota_warning(&store, &quota, 85, at + 1100).unwrap().len(),
+        1
+    );
+}
+
+#[test]
 fn partial_usage_notifies_each_session_once_and_resolves_after_a_full_import() {
     let (_directory, store) = store();
     for session in ["first", "second"] {

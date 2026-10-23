@@ -1,8 +1,8 @@
 //! Actionable notifications with human acknowledgement and searchable recovery help.
 //!
-//! Rows are derived on read by `sync` from decisions, plans, check runs and trust snapshots,
-//! so hooks never pay for them. Repeats share one row per dedupe key; conditions that stop
-//! holding are resolved, and unread ones are acknowledged by `yoke` on the human's behalf.
+//! Most rows are derived on read by `sync`; bounded quota and import conditions also arrive
+//! from hooks. Repeats share one row per dedupe key; conditions that stop holding are resolved,
+//! and unread ones are acknowledged by `yoke` on the human's behalf.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -120,6 +120,18 @@ const fn release_ref(kind: Option<&str>, name: Option<&str>, expected: &str) -> 
 }
 
 pub const HELP: &[HelpTopic] = &[
+    HelpTopic {
+        id: "usage-limit",
+        title: "Agent quota is running low",
+        summary: "A fresh provider reading crossed the warning threshold, or recent burn may exhaust a window before reset.",
+        steps: &[
+            "Run yoke usage for remaining quota, reset times and recent burn.",
+            "Projections assume the recent rate continues; they are not a provider guarantee.",
+            "Adjust usage.warn_percent in trusted configuration; the default is 85. Yoke never blocks work for quota.",
+        ],
+        commands: &["yoke usage"],
+        doc: troubleshooting!("#usage-looks-frozen-or-incomplete"),
+    },
     HelpTopic {
         id: "usage-partial",
         title: "Session usage is only partly counted",
@@ -265,6 +277,7 @@ pub fn help_for(kind: &str) -> &'static HelpTopic {
         "check_failed" => "check-failed",
         "config_stale" => "stale-trust",
         "usage_partial" => "usage-partial",
+        "usage_limit" => "usage-limit",
         _ => "untrusted-config",
     };
     HELP.iter()
@@ -642,6 +655,47 @@ fn cap(text: &str) -> String {
         Some((at, _)) => format!("{}...", &text[..at]),
         None => text,
     }
+}
+
+/// Account-wide warnings: once per reset and severity, independent of concurrent sessions.
+/// Acknowledgement survives refreshes. Stale/expired evidence resolves the condition.
+pub fn quota_warning(
+    store: &Store,
+    quota: &crate::quota::Quota,
+    threshold: u8,
+    now: i64,
+) -> Result<Vec<String>> {
+    store.transaction(|tx| {
+        let mut active = BTreeSet::new();
+        let mut messages = Vec::new();
+        for window in &quota.windows {
+            let Some(warning) = quota.warning(window, now, threshold) else { continue };
+            let level = if window.used_percent >= 100.0 { "exhausted" }
+                else if window.used_percent >= f64::from(threshold) { "threshold" }
+                else { "projected" };
+            let key = format!("quota-limit:{}:{}:{}:{level}", quota.agent, window.window_minutes, window.resets_at);
+            active.insert(key.clone());
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM notifications WHERE key=?1)", [&key], |row| row.get(0))?;
+            if !exists {
+                let detail = format!("{} quota: {warning}; resets {} UTC. Run yoke usage for details.", quota.agent, crate::timefmt::full_time(window.resets_at, 0));
+                record(tx, &Occurrence {
+                    key, kind: "usage_limit", project: "", subject: &quota.agent, plan_id: None,
+                    title: format!("{} quota: {warning}", quota.agent), detail: detail.clone(),
+                    count: 1, first_seen: now, last_seen: now,
+                }, Repeat::Condition)?;
+                messages.push(detail);
+            }
+        }
+        let open = {
+            let mut stmt = tx.prepare("SELECT id,key FROM notifications WHERE kind='usage_limit' AND subject=?1 AND resolved_at IS NULL")?;
+            let rows = stmt.query_map([&quota.agent], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, key) in open {
+            if !active.contains(&key) { resolve(tx, id, now)?; }
+        }
+        Ok(messages)
+    })
 }
 
 /// Keep the accounting condition in the import transaction, including its resolution.

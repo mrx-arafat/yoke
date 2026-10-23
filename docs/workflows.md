@@ -368,17 +368,22 @@ The report has these parts:
   Coverage is `full`, or says how much of an oversize transcript was counted (see below).
 - **Notes** say what is missing and what produces it, for example no state yet, a state schema older than usage times need, or an agent that has not reported its quota.
 
-Quota percentages are what each agent reported; Yoke does not compute, predict or enforce a quota.
+Quota percentages are what each agent reported; Yoke never enforces a quota.
+The `quota_outlook` block estimates burn in percentage points/hour and when a window may reach 100% before reset, assuming that rate continues.
+It requires at least one minute of same-reset observations from the most recent hour, with a last reading no more than five minutes old.
+Expired or stale readings have no projection. An absent projection means insufficient evidence, not unlimited capacity.
+`yoke usage --json` includes each window's bounded history, source time, staleness, burn rate, evidence span and projected exhaustion time.
+The console's Usage page shows account-wide quota, before/after history and projections independently of project and date filters.
 Costs are the API-price estimates described above, so an unpriced model shows as unknown rather than a guessed amount.
 
 Where quota comes from:
 
 - **Claude Code** reports `rate_limits.five_hour` and `rate_limits.seven_day` (percent used and reset time) in the statusline callback JSON.
   The Yoke statusline, installed with `yoke install --agent claude --statusline`, shows them and merges them into `~/.yoke/quota-claude.json`, which `yoke usage` reads.
-  The statusline still never creates or migrates the state database: it writes only that one file, atomically, only when `~/.yoke` already exists, and it skips the write while the figures are unchanged and under a minute old.
-  The segment shows the reset time of the window closest to its limit, because that window blocks work first; `yoke usage` lists every window's reset time.
+  The statusline still never creates or migrates the state database: it writes quota atomically, only when `~/.yoke` already exists, and skips unchanged figures under a minute old. A nonblocking lock beside the file prevents concurrent sessions from overwriting newer history.
+  The segment shows the most-used active window's reset time; `yoke usage` lists every reset and estimates which windows may exhaust before then.
 - **Codex** records `rate_limits` in each `token_count` event of its session files.
-  Yoke keeps the newest one while it imports a session's usage, when the session stops, ends or compacts, so Codex quota is only as fresh as the last import.
+  Yoke retains quota history while importing a session's usage on start, prompt, stop, end or compact, and at most once per minute after a tool completes. Quota is only as fresh as that import; transcript formats are not a stable provider API.
   Each window carries its own length, so a Codex plan that reports only a weekly window shows only `7d`.
   Codex also reports an account credits balance.
   Yoke does not read or store it: it is a billing figure rather than a rate-limit window, so it would put account money into the state database, logs and screenshots, and Yoke only reports usage windows.
@@ -386,6 +391,30 @@ Where quota comes from:
 Several sessions report the same account limits, so Yoke keeps, per window, the reading with the later reset time and, for one reset time, the higher percent.
 An idle session replaying old figures therefore cannot lower them.
 A window whose reset time has passed is marked `reset` and keeps its last figure until the agent reports the next one.
+
+Yoke retains up to 64 observations per window, coalescing rapid events to roughly one point per minute while keeping the current point.
+Token usage and estimated cost remain separate: subscription quota burn is measured from reported percentages, never inferred from tokens or dollars.
+
+### Quota inside Codex
+
+With Yoke's Codex hooks installed, the interactive CLI shows a line such as:
+
+```text
+Hook · Yoke Codex quota: 5h 90% (resets 16:00). ...
+```
+
+Yoke returns Codex's documented `systemMessage` field, which renders as a hook warning in the conversation.
+A fresh reading appears once per session and at most every 15 minutes of hook activity; warnings can appear sooner.
+Notifications use kind `usage_limit`, separately from `usage_partial` (incomplete transcript accounting).
+Crossing the configured percentage, projected exhaustion, and reaching 100% each warn once per account window/reset, across concurrent sessions.
+Acknowledging a warning does not reopen it on every hook. Expired or stale evidence resolves it.
+Set `warn_percent = 75` under `[usage]` in trusted Yoke configuration to change the default threshold of 85.
+Claude warnings are collected on start, prompt and stop hooks; opening Notifications also refreshes both agents' conditions.
+
+Verified with Codex CLI 0.164.0. If Codex asks to review installed hooks, use `/hooks` to trust their exact definitions.
+The interactive CLI displays these messages; `codex exec --json` did not include them in the tested version.
+Codex also offers built-in footer items via `/statusline`; it does not offer Claude's arbitrary command callback for that footer.
+`notify` launches an external notification command and is not used as a terminal display channel.
 Without a recorded reading, the report says so and names what produces it; it never shows a guessed figure.
 
 Yoke remembers, per session, how far it has read (a byte offset, the file's identity and a fingerprint of its first and last 4 KiB), so a Stop on a long session reads only the lines added since the previous import.

@@ -551,7 +551,7 @@ fn read_snapshot_from(
         state.baselined = false;
     }
     let mut samples = BTreeMap::<String, Sample>::new();
-    let mut quota = None;
+    let mut quota: Option<Quota> = None;
     loop {
         bytes.clear();
         let read = reader.read_until(b'\n', &mut bytes)?;
@@ -627,7 +627,10 @@ fn read_snapshot_from(
                     if let Some(found) =
                         observed_at.and_then(|at| Quota::from_codex(&payload.rate_limits, at))
                     {
-                        quota = Some(found);
+                        match &mut quota {
+                            Some(reading) => reading.absorb(&found),
+                            None => quota = Some(found),
+                        }
                     }
                 }
             }
@@ -1462,11 +1465,25 @@ mod tests {
 
         ingest_rows(
             "new",
-            &[codex_count("2026-10-16T12:00:00Z", 10, 34.0, true)],
+            &[
+                codex_count("2026-10-16T11:50:00Z", 5, 30.0, true),
+                codex_count("2026-10-16T12:00:00Z", 10, 34.0, true),
+            ],
         );
         let stored = crate::quota::load(&store, "codex").unwrap().unwrap();
         assert_eq!(stored.observed_at, 1_792_152_000);
         assert_eq!(stored.plan.as_deref(), Some("pro"));
+        assert_eq!(
+            stored.history.len(),
+            2,
+            "intermediate quota survives import"
+        );
+        assert_eq!(
+            stored
+                .trend(&stored.windows[0], stored.observed_at)
+                .percent_per_hour,
+            Some(24.0)
+        );
         assert_eq!(
             (
                 stored.windows[0].window_minutes,

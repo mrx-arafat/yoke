@@ -51,6 +51,10 @@ struct QuotaRow {
     /// When a source last confirmed these figures.
     observed_at: i64,
     plan: Option<String>,
+    stale: bool,
+    #[serde(flatten)]
+    trend: quota::Trend,
+    history: Vec<quota::Observation>,
 }
 
 #[derive(Serialize)]
@@ -114,7 +118,7 @@ fn collect(home: &Path, now: i64, offset_secs: i64, limit: usize) -> Result<Repo
         (
             "codex",
             if exists { quota::load(&store, "codex") } else { Ok(None) },
-            "Codex quota is not recorded. It is read from Codex session records when a session stops or ends, and only if Codex includes rate limits there.",
+            "Codex quota is not recorded. It comes from Codex session records on prompts, periodically after tools, and when a session stops or ends, if Codex includes rate limits there.",
         ),
     ] {
         match reading {
@@ -128,7 +132,7 @@ fn collect(home: &Path, now: i64, offset_secs: i64, limit: usize) -> Result<Repo
     let quota = readings
         .into_iter()
         .flat_map(|reading| {
-            reading.windows.into_iter().map(move |w| QuotaRow {
+            reading.windows.clone().into_iter().map(move |w| QuotaRow {
                 agent: reading.agent.clone(),
                 window: w.label(),
                 window_minutes: w.window_minutes,
@@ -136,8 +140,16 @@ fn collect(home: &Path, now: i64, offset_secs: i64, limit: usize) -> Result<Repo
                 remaining_percent: w.remaining_percent(),
                 resets_at: w.resets_at,
                 expired: w.expired(now),
-                observed_at: reading.observed_at,
+                observed_at: reading.latest(&w),
                 plan: reading.plan.clone(),
+                stale: !reading.fresh(&w, now),
+                trend: reading.trend(&w, now),
+                history: reading
+                    .history
+                    .iter()
+                    .filter(|s| s.window.window_minutes == w.window_minutes)
+                    .cloned()
+                    .collect(),
             })
         })
         .collect::<Vec<_>>();
@@ -315,6 +327,34 @@ fn text(report: &Report) -> String {
         ];
         for row in table(&headings, &rows, &[2, 3]) {
             line(row);
+        }
+        line("quota_outlook:".into());
+        for row in &report.quota {
+            let outlook = if row.expired {
+                "reset passed; waiting for the next reading".into()
+            } else if row.stale {
+                "stale reading; no projection (freshness limit: 5m)".into()
+            } else if row.used_percent >= 100.0 {
+                "limit reached; waiting for reset".into()
+            } else if let Some(rate) = row.trend.percent_per_hour {
+                let end = row.trend.exhausts_at.map_or_else(
+                    || "no exhaustion before reset at this rate".into(),
+                    |at| {
+                        format!(
+                            "may reach 100% at {} (in {})",
+                            timefmt::full_time(at, offset),
+                            timefmt::duration_text((at - now).max(0))
+                        )
+                    },
+                );
+                format!(
+                    "{rate:.1} percentage points/h over {}; {end}",
+                    timefmt::duration_text(row.trend.span_secs.unwrap_or(0))
+                )
+            } else {
+                "need at least 1m of recent same-window readings to estimate burn".into()
+            };
+            line(format!("  {} {}: {outlook}", row.agent, row.window));
         }
     }
     let rows = report

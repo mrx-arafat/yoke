@@ -32,6 +32,7 @@ pub struct Config {
     pub mode: Mode,
     pub log: LogConfig,
     pub update: UpdateConfig,
+    pub usage: UsageConfig,
     pub stop: StopConfig,
     pub plans: PlansConfig,
     pub memory: MemoryConfig,
@@ -69,6 +70,18 @@ pub(crate) fn environment_name(name: &str) -> bool {
 #[serde(default, deny_unknown_fields)]
 pub struct UpdateConfig {
     pub check: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UsageConfig {
+    pub warn_percent: u8,
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self { warn_percent: 85 }
+    }
 }
 
 impl Default for UpdateConfig {
@@ -289,6 +302,10 @@ impl Config {
 
     /// Validate before accepting a snapshot and before using persisted data.
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=100).contains(&self.usage.warn_percent),
+            "usage.warn_percent must be between 1 and 100"
+        );
         for names in std::iter::once(&self.gate_environment.pass_env)
             .chain(self.gates.iter().map(|gate| &gate.pass_env))
         {
@@ -436,6 +453,7 @@ impl Config {
         merge!("log.retention_days", log.retention_days);
         merge!("log.payload_cap", log.payload_cap);
         merge!("update.check", update.check);
+        merge!("usage.warn_percent", usage.warn_percent);
         merge!("gates.pass_env", gate_environment.pass_env);
         merge!("stop.max_blocks", stop.max_blocks);
         merge!("plans.dir", plans.dir);
@@ -483,6 +501,7 @@ impl Config {
             "log.retention_days",
             "log.payload_cap",
             "update.check",
+            "usage.warn_percent",
             "gates.pass_env",
             "stop.max_blocks",
             "plans.dir",
@@ -571,6 +590,18 @@ mod tests {
         assert!(!config.update.check);
         config.merge(Config::parse("[update]\ncheck = true").unwrap());
         assert!(config.update.check);
+    }
+
+    #[test]
+    fn quota_warning_threshold_is_validated_and_inherits_only_explicit_values() {
+        let mut config = Config::default();
+        assert_eq!(config.usage.warn_percent, 85);
+        config.merge(Config::parse("[usage]\nwarn_percent=70").unwrap());
+        config.merge(Config::parse("mode='observe'").unwrap());
+        assert_eq!(config.usage.warn_percent, 70);
+        for value in ["0", "101", "-1", "85.5"] {
+            assert!(Config::parse(&format!("[usage]\nwarn_percent={value}")).is_err());
+        }
     }
 
     #[test]

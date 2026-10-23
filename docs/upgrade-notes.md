@@ -1,5 +1,12 @@
 # Upgrade notes
 
+### Schema 16 adds quota warnings
+
+- Writable opens upgrade the notification kind constraint to allow `usage_limit`, preserving IDs and acknowledgements. Replace all hook binaries together: older writers refuse schema 16.
+- Existing quota JSON remains readable. New readings build bounded history; forecasts need recent same-reset evidence and never change gate decisions.
+- Codex hooks now import usage on prompts and periodically after tools, and show fresh quota reminders in the interactive CLI through `systemMessage`. Review hook definitions with `/hooks` if Codex requests it.
+- `usage.warn_percent` defaults to 85 and follows trusted configuration precedence. It applies in observe and enforce modes. `usage_partial` still refers only to incomplete transcript accounting.
+
 ### Schema 15 keeps exact usage summaries
 
 - What changed: writable opens upgrade schemas 12 through 14 to 15 in one transaction.

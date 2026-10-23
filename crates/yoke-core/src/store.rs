@@ -25,6 +25,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/013-scale-indexes.sql"),
     include_str!("store/014-session-anchors.sql"),
     include_str!("store/015-usage-summaries.sql"),
+    include_str!("store/016-quota-warnings.sql"),
 ];
 
 mod read;
