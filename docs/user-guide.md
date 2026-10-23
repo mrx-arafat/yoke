@@ -291,6 +291,7 @@ yoke usage --json
 It prints four parts:
 
 - **Quota** is a table of each agent's rate-limit windows with `used`, `left`, the reset time, the time until reset, how long ago the agent reported the figures (`observed`), and the plan when the agent reports one.
+  Its outlook shows recent burn and projected exhaustion when enough fresh same-window evidence exists; stale readings are labelled explicitly.
 - **Usage** totals input, output, cache-read and cache-write tokens and the estimated cost per agent, since local midnight and over the 7 x 24 hours before now.
 - **Sessions** lists the newest sessions with project, models, start, duration, tokens, estimated cost and coverage.
   `--limit` sets how many, default 10, range 1 through 100.
@@ -301,11 +302,14 @@ Where the figures come from:
 - Claude Code reports its 5-hour and weekly windows in the statusline callback.
   Yoke's statusline saves them to `~/.yoke/quota-claude.json`, so Claude quota appears only after Yoke's statusline has run in a session.
 - Codex writes its rate limits into its session records.
-  Yoke reads them when a session stops, ends or compacts, so Codex quota is as fresh as the last of those events.
+  Yoke reads them on start, prompt, stop, end and compact hooks, and at most once per minute after tools complete.
+  Fresh quota reminders and warning escalations appear [inside the interactive Codex CLI](workflows.md#quota-inside-codex).
   A Codex plan that reports only a weekly window shows only `7d`.
-- Token totals come from agent transcripts, which Yoke imports when a session stops, ends or compacts.
+- Token totals come from agent transcripts, imported during those Codex refreshes or when either agent stops, ends or compacts.
 
-Quota percentages are what each agent reported; Yoke does not calculate, predict or enforce a quota.
+Quota percentages are what each agent reported; Yoke never enforces a quota.
+Exhaustion estimates assume recent burn continues and stop when readings are over five minutes old.
+Set `warn_percent` under `[usage]` in trusted configuration to change the warning threshold from 85.
 Costs are estimates at API prices from a built-in price table, not subscription bills.
 An unpriced model shows as unknown rather than a guessed amount.
 A window whose reset time has passed is marked `reset` and keeps its last figure until the agent reports the next one.

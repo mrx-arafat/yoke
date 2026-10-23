@@ -18,6 +18,7 @@ use crate::commands;
 
 mod mode_cache;
 mod provenance;
+mod quota;
 
 /// A line for the person watching stderr. Unlike `eprintln!` it never panics: a stderr pipe the
 /// agent has already closed would otherwise end the hook with exit 101 before it printed its
@@ -503,12 +504,26 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
     }
     // Accounting never decides or errors an event: a bad or oversized transcript warns and
     // the trusted gates and stop guard still run.
+    let quota_refresh = agent == Agent::Codex
+        && kind == EventKind::PostToolUse
+        && project_available
+        && !ev.session_id.is_empty()
+        && ev.transcript_path.is_some()
+        && store
+            .claim_interval(
+                &format!("quota.refresh.codex.{}", ev.session_id),
+                state.row.ts,
+                60,
+            )
+            .unwrap_or(false);
     if project_available
         && !ev.session_id.is_empty()
-        && matches!(
+        && (matches!(
             kind,
             EventKind::Stop | EventKind::SessionEnd | EventKind::PreCompact
-        )
+        ) || quota_refresh
+            || agent == Agent::Codex
+                && matches!(kind, EventKind::SessionStart | EventKind::UserPromptSubmit))
     {
         if let Some(path) = ev.transcript_path.as_deref() {
             if let Err(error) = yoke_core::usage::ingest(
@@ -733,6 +748,46 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
             agent == Agent::Codex,
         ) {
             warn_advisory(&home, "memory digest scheduling failed", &error);
+        }
+    }
+    if agent == Agent::Codex
+        && project_available
+        && matches!(
+            kind,
+            EventKind::SessionStart
+                | EventKind::UserPromptSubmit
+                | EventKind::PostToolUse
+                | EventKind::Stop
+        )
+    {
+        match quota::message(
+            store,
+            &ev.session_id,
+            loaded.config.usage.warn_percent,
+            state.row.ts,
+        ) {
+            Ok(Some(message)) => quota::attach(&mut output, &message),
+            Ok(None) => {}
+            Err(error) => warn_advisory(&home, "quota notice unavailable", &error),
+        }
+    } else if agent == Agent::Claude
+        && project_available
+        && matches!(
+            kind,
+            EventKind::SessionStart | EventKind::UserPromptSubmit | EventKind::Stop
+        )
+    {
+        if let Ok(Some(reading)) =
+            yoke_core::quota::read_file(&yoke_core::quota::claude_file(&home), "claude")
+        {
+            if let Err(error) = notifications::quota_warning(
+                store,
+                &reading,
+                loaded.config.usage.warn_percent,
+                state.row.ts,
+            ) {
+                warn_advisory(&home, "quota notification unavailable", &error);
+            }
         }
     }
     Ok(output)

@@ -329,7 +329,48 @@ const DOWNS: &[&str] = &[
     include_str!("013-scale-indexes.down.sql"),
     include_str!("014-session-anchors.down.sql"),
     include_str!("015-usage-summaries.down.sql"),
+    include_str!("016-quota-warnings.down.sql"),
 ];
+
+#[test]
+fn quota_warning_migration_preserves_acknowledgements_and_rolls_back_only_new_kind() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("quota-upgrade.db");
+    {
+        let db = Connection::open(&path)?;
+        for migration in &MIGRATIONS[..15] {
+            db.execute_batch(migration)?;
+        }
+        db.pragma_update(None, "user_version", 15)?;
+        db.execute_batch("INSERT INTO notifications(id,key,kind,project,subject,title,detail,first_seen,last_seen,state,acknowledged_at,actor) VALUES(42,'keep','usage_partial','','s','partial','detail',1,2,'acknowledged',2,'human');")?;
+    }
+    let store = Store::open(&path)?;
+    store.connection().execute_batch("INSERT INTO notifications(key,kind,project,subject,title,detail,first_seen,last_seen) VALUES('new','usage_limit','','codex','quota','detail',3,3);")?;
+    store.transaction(|tx| {
+        tx.execute_batch(DOWNS[15])?;
+        Ok(())
+    })?;
+    let saved = store.connection().query_row(
+        "SELECT id,state,actor FROM notifications WHERE key='keep'",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )?;
+    assert_eq!(saved, (42, "acknowledged".into(), "human".into()));
+    assert_eq!(
+        store
+            .connection()
+            .query_row("SELECT count(*) FROM notifications", [], |row| row
+                .get::<_, i64>(0))?,
+        1
+    );
+    Ok(())
+}
 
 #[test]
 fn usage_summaries_upgrade_schemas_12_to_14_and_follow_mutation_and_rollback() -> Result<()> {

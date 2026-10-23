@@ -34,7 +34,7 @@ pub(crate) fn next_command(notification: &Notification) -> String {
     match notification.kind.as_str() {
         "hook_error" => "yoke log --outcome error --limit 10".into(),
         "observe_would_deny" => "yoke log --outcome would_deny --limit 20".into(),
-        "usage_partial" => "yoke usage".into(),
+        "usage_partial" | "usage_limit" => "yoke usage".into(),
         "plan_waiting" | "plan_stalled" | "check_failed" => {
             format!("yoke plan status {}", notification.subject)
         }
@@ -85,6 +85,12 @@ pub fn run(command: Option<NotificationsCommand>, unread: bool, json: bool) -> R
     // One bounded call per run: looping would start each next write transaction at once and
     // starve hooks that are waiting for the lock.
     let pending = notifications::sync(&store, &loaded, now)?;
+    refresh_quota(
+        &store,
+        &commands::home()?,
+        loaded.config.usage.warn_percent,
+        now,
+    )?;
     let rows = notifications::list(&store, &loaded.project_root, unread, 200)?;
     if json {
         let items: Vec<_> = rows
@@ -130,6 +136,24 @@ pub fn run(command: Option<NotificationsCommand>, unread: bool, json: bool) -> R
     Ok(())
 }
 
+pub(crate) fn refresh_quota(
+    store: &Store,
+    home: &std::path::Path,
+    threshold: u8,
+    now: i64,
+) -> Result<()> {
+    for quota in [
+        yoke_core::quota::load(store, "codex"),
+        yoke_core::quota::read_file(&yoke_core::quota::claude_file(home), "claude"),
+    ] {
+        // A damaged advisory record cannot fail a hook or hide unrelated notifications.
+        if let Ok(Some(quota)) = quota {
+            notifications::quota_warning(store, &quota, threshold, now)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -137,6 +161,7 @@ mod tests {
     #[test]
     fn every_help_and_next_command_parses_with_the_real_cli() {
         assert_eq!(super::next_command(&sample("usage_partial")), "yoke usage");
+        assert_eq!(super::next_command(&sample("usage_limit")), "yoke usage");
         let mut commands: Vec<String> = yoke_core::notifications::HELP
             .iter()
             .flat_map(|topic| topic.commands.iter().map(|command| command.to_string()))

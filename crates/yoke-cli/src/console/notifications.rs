@@ -28,6 +28,7 @@ pub(super) fn unread(store: &Store, c: &Console) -> i64 {
 
 fn refresh(store: &Store, c: &Console) -> Result<()> {
     let loaded = config::load_trusted(store, &c.project, &c.home)?;
+    crate::notifications::refresh_quota(store, &c.home, loaded.config.usage.warn_percent, now())?;
     notifications::sync(store, &loaded, now()).map(|_| ())
 }
 
@@ -39,12 +40,14 @@ fn kind_label(kind: &str) -> &'static str {
         "plan_stalled" => "Plan stalled",
         "check_failed" => "Check failed",
         "config_stale" => "Stale config",
+        "usage_limit" => "Quota warning",
         _ => "Untrusted config",
     }
 }
 
 fn target(c: &Console, n: &Notification) -> (String, &'static str) {
     match n.kind.as_str() {
+        "usage_limit" => (render::link(c, "usage"), "Inspect quota and recent burn"),
         "hook_error" => (
             render::href("decisions", "outcome=error"),
             "Open error decisions",
@@ -326,5 +329,13 @@ mod tests {
         );
         assert!(html.find("Recovery help").unwrap() < html.find("shown &middot;").unwrap());
         assert!(search("no-such-topic").contains("No recovery topic matches"));
+        let at = now();
+        let reading = yoke_core::quota::Quota::from_claude(&serde_json::json!({"rate_limits":{"five_hour":{"used_percentage":90,"resets_at":at+3600}}}), at).unwrap();
+        yoke_core::quota::record_file(&yoke_core::quota::claude_file(&c.home), &reading, at)
+            .unwrap();
+        let html = page(&store, &c, &BTreeMap::new()).unwrap();
+        assert!(html.contains("Quota warning"));
+        assert!(html.contains("Inspect quota and recent burn"));
+        assert!(html.contains("href=\"usage\""));
     }
 }

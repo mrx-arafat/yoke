@@ -8,9 +8,93 @@ use super::{
 use anyhow::{ensure, Context, Result};
 use std::collections::BTreeMap;
 use yoke_core::{
+    quota::{self, Quota},
     store::Store,
+    timefmt,
     usage::{self, Period, UsageRange, UsageTotals},
 };
+
+fn quota_panel(reading: &Quota, now: i64, offset: i64) -> String {
+    let mut out = format!("<section class=\"panel\"><h2>{} account quota</h2><p class=\"muted\">Account-wide; independent of project and date filters. Reported percentages, with estimates from recent burn.</p>", escape(&reading.agent));
+    for window in &reading.windows {
+        let at = reading.latest(window);
+        let state = if window.expired(now) {
+            "reset passed; awaiting a new reading"
+        } else if !reading.fresh(window, now) {
+            "stale reading; no projection"
+        } else if window.used_percent >= 100.0 {
+            "limit reached"
+        } else {
+            "current reading"
+        };
+        out.push_str(&format!(
+            "<h3>{}: {}% used / {}% left</h3><p>{}; observed {} &middot; resets {}</p>",
+            window.label(),
+            quota::percent(window.used_percent),
+            quota::percent(window.remaining_percent()),
+            state,
+            timefmt::full_time(at, offset),
+            timefmt::full_time(window.resets_at, offset)
+        ));
+        out.push_str(&format!("<meter min=\"0\" max=\"100\" low=\"60\" high=\"85\" optimum=\"0\" value=\"{}\" aria-label=\"{} quota used percent\">{}%</meter>", window.used_percent, window.label(), quota::percent(window.used_percent)));
+        let samples: Vec<_> = reading
+            .history
+            .iter()
+            .filter(|s| {
+                s.window.window_minutes == window.window_minutes
+                    && s.window.resets_at == window.resets_at
+                    && (0..=3600).contains(&at.saturating_sub(s.observed_at))
+            })
+            .collect();
+        if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
+            if last.observed_at > first.observed_at {
+                let span = (last.observed_at - first.observed_at) as f64;
+                let points = samples
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{:.2},{:.2}",
+                            (s.observed_at - first.observed_at) as f64 / span * 100.0,
+                            100.0 - s.window.used_percent
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let label = format!(
+                    "{} quota: {}% to {}% over {}",
+                    window.label(),
+                    quota::percent(first.window.used_percent),
+                    quota::percent(last.window.used_percent),
+                    timefmt::duration_text(span as i64)
+                );
+                out.push_str(&format!("<div class=\"chart-row\"><span>{label}</span><svg viewBox=\"0 0 100 100\" preserveAspectRatio=\"none\" role=\"img\" aria-label=\"{label}\"><title>{label}; vertical scale 0 to 100 percent used</title><polyline points=\"{points}\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" vector-effect=\"non-scaling-stroke\"/></svg></div>"));
+            }
+        }
+        let trend = reading.trend(window, now);
+        if let Some(rate) = trend
+            .percent_per_hour
+            .filter(|_| window.used_percent < 100.0)
+        {
+            out.push_str(&format!(
+                "<p>Recent burn: {rate:.1} percentage points/hour over {}. ",
+                timefmt::duration_text(trend.span_secs.unwrap_or(0))
+            ));
+            if let Some(end) = trend.exhausts_at {
+                out.push_str(&format!(
+                    "May reach 100% at {} if this rate continues.",
+                    timefmt::full_time(end, offset)
+                ));
+            } else {
+                out.push_str("No exhaustion before reset at this rate.");
+            }
+            out.push_str("</p>");
+        } else if window.used_percent < 100.0 && reading.fresh(window, now) {
+            out.push_str("<p class=\"muted\">Need at least one minute of recent same-window readings to estimate burn.</p>");
+        }
+    }
+    out.push_str("</section>");
+    out
+}
 
 // Offsets in use by current civil time zones.
 const OFFSETS: [i32; 38] = [
@@ -166,6 +250,19 @@ pub(super) fn page(
             return Ok(out);
         }
     };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    for reading in [
+        quota::load(store, "codex"),
+        quota::read_file(&quota::claude_file(&c.home), "claude"),
+    ] {
+        match reading {
+            Ok(Some(reading)) => out.push_str(&quota_panel(&reading, now, i64::from(offset) * 60)),
+            Err(_) => out.push_str("<p class=\"muted\">A quota record is unreadable; awaiting the next provider reading.</p>"),
+            Ok(None) => {}
+        }
+    }
     let window = match (range.from(), range.to()) {
         (None, None) => "All recorded time".to_owned(),
         (Some(from), None) => format!("From {from}"),
@@ -283,4 +380,32 @@ pub(super) fn page(
     }
     out.push_str("</tbody></table></div></section></main>");
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn account_quota_shows_before_after_history_projection_and_staleness() {
+        let now = 1_792_144_800;
+        let reading = |used, at| {
+            Quota::from_codex(&json!({"primary":{"used_percent":used,"window_minutes":300,"resets_at":now + 7200}}), at).unwrap()
+        };
+        let mut quota = reading(40, now);
+        quota.absorb(&reading(50, now + 600));
+        let html = quota_panel(&quota, now + 600, 0);
+        assert!(html.contains("40% to 50% over 10m"));
+        assert!(html.contains("60.0 percentage points/hour"));
+        assert!(html.contains("May reach 100% at"));
+        assert!(html.contains("<polyline"));
+        let stale = quota_panel(&quota, now + 901, 0);
+        assert!(stale.contains("stale reading; no projection"));
+        assert!(!stale.contains("May reach 100%"));
+        quota.absorb(&reading(100, now + 660));
+        let exhausted = quota_panel(&quota, now + 660, 0);
+        assert!(exhausted.contains("limit reached"));
+        assert!(!exhausted.contains("No exhaustion before reset"));
+    }
 }
