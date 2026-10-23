@@ -23,7 +23,21 @@ Inputs must be regular, non-symlink files no larger than 1 MiB each.
 yoke config
 yoke config --json
 yoke gates
+yoke gates --verbose
+yoke gates --json
 ```
+
+`yoke gates --verbose` shows the effective mode, global environment allowances, and every gate's full settings and source.
+Check gates show the resolved default shell (`/bin/sh`), timeout, and expected exit code (`0`).
+`source` and `expected_exit` are inspection metadata, not configuration fields.
+`--json` includes those settings plus snapshot trust and staleness metadata for scripts; it prints no human help text.
+Both inspect approved snapshots without executing gates, so an edited command appears only after a human trusts it.
+Use `yoke log --json` for recorded failure reasons, gate exit codes and timing; gate stdout is not stored.
+
+When re-trusting, Yoke shows changed lines with two lines of context and `...` for omitted text.
+Each displayed line is JSON-quoted, including its line ending, so `\r\n`, `\n` and a missing final newline remain distinguishable.
+New files are shown in full; very large comparisons fall back to full before/after output to bound diff computation.
+The displayed hash and typed `trust` confirmation still approve the captured bytes, even if the disk file changes during review.
 
 ## Settings and defaults
 
@@ -71,7 +85,7 @@ Each `[[gate]]` defines one gate.
 | `on` | Required | Event name from the table below |
 | `action` | `"check"` | `check`, `deny`, or `rewrite` |
 | `run` | Required for `check` | Shell command; a nonzero exit fails the check |
-| `shell` | `"sh"` | Check shell, invoked with `-c`; valid only for checks |
+| `shell` | `"/bin/sh"` | Check shell, invoked with `-c`; valid only for checks |
 | `timeout` | `30` | Timeout in seconds, at least 1; `yoke trust` refuses check gates whose timeouts on one event add up to more than 530 s for `pre_tool_use` or `stop`, or 20 s for `user_prompt_submit`, so the hook can answer before the agent's own hook timeout |
 | `message` | Optional | Failure reason; otherwise check stderr is used |
 | `match_tool` | Optional | Regex matching the entire tool name |
@@ -108,6 +122,8 @@ message = "Run cargo fmt --all, then retry."
 
 Choose commands suitable for the governed repository.
 Observe mode executes `run` even though it does not block.
+If a check exits with `126` or `127`, Yoke keeps the shell's stderr even when `message` is set and adds recovery hints.
+These statuses usually indicate an unexecutable command or a missing command: inspect `yoke gates --verbose`, check permissions or `PATH`, and run `yoke trust` after editing the policy.
 
 ## Events and decisions
 

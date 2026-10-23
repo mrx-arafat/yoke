@@ -212,6 +212,7 @@ For example, Claude Code settings can include:
 ## 5. Enable enforcement when ready
 
 Set the top-level `mode` in `yoke.toml` to `"enforce"`, then run `yoke trust` again from your own terminal.
+Re-trust shows the change against the approved snapshot with surrounding context; review the `-` and `+` lines before typing `trust`.
 Repeat the simulated payload above to inspect the agent-specific denial response.
 Only `pre_tool_use`, `user_prompt_submit`, and `stop` can block; other events report failures without vetoing the action.
 

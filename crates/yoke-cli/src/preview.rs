@@ -1,4 +1,4 @@
-//! Readable line diff of a file change, for `install --dry-run` and `uninstall --dry-run`.
+//! Inert line diffs for installation previews and trusted snapshot review.
 
 use serde_json::Value;
 
@@ -10,7 +10,32 @@ const MAX_CELLS: usize = 4_000_000;
 /// settings file diffs per hook, and control characters are escaped so file text stays inert.
 pub fn change_lines(before: Option<&str>, after: Option<&str>) -> Vec<String> {
     let (before, after) = (lines(before), lines(after));
-    let ops = diff(&before, &after);
+    context_lines(&before, &after)
+}
+
+/// Exact snapshot text, without JSON normalization or newline loss.
+pub fn snapshot_lines(before: Option<&str>, after: &str) -> Vec<String> {
+    let exact = |text: &str| {
+        text.split_inclusive('\n')
+            .map(|line| {
+                let mut quoted = String::new();
+                for c in crate::commands::quote(line).chars() {
+                    // JSON leaves C1 controls literal; keep them inert and JSON-decodable.
+                    if c.is_control() {
+                        quoted.push_str(&format!("\\u{:04x}", u32::from(c)));
+                    } else {
+                        quoted.push(c);
+                    }
+                }
+                quoted
+            })
+            .collect::<Vec<_>>()
+    };
+    context_lines(&exact(before.unwrap_or("")), &exact(after))
+}
+
+fn context_lines(before: &[String], after: &[String]) -> Vec<String> {
+    let ops = diff(before, after);
     let mut shown = vec![false; ops.len()];
     for (index, op) in ops.iter().enumerate() {
         if !matches!(op, Op::Same(_)) {
@@ -110,6 +135,63 @@ fn printable(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_diff_keeps_context_and_exact_line_bytes() {
+        let before = "# first\n# second\n# third\nmode = 'observe'\n# fourth\n# fifth\n# sixth\n";
+        let after = before.replace("observe", "enforce");
+        let shown = snapshot_lines(Some(before), &after);
+        assert!(
+            shown.contains(&r#"- "mode = 'observe'\n""#.to_owned()),
+            "{shown:?}"
+        );
+        assert!(
+            shown.contains(&r#"+ "mode = 'enforce'\n""#.to_owned()),
+            "{shown:?}"
+        );
+        assert!(
+            shown.contains(&r##"  "# third\n""##.to_owned()),
+            "{shown:?}"
+        );
+        assert!(
+            !shown.iter().any(|line| line.contains("first")),
+            "{shown:?}"
+        );
+        assert_eq!(shown.iter().filter(|line| *line == "  ...").count(), 2);
+
+        // Neither JSON formatting nor line endings may hide a byte change.
+        for (old, new) in [("{}", "{ }"), ("line\r\n", "line\n"), ("line\n", "line")] {
+            let shown = snapshot_lines(Some(old), new);
+            assert!(
+                shown.contains(&format!("- {}", crate::commands::quote(old))),
+                "{shown:?}"
+            );
+            assert!(
+                shown.contains(&format!("+ {}", crate::commands::quote(new))),
+                "{shown:?}"
+            );
+        }
+        assert_eq!(
+            snapshot_lines(None, "\u{1b}[31m\n"),
+            [r#"+ "\u001b[31m\n""#]
+        );
+        assert_eq!(snapshot_lines(Some("old\n"), ""), [r#"- "old\n""#]);
+        let controls = "\u{85}\u{9b}31m\n";
+        let shown = snapshot_lines(None, controls);
+        assert_eq!(
+            serde_json::from_str::<String>(&shown[0][2..]).unwrap(),
+            controls
+        );
+        assert!(!shown[0].chars().any(char::is_control));
+
+        // Above the table cap, every old and new byte must remain reviewable.
+        let old = "# old\n".repeat(2001);
+        let new = "# new\n".repeat(2001);
+        let shown = snapshot_lines(Some(&old), &new);
+        assert_eq!(shown.len(), 4002);
+        assert!(shown[..2001].iter().all(|line| line == r##"- "# old\n""##));
+        assert!(shown[2001..].iter().all(|line| line == r##"+ "# new\n""##));
+    }
 
     #[test]
     fn a_change_shows_only_changed_lines_with_context_and_inert_control_characters() {

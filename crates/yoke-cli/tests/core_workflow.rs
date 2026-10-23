@@ -143,6 +143,90 @@ fn success(output: &Output) {
 }
 
 #[test]
+fn gates_inspection_exposes_trusted_commands_and_execution_settings() {
+    let f = Fixture::new();
+    let unapproved = "[[gate]]\nname='unapproved'\non='stop'\nrun='touch ran'\n";
+    fs::write(f.project.join("yoke.toml"), unapproved).unwrap();
+    let output = f.run(&["gates", "--json"], "");
+    success(&output);
+    let empty: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(empty["gates"], json!([]));
+    assert_eq!(empty["mode"], "observe");
+
+    fs::write(f.home.join(".yoke/config.toml"), "[[gate]]\nname='checks'\non='stop'\nrun='touch replaced'\n[[gate]]\nname='global-check'\non='stop'\nrun='touch global-ran'\nshell='bash'\ntimeout=3\n").unwrap();
+    let store = f.store();
+    trust::prepare_global(&store, &f.home)
+        .unwrap()
+        .commit(&store)
+        .unwrap();
+    drop(store);
+    f.snapshot("mode='enforce'\n[gates]\npass_env=['DATABASE_URL']\n[[gate]]\nname='checks'\non='stop'\nrun='printf trusted'\nmatch_contains='finish'\npass_env=['SERVICE_TOKEN']\n[[gate]]\nname='deny'\non='pre_tool_use'\naction='deny'\nmessage='blocked'\n");
+    fs::write(f.project.join("yoke.toml"), unapproved).unwrap();
+    let output = f.run(&["gates", "--verbose"], "");
+    success(&output);
+    let text = String::from_utf8(output.stdout).unwrap();
+    for expected in [
+        "mode: enforce",
+        "printf trusted",
+        "/bin/sh",
+        "expected_exit",
+        "timeout",
+        "finish",
+        "DATABASE_URL",
+        "SERVICE_TOKEN",
+        "changed after it was trusted",
+        "yoke log --json",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    assert!(!text.contains("touch ran"), "{text}");
+
+    let output = f.run(&["gates", "--json"], "");
+    success(&output);
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["mode"], "enforce");
+    assert_eq!(value["pass_env"], json!(["DATABASE_URL"]));
+    let gate = &value["gates"][0];
+    assert_eq!(gate["run"], "printf trusted");
+    assert_eq!(gate["shell"], "/bin/sh");
+    assert_eq!(gate["timeout"], 30);
+    assert_eq!(gate["expected_exit"], 0);
+    assert_eq!(gate["pass_env"], json!(["SERVICE_TOKEN"]));
+    assert_eq!(
+        gate["source"],
+        f.project
+            .canonicalize()
+            .unwrap()
+            .join("yoke.toml")
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(value["gates"].as_array().unwrap().len(), 3);
+    let global = &value["gates"][1];
+    assert_eq!(global["name"], "global-check");
+    assert_eq!(global["shell"], "bash");
+    assert_eq!(global["timeout"], 3);
+    assert_eq!(
+        global["source"],
+        f.home
+            .canonicalize()
+            .unwrap()
+            .join(".yoke/config.toml")
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(value["gates"][2]["expected_exit"], Value::Null);
+    assert!(value["snapshots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["stale"] == true));
+    assert!(!f.project.join("ran").exists());
+    assert!(!f.project.join("global-ran").exists());
+    assert!(!f.project.join("replaced").exists());
+}
+
+#[test]
 fn untrusted_and_observe_are_silent_then_enforce_uses_snapshot_and_redacted_log() {
     let f = Fixture::new();
     let deny =
@@ -721,6 +805,27 @@ fn lifecycle_logs_and_internal_gate_errors_deny_only_blocking_events() {
         f.store().decisions(&DecisionFilter::default()).unwrap()[0].outcome,
         "error"
     );
+    f.snapshot("mode='enforce'\n[[gate]]\nname='broken-check'\non='Stop'\nrun='yoke-nonexistent-gate-command'\nmessage='Run checks first.'");
+    for agent in ["claude", "codex"] {
+        let failed = f.hook(agent, "Stop", json!({"session_id":"life"}));
+        success(&failed);
+        let response: Value = serde_json::from_slice(&failed.stdout).unwrap();
+        assert_eq!(response["decision"], "block");
+        let reason = response["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("Run checks first.")
+                && reason.contains("yoke-nonexistent-gate-command")
+                && reason.contains("yoke gates --verbose"),
+            "{reason}"
+        );
+        let rows = f.store().decisions(&DecisionFilter::default()).unwrap();
+        assert_eq!(rows[0].gates[0]["exit_code"], 127);
+        assert!(rows[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("yoke gates --verbose"));
+    }
     f.snapshot("mode='enforce'\n[[gate]]\nname='advisory'\non='PostToolUse'\naction='deny'");
     let advisory = f.hook("claude", "PostToolUse", payload());
     success(&advisory);

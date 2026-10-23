@@ -293,6 +293,20 @@ fn run_gate(
         }))
     };
     if let Some(reason) = &mut reason {
+        if !output.timed_out && matches!(output.exit_code, Some(126 | 127)) {
+            // A friendly gate message must not hide a broken command or its shell error.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if gate.message.is_some() && !stderr.trim().is_empty() {
+                reason.push('\n');
+                reason.push_str(stderr.trim());
+            }
+            let hint = if output.exit_code == Some(127) {
+                "a command was not found; check the command and PATH"
+            } else {
+                "a command could not execute; check its permissions and interpreter"
+            };
+            reason.push_str(&format!("\nGate '{}' exited {}: usually {hint}. Inspect the trusted command with yoke gates --verbose; after editing policy, run yoke trust in your own terminal.", gate.name, output.exit_code.unwrap_or(-1)));
+        }
         let mut withheld: Vec<_> = inherited
             .iter()
             .filter_map(|(key, _)| {
@@ -306,15 +320,13 @@ fn run_gate(
             let count = withheld.len();
             withheld.truncate(12);
             let diagnostic = format!("\nWithheld environment names: {}{}; pass only required names with [gates].pass_env or this [[gate]].pass_env, then run yoke trust in your own terminal.", withheld.join(", "), if count > 12 { " (first 12)" } else { "" });
-            let mut start = reason
-                .len()
-                .saturating_sub(OUTPUT_CAP.saturating_sub(diagnostic.len()));
-            while !reason.is_char_boundary(start) {
-                start += 1;
-            }
-            reason.drain(..start);
             reason.push_str(&diagnostic);
         }
+        let mut start = reason.len().saturating_sub(OUTPUT_CAP);
+        while !reason.is_char_boundary(start) {
+            start += 1;
+        }
+        reason.drain(..start);
     }
     Ok(CheckResult {
         reason,
@@ -995,6 +1007,51 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn missing_or_unexecutable_gate_commands_explain_recovery_despite_custom_message() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("not-executable"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(
+            root.path().join("not-executable"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        for (run, code, hint) in [
+            ("yoke-nonexistent-gate-command", 127, "PATH"),
+            ("./not-executable", 126, "permissions"),
+        ] {
+            let cfg = Config::parse(&format!("[[gate]]\nname='checks'\non='stop'\nrun='{run}'\nmessage='Run the checks before stopping.'")).unwrap();
+            let out = evaluate_with_context(
+                &cfg,
+                EventKind::Stop,
+                &AgentEvent::default(),
+                &context(root.path()),
+            );
+            assert!(out.blocked());
+            assert_eq!(out.gates[0].exit_code, Some(code));
+            let reason = &out.reasons[0];
+            for expected in [
+                "Run the checks before stopping.",
+                run,
+                hint,
+                "yoke gates --verbose",
+                "yoke trust",
+            ] {
+                assert!(reason.contains(expected), "missing {expected}: {reason}");
+            }
+            assert!(reason.len() <= OUTPUT_CAP, "{}", reason.len());
+        }
+        let cfg = Config::parse("[[gate]]\nname='noisy'\non='stop'\nrun=\"i=0; while [ $i -lt 3000 ]; do printf 'éé' >&2; i=$((i+1)); done; exit 127\"\nmessage='Check failed.'").unwrap();
+        let out = evaluate_with_context(
+            &cfg,
+            EventKind::Stop,
+            &AgentEvent::default(),
+            &context(root.path()),
+        );
+        assert!(out.reasons[0].len() <= OUTPUT_CAP);
+        assert!(out.reasons[0].contains("yoke gates --verbose"));
     }
 
     #[test]

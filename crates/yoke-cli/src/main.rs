@@ -164,7 +164,14 @@ enum Cmd {
     /// Write a starter yoke.toml at the project root without replacing an existing file.
     Init,
     /// List effective, trusted gates in this project.
-    Gates,
+    Gates {
+        /// Include commands, matchers, environment allowances and execution defaults.
+        #[arg(long, conflicts_with = "json")]
+        verbose: bool,
+        /// Print complete gate settings, origins and snapshot freshness as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Read one agent hook JSON object from stdin. Allow/observe stays silent.
     RunHook {
         /// Hook event name, for example pre_tool_use or PreToolUse.
