@@ -92,6 +92,15 @@ There is no Jobs page; background jobs are listed only by `yoke jobs`, and the f
 5. Select `beta-cli` in the Project picker and apply.
    Expect the banner `Viewing project ... Back to launch project ... All projects` and two sessions' decisions.
 6. After step 2 (expected): `Denied` shows eight records, the two force pushes, the two hard resets, the two `state.db` commands and the two Stop blocks; `Rewritten` shows two records whose payload command ends in `--quiet`; the Mode column shows `enforce` for them and `observe` for older rows.
+7. \* Without expanding a denied record, read its command or path preview and reason.
+   Expect previews capped at 180 characters; expand the record for its full reason and payload.
+8. Type an unmatched tool name and apply.
+   Expect `No decisions match these filters` and `Clear filters`; verify that clearing keeps the selected project.
+9. Leave a changed filter unapplied and move focus away from it, then record another hook event from a separate terminal.
+   Expect the new activity notice and the unapplied value to remain.
+   Apply the filter or press `Refresh view` when ready.
+10. With filters applied, no expanded records and the page at the top, disconnect and reconnect the browser in developer tools while recording a hook event in the gap.
+    Expect the connection indicator to return to `Live` and the view to catch up without another hook event.
 
 ### 2. Projects
 

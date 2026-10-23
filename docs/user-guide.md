@@ -500,6 +500,12 @@ Ctrl-C stops the server.
 It covers Projects, Sessions, Plans, Decisions, Memory, Trust & config, Usage, Notifications and Workflow settings.
 Trusting a configuration stays a terminal operation.
 
+Decisions show a short command or file path and the recorded reason before you expand a row.
+Expand it for the full reason, gate results and redacted payload.
+New activity refreshes the view automatically; while you read an expanded record, scroll or leave filters unapplied, use **Refresh view** when ready.
+The console catches up after reconnecting, with the same protection for your reading and filters.
+An empty filtered result offers **Clear filters**, which keeps the selected project.
+
 On a remote server, reach the console through an SSH tunnel.
 Start it from the project in an interactive SSH session with `--no-open` and a fixed port:
 

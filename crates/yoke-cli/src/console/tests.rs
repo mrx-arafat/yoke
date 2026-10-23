@@ -173,6 +173,102 @@ fn oversight_fixture(temp: &std::path::Path) -> (Store, Console, String) {
 }
 
 #[test]
+fn decisions_show_safe_previews_and_reasons_before_expanding() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, c, _) = oversight_fixture(temp.path());
+    let mut row = store
+        .decisions(&yoke_core::store::DecisionFilter::default())
+        .unwrap()
+        .remove(0);
+    row.project = c.project.to_string_lossy().into_owned();
+    row.outcome = "deny".into();
+    row.reason = Some("Protected <branch> requires review".into());
+    for (agent, input, expected) in [
+        (
+            "claude",
+            serde_json::json!({"command": "echo '<img src=x onerror=alert(1)>' --token hunter2"}),
+            "echo &#39;&lt;img src=x onerror=alert(1)&gt;&#39; --token [REDACTED]",
+        ),
+        (
+            "codex",
+            serde_json::json!({"file_path": "src/<unsafe>.rs"}),
+            "src/&lt;unsafe&gt;.rs",
+        ),
+        (
+            "codex",
+            serde_json::json!({"command": "界".repeat(240)}),
+            &format!("{}…", "界".repeat(180)),
+        ),
+        (
+            "claude",
+            serde_json::json!({"command": "echo\n\t<unsafe>"}),
+            "echo  &lt;unsafe&gt;",
+        ),
+    ] {
+        row.agent = agent.into();
+        row.payload = serde_json::json!({"tool_input": input}).to_string();
+        store.record_decision(&row, 4096).unwrap();
+        let html = pages::decisions(&store, &c, &BTreeMap::new()).unwrap();
+        let summary = html
+            .split("<summary data-row>")
+            .nth(1)
+            .unwrap()
+            .split("</summary>")
+            .next()
+            .unwrap();
+        assert!(summary.contains(expected), "{summary}");
+        assert!(summary.contains("Protected &lt;branch&gt; requires review"));
+        assert!(!summary.contains("<img"));
+        assert!(!summary.contains("hunter2"));
+        assert!(!summary.contains(&"界".repeat(181)));
+    }
+    // Payloads are byte-capped at persistence and need not remain valid JSON.
+    row.payload = "{\"tool_input\":".into();
+    row.reason = None;
+    store.record_decision(&row, 4096).unwrap();
+    let html = pages::decisions(&store, &c, &BTreeMap::new()).unwrap();
+    assert!(html.contains("No reason was recorded."));
+    let first = html.split("<div class=\"record-detail\">").nth(1).unwrap();
+    assert!(first.starts_with("<p class=\"reason\">No reason was recorded.</p>"));
+    let first = html
+        .split("<summary data-row>")
+        .nth(1)
+        .unwrap()
+        .split("</summary>")
+        .next()
+        .unwrap();
+    assert!(!first.contains("decision-preview"));
+}
+
+#[test]
+fn decisions_empty_states_distinguish_filters_history_and_new_projects() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, mut c, beta) = oversight_fixture(temp.path());
+    let params = BTreeMap::from([
+        ("outcome".into(), "deny".into()),
+        ("project".into(), beta.clone()),
+    ]);
+    let html = pages::decisions(&store, &c, &params).unwrap();
+    assert!(html.contains("No decisions match these filters"));
+    assert!(html.contains(&format!(
+        "href=\"decisions?project={beta}\">Clear filters</a>"
+    )));
+    assert!(!html.contains("yoke install"));
+    let params = BTreeMap::from([("before".into(), "0".into())]);
+    let html = pages::decisions(&store, &c, &params).unwrap();
+    assert!(html.contains("No older decisions"));
+    assert!(html.contains("Latest decisions"));
+    c.project = temp.path().join("new-project");
+    let html = pages::decisions(&store, &c, &BTreeMap::new()).unwrap();
+    assert!(html.contains("No decisions here yet"));
+    assert!(html.contains("yoke install --dry-run"));
+    let params = BTreeMap::from([("session".into(), "missing-session".into())]);
+    assert!(pages::decisions(&store, &c, &params)
+        .unwrap()
+        .contains("No decisions match these filters"));
+}
+
+#[test]
 fn project_scoped_pages_never_show_another_projects_records() {
     let temp = tempfile::tempdir().unwrap();
     let (store, c, beta) = oversight_fixture(temp.path());
