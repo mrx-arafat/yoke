@@ -205,6 +205,7 @@ Recovering an interrupted `checking` plan preserves its frozen approval even if 
 `plan validate` uses the same reviewer selection as `plan check`.
 For `review`, provide a slug or `--session`.
 The required `--agent` identifies the building agent, allowing automatic selection of the other reviewer.
+An explicitly configured reviewer must also be the other agent. A plan with `review = false` does not select a reviewer.
 See [workflows](workflows.md) for the approval and evidence model.
 
 ## Memory and presets

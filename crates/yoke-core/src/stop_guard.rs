@@ -287,14 +287,35 @@ fn tick_in(
             )),
         });
     }
+    let failure: Option<(String, String, String)> = transaction.query_row(
+        "SELECT name,result,output_tail FROM check_runs WHERE plan_id=?1 AND blocking=1 AND result!='pass' ORDER BY id DESC LIMIT 1",
+        [expected.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?;
+    let diagnostic = match failure {
+        Some((name, result, output)) => format!(
+            "last blocking failure: {} ({}) {}",
+            serde_json::to_string(&crate::redact::redact_payload(&name, 128))?,
+            serde_json::to_string(&crate::redact::redact_payload(&result, 64))?,
+            serde_json::to_string(&crate::redact::redact_payload(&output, 256))?,
+        ),
+        None => "no failed blocking check results recorded".into(),
+    };
+    let reason = crate::redact::redact_payload(&format!(
+        "plan '{}' {} stalled after {max_blocks} stops without progress while {}; {diagnostic}; inspect `yoke plan status {}` for check output and transitions; a human can run `yoke plan resume {}` after fixing the cause; wait for any live check to exit before resuming",
+        expected.slug, if enforce { "is" } else { "would become" }, expected.state, expected.slug, expected.slug,
+    ), 4096);
     if enforce {
         let changed = transaction.execute("UPDATE plans SET state='stalled',revision=revision+1,updated_at=?1 WHERE id=?2 AND revision=?3", params![now, expected.id, expected.revision])?;
         ensure!(changed == 1, "plan changed before stalling");
-        transaction.execute("INSERT INTO transitions(plan_id,ts,from_state,to_state,actor,note) VALUES (?1,?2,?3,'stalled','yoke',?4)", params![expected.id, now, expected.state, "stop limit reached without progress"])?;
-        let detail = serde_json::json!({"plan": expected.slug, "from": expected.state, "to": "stalled", "actor": "yoke", "note": "stop limit reached without progress"}).to_string();
+        transaction.execute("INSERT INTO transitions(plan_id,ts,from_state,to_state,actor,note) VALUES (?1,?2,?3,'stalled','yoke',?4)", params![expected.id, now, expected.state, reason])?;
+        let detail = serde_json::json!({"plan": expected.slug, "from": expected.state, "to": "stalled", "actor": "yoke", "note": reason}).to_string();
         transaction.execute("INSERT INTO facts(ts,session_id,project,kind,detail) VALUES (?1,?2,?3,'plan_transition',?4)", params![now, session, project, crate::redact::redact_payload(&detail, 4096)])?;
     }
-    Ok(StopDecision { block: false, stalled: enforce, reason: Some(format!("plan '{}' {} stalled after {max_blocks} stops without progress; a human can run `yoke plan resume {}`", expected.slug, if enforce { "is" } else { "would become" }, expected.slug)) })
+    Ok(StopDecision {
+        block: false,
+        stalled: enforce,
+        reason: Some(reason),
+    })
 }
 
 /// Atomically persist the final Stop decision, hook facts, and guard progress.
@@ -635,6 +656,52 @@ mod tests {
             "{reason}"
         );
         assert!(!reason.contains("yoke plan check"), "{reason}");
+    }
+
+    #[test]
+    fn stall_records_the_failed_check_and_human_recovery_steps() {
+        for failure in [
+            None,
+            Some((
+                "review",
+                "fail",
+                "reviewer timed out\npassword=fixture-secret",
+            )),
+        ] {
+            let (_dir, store) = fixture();
+            if let Some((name, result, output)) = failure {
+                store.connection().execute(
+                    "INSERT INTO check_runs(plan_id,ts,name,command,output_tail,fingerprint,blocking,ms,result) VALUES(1,10,?1,'review',?2,'a',1,1,?3)",
+                    params![name, output, result],
+                ).unwrap();
+            }
+            assert!(stop(&store, "a", true).unwrap().block);
+            assert!(stop(&store, "a", true).unwrap().block);
+            let decision = stop(&store, "a", true).unwrap();
+            assert!(decision.stalled && !decision.block);
+            let reason = decision.reason.unwrap();
+            assert!(reason.contains("yoke plan status demo"), "{reason}");
+            assert!(reason.contains("yoke plan resume demo"), "{reason}");
+            if failure.is_some() {
+                assert!(reason.contains("reviewer timed out"), "{reason}");
+                assert!(!reason.contains("fixture-secret"), "{reason}");
+                assert!(!reason.contains('\n'), "{reason}");
+            } else {
+                assert!(
+                    reason.contains("no failed blocking check results"),
+                    "{reason}"
+                );
+            }
+            let note: String = store
+                .connection()
+                .query_row(
+                    "SELECT note FROM transitions WHERE to_state='stalled'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(note, reason);
+        }
     }
 
     #[test]

@@ -39,7 +39,7 @@ yoke gates
 | `memory.digest` | boolean | `false` | Enable optional agent-generated session digests |
 | `memory.digest_agent` | string | `"claude"` | Digest CLI: `claude` or `codex` |
 | `memory.inject_tokens` | integer (tokens) | `1500` | Memory injection budget, estimated at 4 characters per token; inspect the selection with `yoke recall --explain` |
-| `review.reviewer` | string | `"auto"` | Reviewer: `auto`, `claude`, or `codex`; auto selects the other agent |
+| `review.reviewer` | string | `"auto"` | Reviewer: `auto`, `claude`, or `codex`; review requires a different agent from the builder |
 | `review.models.claude`, `review.models.codex` | string | Unset | Model Yoke passes to that reviewer CLI (`claude --model`, `codex exec --model`); unset uses the CLI's default |
 | `memory.digest_models.claude`, `memory.digest_models.codex` | string | Unset | Model Yoke passes to the digest CLI; unset uses the CLI's default |
 

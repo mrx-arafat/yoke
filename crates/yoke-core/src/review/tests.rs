@@ -325,6 +325,18 @@ fn reviewer_selection_and_commands_keep_the_public_readonly_contract() {
     assert_eq!(Reviewer::select("auto", "codex").unwrap(), Reviewer::Claude);
     assert!(Reviewer::select("auto", "unknown").is_err());
     assert!(Reviewer::select("unknown", "claude").is_err());
+    for agent in ["claude", "codex"] {
+        let error = Reviewer::select(agent, agent).unwrap_err();
+        assert!(error.to_string().contains("independent"), "{error:#}");
+    }
+    assert_eq!(
+        Reviewer::select("claude", "codex").unwrap(),
+        Reviewer::Claude
+    );
+    assert_eq!(
+        Reviewer::select("codex", "claude").unwrap(),
+        Reviewer::Codex
+    );
     for reviewer in [Reviewer::Claude, Reviewer::Codex] {
         let args = |model| {
             command_at(reviewer, model, Path::new("/reviewer-fixture"))

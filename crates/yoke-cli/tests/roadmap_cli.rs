@@ -1224,6 +1224,146 @@ fn review_command_sends_work_committed_since_plan_start_to_the_reviewer() {
 }
 
 #[test]
+fn plan_check_rejects_self_review_but_checks_without_review_still_run() {
+    use yoke_core::{plan, store::Store};
+    let (_temp, home, project, path) = plan_with_work_committed_after_start();
+    let checked = run_with_path(
+        &home,
+        &project,
+        &["plan", "check", "fixture", "--agent", "codex"],
+        b"",
+        Some(&path),
+    );
+    assert!(!checked.status.success());
+    assert!(String::from_utf8_lossy(&checked.stderr).contains("independent"));
+    assert!(!home.join("review-input").exists());
+    let store = Store::open(home.join(".yoke/state.db")).unwrap();
+    assert_eq!(
+        plan::get(&store, &project, "fixture").unwrap().state,
+        "building"
+    );
+    let row = plan::get(&store, &project, "fixture").unwrap();
+    let content = fs::read_to_string(&row.file)
+        .unwrap()
+        .replace("review=true", "review=false");
+    fs::write(&row.file, content).unwrap();
+    plan::approve(
+        &store,
+        &plan::prepare_approval(&store, &project, "fixture").unwrap(),
+    )
+    .unwrap();
+    plan::start(&store, &project, "fixture", "review-seam").unwrap();
+    let checked = run_with_path(
+        &home,
+        &project,
+        &["plan", "check", "fixture", "--agent", "codex"],
+        b"",
+        Some(&path),
+    );
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert_eq!(
+        plan::get(&store, &project, "fixture").unwrap().state,
+        "done"
+    );
+    assert!(!home.join("review-input").exists());
+}
+
+#[test]
+fn plan_check_persists_unavailable_and_malformed_reviewer_failures() {
+    use yoke_core::{plan, store::Store};
+    for available in [false, true] {
+        let (_temp, home, project, path) = plan_with_work_committed_after_start();
+        let reviewer = home.parent().unwrap().join("bin/codex");
+        if available {
+            fs::write(
+                &reviewer,
+                "#!/bin/sh\n/bin/cat >/dev/null\nprintf garbage\n",
+            )
+            .unwrap();
+        } else {
+            fs::remove_file(&reviewer).unwrap();
+        }
+        let checked = run_with_path(
+            &home,
+            &project,
+            &["plan", "check", "fixture", "--agent", "claude"],
+            b"",
+            Some(&path),
+        );
+        assert!(!checked.status.success());
+        let store = Store::open(home.join(".yoke/state.db")).unwrap();
+        let detail = plan::detail(&store, &project, "fixture").unwrap();
+        assert_eq!(detail.plan.state, "building");
+        let review = detail
+            .checks
+            .iter()
+            .find(|run| run.name == "review")
+            .unwrap();
+        assert!(review.blocking && review.result != "pass");
+        assert!(
+            review
+                .output_tail
+                .contains(if available { "malformed" } else { "executable" }),
+            "{}",
+            review.output_tail
+        );
+    }
+}
+
+#[test]
+fn concurrent_plan_checks_execute_the_approved_command_once() {
+    use std::time::{Duration, Instant};
+    use yoke_core::{plan, store::Store};
+    let (_temp, home, project, path) = plan_with_work_committed_after_start();
+    let store = Store::open(home.join(".yoke/state.db")).unwrap();
+    let row = plan::get(&store, &project, "fixture").unwrap();
+    fs::write(&row.file, "+++\ntitle='Fixture'\nreview=true\n[[check]]\nname='proof'\nrun='printf run >> \"$HOME/check-runs\"; touch \"$HOME/check-started\"; until [ -e \"$HOME/check-release\" ]; do sleep 0.01; done'\ntimeout=10\n+++\nGoal.\n").unwrap();
+    plan::approve(
+        &store,
+        &plan::prepare_approval(&store, &project, "fixture").unwrap(),
+    )
+    .unwrap();
+    plan::start(&store, &project, "fixture", "review-seam").unwrap();
+    let first = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), &home)
+        .args(["plan", "check", "fixture", "--agent", "claude"])
+        .env("PATH", &path)
+        .current_dir(&project)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !home.join("check-started").exists() {
+        assert!(Instant::now() < deadline, "first check never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let second = run_with_path(
+        &home,
+        &project,
+        &["plan", "check", "fixture", "--agent", "claude"],
+        b"",
+        Some(&path),
+    );
+    fs::write(home.join("check-release"), "").unwrap();
+    let first = first.wait_with_output().unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(!second.status.success());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("checking"));
+    assert_eq!(fs::read_to_string(home.join("check-runs")).unwrap(), "run");
+    let detail = plan::detail(&store, &project, "fixture").unwrap();
+    assert_eq!(detail.plan.state, "done");
+    assert_eq!(detail.checks.len(), 2);
+}
+
+#[test]
 fn digest_with_more_than_one_batch_queues_a_follow_up_until_drained() {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};

@@ -106,6 +106,8 @@ Changing the approved contract requires fresh human approval.
 
 Set `review = true` to require independent review.
 With `review.reviewer = "auto"`, Yoke selects the agent other than the building agent named by `--agent`.
+An explicit reviewer must also differ from the building agent; selecting the same agent is refused by `plan validate`, required review in `plan check`, and `review`.
+Plans with `review = false` run their checks without selecting a reviewer.
 The reviewer CLI must be installed and authenticated.
 An optional `[review.models]` table chooses the model Yoke passes to each reviewer CLI; without it the CLI uses its default model, and `plan check`, `review` and `plan validate` all follow the same setting.
 Review evidence records the reviewer agent and the requested model; the model that actually ran stays unknown because the reviewer's text output does not report it.
@@ -146,6 +148,8 @@ Reassignment keeps the approved checks and review base, records the move as a tr
 A session owns at most one unfinished plan, even across projects, because the Stop guard and plan context are per session.
 `yoke plan start` or `yoke plan reassign` aimed at a session that still owns an unfinished plan is refused, and the refusal names that plan, its state, and its project so the human can finish, cancel, or reassign it from that project first.
 The stop guard limits repeated blocking through `stop.max_blocks`; inspect plan state rather than repeatedly retrying a blocked stop.
+When that limit is reached, the stall message and stored transition include the previous state, the last blocking failure with a bounded, redacted output excerpt, and commands to inspect and resume the plan.
+Wait for any live check process to exit before resuming a stalled plan.
 A done plan stays bound to its session and is accepted at Stop while the working tree matches the tree its checks passed on.
 Committing exactly the bytes the checks passed on keeps a done plan done; a plan completed before Yoke recorded that content anchor still reopens after any new commit.
 After any later change, the next Stop in enforce mode reopens the plan as `building` with an audited transition and blocks until `yoke plan check` passes again; observe mode only records the would-be denial.

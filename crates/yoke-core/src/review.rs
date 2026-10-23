@@ -24,6 +24,10 @@ pub enum Reviewer {
 impl Reviewer {
     /// Select an explicit reviewer or the other supported building agent.
     pub fn select(configured: &str, building_agent: &str) -> Result<Self> {
+        ensure!(
+            configured != building_agent || !matches!(configured, "claude" | "codex"),
+            "independent review requires the other agent; reviewer {configured} is the building agent; set review.reviewer to auto or the other agent"
+        );
         match (configured, building_agent) {
             ("claude", _) | ("auto", "codex") => Ok(Self::Claude),
             ("codex", _) | ("auto", "claude") => Ok(Self::Codex),

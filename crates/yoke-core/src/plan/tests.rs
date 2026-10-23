@@ -347,6 +347,28 @@ fn mid_run_edits_and_missing_review_never_mark_done() {
         detail.checks.last().unwrap().command,
         "independent review by codex (requested model: o3; reported model: unknown)"
     );
+    let mut hanging = Command::new("/bin/sh");
+    hanging.args(["-c", "cat >/dev/null; sleep 30"]);
+    let timed_out = crate::review::run_with_command(
+        &f.root,
+        &mut hanging,
+        std::time::Duration::from_millis(100),
+        None,
+    )
+    .unwrap();
+    assert!(!timed_out.passed);
+    assert!(
+        !record_review_with_fingerprint(&f.store, &f.root, "example", &timed_out, &before).unwrap()
+    );
+    let timed_out = super::detail(&f.store, &f.root, "example").unwrap();
+    assert_eq!(timed_out.plan.state, "building");
+    assert_eq!(timed_out.checks.last().unwrap().result, "fail");
+    assert!(timed_out
+        .checks
+        .last()
+        .unwrap()
+        .output_tail
+        .contains("timed out"));
     let passing = crate::review::ReviewReport {
         passed: true,
         error: None,
@@ -422,6 +444,44 @@ fn fingerprint_covers_head_binary_diff_and_untracked_but_not_ignored_files() {
     let before_link = fingerprint(&f.root).unwrap();
     std::os::unix::fs::symlink("tracked.txt", f.root.join("link")).unwrap();
     assert_ne!(fingerprint(&f.root).unwrap(), before_link);
+}
+
+#[test]
+fn staged_deletion_cannot_hide_a_recreated_ignored_file_during_checks() {
+    let f = Fixture::new();
+    f.building("title='Example'\n[[check]]\nname='mutation'\nrun='printf changed > tracked.txt'");
+    fs::write(f.root.join(".gitignore"), "output/\ntracked.txt\n").unwrap();
+    git(&f.root, &["rm", "--cached", "tracked.txt"]);
+    let present = fingerprint(&f.root).unwrap();
+    fs::remove_file(f.root.join("tracked.txt")).unwrap();
+    assert_ne!(present, fingerprint(&f.root).unwrap());
+    fs::write(f.root.join("tracked.txt"), "original\n").unwrap();
+    assert_eq!(present, fingerprint(&f.root).unwrap());
+    let base = get(&f.store, &f.root, "example").unwrap().base_ref.unwrap();
+    let content_before = content_fingerprint(&f.root, &base).unwrap();
+    let summary = check(&f.store, &f.root, "example", None).unwrap();
+    assert!(!summary.passed, "a staged deletion hid a working-tree edit");
+    assert_ne!(summary.fingerprint_before, summary.fingerprint_after);
+    assert_eq!(summary.plan.state, "building");
+    assert_eq!(summary.checks.last().unwrap().name, "evidence");
+    assert_ne!(content_before, content_fingerprint(&f.root, &base).unwrap());
+}
+
+#[test]
+fn amending_head_during_checks_invalidates_unchanged_file_content() {
+    let f = Fixture::new();
+    let plan = f.building("title='Example'\n[[check]]\nname='amend'\nrun='git -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgSign=false -c core.hooksPath=/dev/null commit --amend -qm amended-during-check'");
+    let before = content_fingerprint(&f.root, plan.base_ref.as_deref().unwrap()).unwrap();
+    let summary = check(&f.store, &f.root, "example", None).unwrap();
+    assert_eq!(summary.checks[0].result, "pass");
+    assert_eq!(
+        before,
+        content_fingerprint(&f.root, plan.base_ref.as_deref().unwrap()).unwrap()
+    );
+    assert!(!summary.passed);
+    assert_ne!(summary.fingerprint_before, summary.fingerprint_after);
+    assert_eq!(summary.plan.state, "building");
+    assert_eq!(summary.checks.last().unwrap().name, "evidence");
 }
 
 #[test]

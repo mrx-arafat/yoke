@@ -538,12 +538,22 @@ pub fn run(command: PlanCommand) -> Result<()> {
             }
         }
         PlanCommand::Check { slug, agent, json } => {
-            let reviewer = review::Reviewer::select(
-                &loaded.config.review.reviewer,
-                yoke_core::event::Agent::from(agent).as_str(),
-            )?;
-            let model = loaded.config.review.models.get(reviewer.as_str());
-            let summary = plan::check(&store, project, &slug, Some((reviewer, model)))?;
+            let record = plan::get(&store, project, &slug)?;
+            let header = record
+                .approved_header
+                .as_deref()
+                .unwrap_or_default()
+                .parse::<toml_edit::DocumentMut>()?;
+            let reviewer = if header.get("review").and_then(|item| item.as_bool()) == Some(true) {
+                let reviewer = review::Reviewer::select(
+                    &loaded.config.review.reviewer,
+                    yoke_core::event::Agent::from(agent).as_str(),
+                )?;
+                Some((reviewer, loaded.config.review.models.get(reviewer.as_str())))
+            } else {
+                None
+            };
+            let summary = plan::check(&store, project, &slug, reviewer)?;
             if json {
                 println!("{}", serde_json::to_string(&summary)?);
             } else {

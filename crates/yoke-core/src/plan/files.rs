@@ -417,7 +417,17 @@ fn hash_changes(hash: &mut Sha256, root: &Path, base: &str) -> Result<()> {
         ensure!(relative(&path), "invalid path returned by git");
         field(hash, &raw_path);
         match tracked {
-            Some((mode, _, status)) if mode == "000000" && status != "U" => field(hash, b"deleted"),
+            Some((mode, _, status)) if mode == "000000" && status != "U" => {
+                let full = root.join(&path);
+                // A staged deletion can still exist on disk, even as an ignored file.
+                match fs::symlink_metadata(&full) {
+                    Ok(metadata) => hash_listed_entry(hash, &full, &metadata)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        field(hash, b"deleted");
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
             Some((mode, id, _)) if mode == "160000" && id.bytes().any(|byte| byte != b'0') => {
                 field(hash, b"160000");
                 field(hash, id.as_bytes());

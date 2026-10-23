@@ -775,6 +775,58 @@ fn observe_day() {
 const ENFORCE: &str = "mode='enforce'\n[stop]\nmax_blocks=2\n[memory]\ndigest=true\ndigest_agent='codex'\n[[gate]]\nname='no-force-push'\non='pre_tool_use'\nmatch_tool='Bash'\nmatch_contains='push --force'\naction='deny'\nmessage='Force push is blocked by Yoke.'\n[[gate]]\nname='quiet-tests'\non='pre_tool_use'\nmatch_tool='Bash'\nmatch_contains='cargo test'\naction='rewrite'\nrewrite_pattern='^cargo test$'\nrewrite_to='cargo test --quiet'\n[[gate]]\nname='readme-present'\non='stop'\nrun='test -f README.md'\nmessage='README.md is missing'\n";
 
 #[test]
+fn plan_check_faults_are_bounded_and_still_reach_the_stop_cap() {
+    let mut trial = Trial::new("plan-check-faults", true);
+    trial.trust(
+        &trial.project.clone(),
+        "mode='enforce'\n[stop]\nmax_blocks=2\n",
+    );
+    let mut session = trial.session("claude", "check-faults", &trial.project);
+    trial.start(&session, "startup");
+    trial.approved_plan("check-faults");
+    let row = plan::get(&trial.store, &trial.project, "check-faults").unwrap();
+    fs::write(&row.file, "+++\ntitle='Fault injection'\n[[check]]\nname='noisy'\nrun='yes noise | head -c 1048576'\n[[check]]\nname='hung'\nrun='sleep 30'\ntimeout=1\n[[check]]\nname='dirty'\nrun='printf changed >> README.md'\n+++\nGoal: failed checks cannot complete the plan.\n").unwrap();
+    plan::approve(
+        &trial.store,
+        &plan::prepare_approval(&trial.store, &trial.project, "check-faults").unwrap(),
+    )
+    .unwrap();
+    trial.plan_start(&mut session, "check-faults");
+    let checked = trial.cli(
+        &[
+            "plan",
+            "check",
+            "check-faults",
+            "--agent",
+            "claude",
+            "--json",
+        ],
+        &[],
+    );
+    assert!(!checked.status.success());
+    let detail = plan::detail(&trial.store, &trial.project, "check-faults").unwrap();
+    assert_eq!(detail.plan.state, "building");
+    let runs = &detail.checks;
+    assert_eq!(runs[0].result, "pass");
+    assert!(runs[0].output_tail.len() <= 4096);
+    assert!(runs[0].output_tail.contains("noise"));
+    assert_eq!(runs[1].result, "timeout");
+    assert!(runs[1].ms < 15_000);
+    assert_eq!(runs[2].result, "pass");
+    assert_eq!(runs[3].name, "evidence");
+    assert!(runs[3].output_tail.contains("working tree changed"));
+    trial.stop(&mut session, Expect(Some("deny"), Out::Block));
+    trial.stop(&mut session, Expect(Some("deny"), Out::Block));
+    trial.stop(&mut session, ALLOW);
+    trial.plan_state("check-faults", "stalled");
+    assert!(
+        trial.mismatches.is_empty(),
+        "{}",
+        trial.mismatches.join("\n")
+    );
+}
+
+#[test]
 #[ignore = "synthetic soak trial; run explicitly with --ignored"]
 fn enforce_week() {
     let mut trial = Trial::new("enforce-week", true);
