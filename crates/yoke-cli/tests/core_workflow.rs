@@ -137,7 +137,8 @@ fn file_modes_are_enforced() -> bool {
 fn success(output: &Output) {
     assert!(
         output.status.success(),
-        "{}",
+        "status: {:?}; stderr: {}",
+        output.status,
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -321,11 +322,100 @@ fn malformed_payload_and_store_failure_follow_mode_and_fallback_rules() {
 }
 
 #[test]
+fn a_linked_state_directory_cannot_redirect_hook_writes() {
+    let f = Fixture::new();
+    f.snapshot("mode='enforce'");
+    let state = f.home.join(".yoke");
+    let outside = f.home.join("outside");
+    fs::rename(&state, &outside).unwrap();
+    std::os::unix::fs::symlink(&outside, &state).unwrap();
+    let contents = || {
+        let mut files: Vec<_> = fs::read_dir(&outside)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files
+    };
+    let before = contents();
+    let output = f.hook("claude", "PreToolUse", payload());
+    success(&output);
+    let wire: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(wire["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(contents(), before);
+}
+
+#[test]
+fn unsafe_bypass_files_cannot_skip_or_hang_an_enforcing_hook() {
+    use std::os::unix::fs::symlink;
+    use std::time::{Duration, Instant};
+    for name in ["off-token", "paused-until"] {
+        let f = Fixture::new();
+        f.snapshot("mode='enforce'\n[[gate]]\nname='deny'\non='PreToolUse'\naction='deny'\nmatch_tool='Bash'");
+        let path = f.home.join(".yoke").join(name);
+        let target = f.home.join("control");
+        let token = "ab".repeat(32);
+        fs::write(
+            &target,
+            if name == "off-token" {
+                &token
+            } else {
+                "99999999999"
+            },
+        )
+        .unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&target, &path).unwrap();
+        for fifo in [false, true] {
+            if fifo {
+                fs::remove_file(&path).unwrap();
+                let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+                // SAFETY: path is a live, NUL-terminated path.
+                assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            }
+            let mut command = f.command(&["run-hook", "--agent", "claude", "PreToolUse"]);
+            command.env("YOKE_OFF", &token);
+            let mut child = command.spawn().unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload().to_string().as_bytes())
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let finished = child.try_wait().unwrap().is_some();
+            if !finished {
+                child.kill().unwrap();
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(finished, "hook blocked reading {name}");
+            success(&output);
+            let wire: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                wire["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{name}, fifo={fifo}"
+            );
+        }
+    }
+}
+
+#[test]
 fn off_needs_the_install_token_or_a_pause_and_agents_cannot_trust_or_reinstall() {
     let f = Fixture::new();
     f.snapshot("mode='enforce'\n[[gate]]\nname='review'\non='PreToolUse'\naction='deny'\nmatch_tool='Bash'\nmessage='review required'");
     let token = "ab".repeat(32);
     fs::write(f.home.join(".yoke/off-token"), format!("{token}\n")).unwrap();
+    fs::set_permissions(
+        f.home.join(".yoke/off-token"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
     let denies = |output: &Output| {
         success(output);
         serde_json::from_slice::<Value>(&output.stdout)
@@ -378,6 +468,7 @@ fn off_needs_the_install_token_or_a_pause_and_agents_cannot_trust_or_reinstall()
     // A pause skips every hook until it ends.
     let pause = f.home.join(".yoke/paused-until");
     fs::write(&pause, "99999999999\n").unwrap();
+    fs::set_permissions(&pause, fs::Permissions::from_mode(0o600)).unwrap();
     assert!(hook_with(None).stdout.is_empty());
     fs::write(&pause, "1\n").unwrap();
     assert!(denies(&hook_with(None)));

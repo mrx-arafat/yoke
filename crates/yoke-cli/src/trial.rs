@@ -1,10 +1,11 @@
 //! `yoke trial report`: release-trial evidence read from local state without writing it.
 
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use clap::Subcommand;
 use yoke_core::store::Store;
 use yoke_core::trial::{self, TrialQuery, TrialReport};
@@ -89,15 +90,22 @@ pub fn run(command: TrialCommand) -> Result<()> {
 }
 
 fn read_tail(path: &Path) -> Result<Option<String>> {
-    let mut file = match File::open(path) {
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("read error.log"),
     };
-    let start = file.metadata()?.len().saturating_sub(ERROR_LOG_TAIL);
+    let metadata = file.metadata()?;
+    ensure!(metadata.is_file(), "error.log must be a regular file");
+    let size = metadata.len();
+    let start = size.saturating_sub(ERROR_LOG_TAIL);
     file.seek(SeekFrom::Start(start))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    file.take(size - start).read_to_end(&mut bytes)?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     // A tail that starts mid-line drops the partial first line.
     Ok(Some(match (start > 0, text.split_once('\n')) {
@@ -212,4 +220,34 @@ fn render(report: &TrialReport, since: Option<&str>, until: Option<&str>) {
         ));
     }
     println!("help: {}", quote(&help));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn error_log_tail_refuses_links_and_non_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("outside");
+        let log = dir.path().join("error.log");
+        std::fs::write(&target, "private text").unwrap();
+        symlink(&target, &log).unwrap();
+        assert!(read_tail(&log).is_err());
+        assert!(read_tail(dir.path()).is_err());
+        std::fs::remove_file(&log).unwrap();
+        let fifo = std::ffi::CString::new(log.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: fifo is a live, NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        // Keep the old read-open from blocking; seek on the pipe still fails.
+        use std::os::unix::fs::OpenOptionsExt;
+        let _writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&log)
+            .unwrap();
+        assert!(read_tail(&log).is_err());
+    }
 }

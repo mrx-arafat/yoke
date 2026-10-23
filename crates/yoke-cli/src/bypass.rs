@@ -13,7 +13,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -51,18 +51,34 @@ fn now() -> i64 {
 
 /// The stored token, if a well-formed one exists. Never creates it.
 fn read_token(home: &Path) -> Option<String> {
-    let mut text = String::new();
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(token_path(home))
-        .ok()?
-        .take(256)
-        .read_to_string(&mut text)
-        .ok()?;
+    let text = read_control(&token_path(home), 256)?;
     let token = text.trim();
     (token.len() >= 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| token.to_owned())
+}
+
+/// Bypass controls are owner-only regular files. Invalid controls never disable enforcement.
+fn read_control(path: &Path, cap: u64) -> Option<String> {
+    if !fs::symlink_metadata(path.parent()?).ok()?.is_dir() {
+        return None;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    // SAFETY: geteuid has no preconditions.
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+        || metadata.len() > cap
+    {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(cap + 1).read_to_string(&mut text).ok()?;
+    (text.len() as u64 <= cap).then_some(text)
 }
 
 fn random_token() -> Result<String> {
@@ -74,10 +90,7 @@ fn random_token() -> Result<String> {
 }
 
 fn private_directory(home: &Path) -> Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(home.join(".yoke"))
+    yoke_core::private::create_dir_all(&home.join(".yoke"))
         .context("create the Yoke state directory")
 }
 
@@ -112,11 +125,7 @@ fn ensure_token(home: &Path) -> Result<String> {
 }
 
 fn pause_until(home: &Path) -> Option<i64> {
-    fs::read_to_string(pause_path(home))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    read_control(&pause_path(home), 32)?.trim().parse().ok()
 }
 
 fn write_pause(home: &Path, until: i64) -> Result<()> {
@@ -449,6 +458,49 @@ pub fn pause(duration: Option<String>, clear: bool) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn bypass_controls_reject_links_public_files_and_oversized_content() {
+        use std::os::unix::fs::symlink;
+        for is_token in [true, false] {
+            let home = tempfile::tempdir().unwrap();
+            let token = if is_token {
+                ensure_token(home.path()).unwrap()
+            } else {
+                write_pause(home.path(), 2_000).unwrap();
+                "not-a-token".into()
+            };
+            let path = if is_token {
+                token_path(home.path())
+            } else {
+                pause_path(home.path())
+            };
+            assert!(check(home.path(), Some(&token), 1_000).skip.is_some());
+            let state = home.path().join(".yoke");
+            let saved = home.path().join("saved-state");
+            fs::rename(&state, &saved).unwrap();
+            symlink(&saved, &state).unwrap();
+            assert_eq!(check(home.path(), Some(&token), 1_000).skip, None);
+            fs::remove_file(&state).unwrap();
+            fs::rename(&saved, &state).unwrap();
+            let target = path.with_extension("saved");
+            fs::rename(&path, &target).unwrap();
+            symlink(&target, &path).unwrap();
+            assert_eq!(check(home.path(), Some(&token), 1_000).skip, None);
+            fs::remove_file(&path).unwrap();
+            fs::rename(&target, &path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(check(home.path(), Some(&token), 1_000).skip, None);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let value = if is_token {
+                "a".repeat(256)
+            } else {
+                "2000".into()
+            };
+            fs::write(&path, format!("{value}{}", " ".repeat(1024))).unwrap();
+            assert_eq!(check(home.path(), Some(&value), 1_000).skip, None);
+        }
+    }
 
     #[test]
     fn yoke_off_skips_only_with_the_install_token_and_every_refusal_is_reported() {

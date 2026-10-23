@@ -56,11 +56,21 @@ impl std::error::Error for MissingSidecars {}
 
 fn check_sidecars(path: &Path) -> Result<()> {
     use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
     let mut header = [0u8; 20];
-    // A file too short for a header, or unreadable, is not a WAL database; SQLite reports it.
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return Ok(());
+    // A file too short for a header is not a WAL database; SQLite reports it.
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("read state database header"),
     };
+    if !file.metadata()?.is_file() {
+        bail!("state database must be a regular file");
+    }
     // Byte 19 is the read format version: 2 means WAL.
     if file.read_exact(&mut header).is_err() || header[19] != 2 {
         return Ok(());
@@ -151,8 +161,7 @@ impl Store {
 
     /// Open existing state without creating files, running migrations, or writing pragmas.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
-        let path = std::fs::canonicalize(path)?;
-        ensure_regular_file(&path)?;
+        let path = database_path(path.as_ref())?;
         check_sidecars(&path)?;
         let encoded = path
             .as_os_str()
@@ -170,7 +179,9 @@ impl Store {
         // Missing sidecars fail rather than returning an immutable snapshot that ignores live WAL.
         let connection = Connection::open_with_flags(
             format!("file:{encoded}?mode=ro&readonly_shm=1"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         connection.busy_timeout(Duration::from_millis(5))?;
         let version: usize =
@@ -187,13 +198,20 @@ impl Store {
     /// Open an existing parent directory's database and apply numbered migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        if path != Path::new(":memory:") {
-            ensure_regular_file(path).context("open state database")?;
-            if !path.as_os_str().is_empty() {
-                crate::private::prepare_database(path);
-            }
+        let resolved = if path != Path::new(":memory:") && !path.as_os_str().is_empty() {
+            Some(database_path(path).context("open state database")?)
+        } else {
+            None
+        };
+        let path = resolved.as_deref().unwrap_or(path);
+        if resolved.is_some() {
+            crate::private::prepare_database(path);
         }
-        let mut connection = Connection::open(path).context("open state database")?;
+        let mut connection = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .context("open state database")?;
         connection.busy_timeout(Duration::from_secs(2))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         // The sidecars persist (below), so without a size limit the last connection to close
@@ -533,15 +551,44 @@ impl Store {
     }
 }
 
-/// A pipe, device or directory where the database should be would make a hook wait on it, or
-/// fail with an error that names nothing. A missing file is fine: opening creates it.
+/// Resolve parent aliases (including macOS /var) without resolving the database itself.
+/// Validate sidecars before SQLite or permission tightening can touch them.
+fn database_path(path: &Path) -> Result<std::path::PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .context("state database has no file name")?;
+    if parent
+        .file_name()
+        .is_some_and(|name| name == crate::private::STATE_DIR)
+        && !std::fs::symlink_metadata(parent)?.is_dir()
+    {
+        bail!("Yoke state directory must not be a symbolic link");
+    }
+    let path = parent.canonicalize()?.join(name);
+    ensure_regular_file(&path)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        ensure_regular_file(Path::new(&sidecar))?;
+    }
+    Ok(path)
+}
+
+/// A link, pipe, device or directory must never stand in for state. A missing file is fine:
+/// writable opens create it, while read-only opens still let SQLite report it as absent.
 fn ensure_regular_file(path: &Path) -> Result<()> {
-    match std::fs::metadata(path) {
+    match std::fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.is_file() => bail!(
             "{} is not a regular file; move it aside in your own terminal so that Yoke can create its state database",
             path.display()
         ),
-        _ => Ok(()),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
     }
 }
 
