@@ -102,12 +102,7 @@ pub fn tick(store: &Store, home: &Path, now: i64, retention_days: u32) -> Result
 
 /// `error.log` for the worker's stderr; a new file is private, because it can quote payloads.
 fn open_error_log(home: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(home.join(".yoke/error.log"))
+    yoke_core::private::open_append(&home.join(".yoke/error.log"))
 }
 
 pub(crate) fn spawn_worker(home: &Path) -> Result<()> {
@@ -298,6 +293,18 @@ mod tests {
         let log = open_error_log(home.path()).unwrap();
 
         assert_eq!(log.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        drop(log);
+        let path = home.path().join(".yoke/error.log");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let log = open_error_log(home.path()).unwrap();
+        assert_eq!(log.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        drop(log);
+        std::fs::remove_file(&path).unwrap();
+        let target = home.path().join("outside");
+        std::fs::write(&target, "unchanged").unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(open_error_log(home.path()).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
     }
 
     #[test]

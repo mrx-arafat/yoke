@@ -1,6 +1,70 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn bundled_sqlite_includes_the_fts5_memory_safety_fixes() {
+    // SQLite's CVE table lists 3.53.2 as the fix for CVE-2026-11822 / CVE-2026-11824.
+    // Check the linked engine too: a clean RustSec audit alone does not cover bundled C code.
+    assert!(
+        rusqlite::version_number() >= 3_053_002,
+        "SQLite {} predates the required security fixes",
+        rusqlite::version()
+    );
+}
+
+#[test]
+fn database_opens_refuse_symlinked_database_and_sidecars() -> Result<()> {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        for read_only in [false, true] {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("state.db");
+            let store = Store::open(&path)?;
+            let victim = dir.path().join("outside");
+            let linked = dir.path().join(format!("state.db{suffix}"));
+            if suffix == "-journal" {
+                std::fs::write(&linked, [])?;
+            }
+            std::fs::copy(&linked, &victim)?;
+            std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644))?;
+            let before = std::fs::read(&victim)?;
+            std::fs::remove_file(&linked)?;
+            symlink(&victim, &linked)?;
+            let opened = if read_only {
+                Store::open_read_only(&path)
+            } else {
+                Store::open(&path)
+            };
+            assert!(
+                opened.is_err(),
+                "accepted {suffix:?}, read_only={read_only}"
+            );
+            assert_eq!(std::fs::read(&victim)?, before);
+            assert_eq!(
+                std::fs::metadata(&victim)?.permissions().mode() & 0o777,
+                0o644
+            );
+            // Restore the original name before SQLite closes its existing connection.
+            std::fs::remove_file(&linked)?;
+            std::fs::rename(&victim, &linked)?;
+            drop(store);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn nofollow_database_opens_preserve_parent_aliases_and_memory_databases() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(dir.path(), &alias)?;
+    let path = alias.join("state.db");
+    let _writer = Store::open(&path)?;
+    let _reader = Store::open_read_only(&path)?;
+    let _memory = Store::open(":memory:")?;
+    Ok(())
+}
+
 fn decision(ts: i64, outcome: &str) -> DecisionRecord {
     DecisionRecord {
         ts,

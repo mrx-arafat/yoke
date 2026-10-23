@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -59,7 +59,7 @@ pub fn open_current(home: &Path) -> Result<Option<Store>> {
 
 pub fn open_store(home: &Path) -> Result<Store> {
     let directory = home.join(".yoke");
-    fs::create_dir_all(&directory).context("create Yoke state directory")?;
+    yoke_core::private::create_dir_all(&directory).context("create Yoke state directory")?;
     Store::open(directory.join("state.db"))
 }
 
