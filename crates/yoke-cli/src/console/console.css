@@ -87,6 +87,10 @@ h3 { font-size:1rem; margin:1.5rem 0 .5rem; }
 .record strong { display:block; font-size:.9375rem; font-weight:600; overflow-wrap:anywhere; }
 .record small { color:var(--muted); display:block; font-family:var(--mono); font-size:.8125rem; overflow-wrap:anywhere; }
 .event-cell { display:flex; flex-direction:column; gap:.4rem; align-items:start; }
+.decision-context { grid-column:1 / -1; min-width:0; overflow-wrap:anywhere; }
+.decision-context:empty { display:none; }
+.decision-preview { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; font-size:.8125rem; white-space:pre-wrap; }
+.decision-reason { display:block; font-size:.875rem; margin-top:.35rem; }
 .badge { display:inline-flex; align-items:center; min-height:1.5rem; padding:.1rem .45rem; border-radius:.2rem; font:600 .75rem/1.4 var(--mono); background:var(--well); color:var(--ink); white-space:nowrap; }
 .allow,.done,.approved { background:var(--accent-soft); color:var(--accent); }
 .deny,.error,.stalled { background:var(--danger-soft); color:var(--danger); }

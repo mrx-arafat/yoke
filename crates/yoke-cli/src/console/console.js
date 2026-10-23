@@ -6,7 +6,17 @@
   const palette = document.getElementById("palette");
   const help = document.getElementById("help");
   let navigation;
+  let activity = 0;
   let prefix = false;
+  function reading() {
+    const dirty = [...view.querySelectorAll("form[data-filter] input, form[data-filter] select")].some(el =>
+      el.tagName === "SELECT" ? el.value !== ([...el.options].find(option => option.defaultSelected) || el.options[0])?.value : el.value !== el.defaultValue);
+    return dirty || window.scrollY > 0 || document.querySelector("details[open],dialog[open],.confirmation") || /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName);
+  }
+  function pending() {
+    document.getElementById("notice").hidden = false;
+    announce("New activity is available. Refresh when ready.");
+  }
   function hydrate() {
     document.querySelectorAll("time[data-time]").forEach(el => {
       const date = new Date(Number(el.dataset.time) * 1000);
@@ -14,25 +24,32 @@
       el.textContent = date.toLocaleString(undefined, {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit"});
     });
   }
-  async function navigate(href, history = true, focus = true) {
-    if (navigation) navigation.abort();
-    navigation = new AbortController();
+  async function navigate(href, history = true, focus = true, live = false) {
     const url = new URL(href, location.href);
     if (url.origin !== location.origin) return;
+    if (navigation) navigation.abort();
+    const request = new AbortController();
+    navigation = request;
+    const version = activity;
     view.setAttribute("aria-busy", "true");
+    let loading;
     const loader = setTimeout(() => {
-      const loading = document.createElement("div");
+      if (live) return;
+      loading = document.createElement("div");
       loading.id = "loading"; loading.className = "panel"; loading.setAttribute("role", "status");
       loading.innerHTML = '<p>Loading your evidence...</p><div class="skeleton"></div><div class="skeleton"></div>';
       view.prepend(loading);
     }, 120);
     try {
-      const response = await fetch(url, {headers:{"X-Yoke-Fragment":"1"},signal:navigation.signal});
+      const response = await fetch(url, {headers:{"X-Yoke-Fragment":"1"},signal:request.signal});
       const text = await response.text();
+      if (request.signal.aborted) return;
       const parsed = new DOMParser().parseFromString(text, "text/html");
       if (!response.ok) throw new Error(parsed.querySelector("main")?.textContent || text || `Request failed (${response.status})`);
       const main = parsed.querySelector("main");
       if (!main) throw new Error("The server returned an incomplete page.");
+      // Interaction can begin after the request was sent.
+      if (live && reading()) { pending(); return; }
       view.replaceChildren(main);
       const unread=parsed.querySelector("[data-unread-update]"),badge=document.querySelector("[data-unread-count]");
       if(unread&&badge){badge.hidden=unread.dataset.unreadUpdate==="0";badge.querySelector("[data-unread-value]").textContent=unread.dataset.unreadUpdate;}
@@ -42,10 +59,11 @@
         else a.removeAttribute("aria-current");
       });
       document.title = `${main.querySelector("h1")?.textContent || "Console"} - Yoke`;
-      document.getElementById("notice").hidden = true;
+      document.getElementById("notice").hidden = version === activity;
       hydrate();
       if (focus) { main.focus({preventScroll:true}); window.scrollTo(0,0); }
       announce("View updated");
+      return true;
     } catch(error) {
       if (error.name === "AbortError") return;
       view.querySelector(".navigation-error")?.remove();
@@ -54,7 +72,10 @@
       const message = document.createElement("p"); message.textContent = error.message;
       const retry = document.createElement("button"); retry.textContent = "Try again"; retry.type = "button"; retry.addEventListener("click",()=>navigate(url));
       panel.append(message,retry); view.prepend(panel);
-    } finally { clearTimeout(loader); document.getElementById("loading")?.remove(); view.removeAttribute("aria-busy"); }
+    } finally {
+      clearTimeout(loader); loading?.remove();
+      if (navigation === request) { navigation = null; view.removeAttribute("aria-busy"); }
+    }
   }
   window.addEventListener("popstate",()=>navigate(location.href,false));
   const theme = document.getElementById("theme");
@@ -166,23 +187,24 @@
   document.getElementById("lightbox-image").addEventListener("error",()=>{document.getElementById("image-caption").textContent="Screenshot unavailable or changed. Close this view and refresh the check evidence.";});
   const connection=document.getElementById("connection");
   let events;
+  async function refreshLive() {
+    activity++;
+    if (navigation || reading()) { pending(); return; }
+    const focused=view.contains(document.activeElement)?document.activeElement:null;
+    const key=focused?.dataset.action?identity(focused):null;
+    const updated=await navigate(location.href,false,false,true);
+    if(updated&&focused)((key&&[...view.querySelectorAll("[data-action]")].find(el=>!el.disabled&&identity(el)===key))||view.querySelector("main"))?.focus({preventScroll:true});
+  }
   function listen() {
     events=new EventSource("events");
-    events.addEventListener("ready",()=>{connection.textContent="Live";connection.classList.remove("offline");});
+    // Every connection may follow missed changes, including the initial HTML-to-stream gap.
+    events.addEventListener("ready",()=>{connection.textContent="Live";connection.classList.remove("offline");refreshLive();});
     events.onerror=()=>{
       connection.textContent="Reconnecting...";connection.classList.add("offline");
       // Browsers never retry a refused stream (for example 503 while other tabs hold every slot).
       if(events.readyState===EventSource.CLOSED)setTimeout(listen,3000);
     };
-    events.addEventListener("change",async()=>{
-      const reading=window.scrollY>0 || document.querySelector("details[open],dialog[open],.confirmation") || /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName);
-      if(reading){document.getElementById("notice").hidden=false;announce("New activity is available. Refresh when ready.");return;}
-      // A live refresh replaces the view; keep keyboard focus on the same control, else the view.
-      const focused=view.contains(document.activeElement)?document.activeElement:null;
-      const key=focused?.dataset.action?identity(focused):null;
-      await navigate(location.href,false,false);
-      if(focused)((key&&[...view.querySelectorAll("[data-action]")].find(el=>!el.disabled&&identity(el)===key))||view.querySelector("main"))?.focus({preventScroll:true});
-    });
+    events.addEventListener("change",refreshLive);
   }
   listen();
   window.addEventListener("pagehide",()=>events.close());

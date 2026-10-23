@@ -7,6 +7,20 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use yoke_core::store::{DecisionFilter, Store};
 
+/// Read only known input fields from the persisted, redacted payload. Byte-capped payloads
+/// may no longer be JSON; the full stored payload remains available in the record details.
+fn input_preview(payload: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let input = value.get("tool_input")?;
+    ["command", "file_path", "path"].iter().find_map(|key| {
+        input
+            .get(key)?
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(render::excerpt)
+    })
+}
+
 pub(super) fn decisions(
     store: &Store,
     console: &Console,
@@ -61,16 +75,45 @@ pub(super) fn decisions(
         body.push_str(&format!(r#"<p class="scope">Session: <code>{}</code> <a data-nav href="{}">Clear session filter</a></p>"#,escape(session),render::href("decisions",&scope.query())));
     }
     if rows.is_empty() {
-        body.push_str(&render::empty(
-            "No decisions here yet",
-            "Run an agent with Yoke hooks, or clear your filters to see earlier activity.",
-            "yoke install --dry-run",
-        ));
+        if before.is_some() {
+            body.push_str(&render::empty("No older decisions", "This is the end of the history for this selection. Return to the latest decisions below.", ""));
+        } else if outcome.is_some() || tool.is_some() || session.is_some() {
+            body.push_str(&render::empty(
+                "No decisions match these filters",
+                "Clear the outcome, tool and session filters to see this project's activity.",
+                "",
+            ));
+            body.push_str(&format!(r#"<p class="actions"><a data-nav class="button quiet" href="{}">Clear filters</a></p>"#, render::href("decisions", &scope.query())));
+        } else {
+            body.push_str(&render::empty(
+                "No decisions here yet",
+                "Run an agent with Yoke hooks to record this project's first decision.",
+                "yoke install --dry-run",
+            ));
+        }
     } else {
         body.push_str(r#"<div class="ledger"><div class="ledger-labels" aria-hidden="true"><span>Outcome / event</span><span>Agent / tool</span><span>Mode</span><span>Recorded</span></div>"#);
         for row in rows.iter().take(50) {
             let r = &row.record;
-            body.push_str(&format!(r#"<details class="record"><summary data-row><span class="event-cell"><span class="badge {}">{}</span><strong>{}</strong></span><span><strong>{}</strong><small>{}</small></span><span class="mode">{}</span><time data-time="{}">{}</time></summary><div class="record-detail"><p class="reason">{}</p><dl class="facts"><dt>Session</dt><dd>{}</dd><dt>Project</dt><dd>{}</dd></dl><details><summary>Gate results</summary><pre><code>{}</code></pre></details><details><summary>Redacted payload</summary><pre><code>{}</code></pre></details></div></details>"#,escape(&r.outcome),escape(&r.outcome.replace('_'," ")),escape(&r.event),escape(&r.agent),escape(r.tool.as_deref().unwrap_or("Lifecycle")),escape(&r.mode),r.ts,r.ts,escape(r.reason.as_deref().unwrap_or("No intervention was needed.")),escape(&r.session_id),escape(&r.project),escape(&serde_json::to_string_pretty(&r.gates)?),escape(&r.payload)));
+            let reason = r
+                .reason
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(if r.outcome == "allow" {
+                    "No intervention was needed."
+                } else {
+                    "No reason was recorded."
+                });
+            let preview = input_preview(&r.payload).map(|text| format!(r#"<code class="decision-preview"><span class="sr-only">Command or path: </span>{text}</code>"#)).unwrap_or_default();
+            let summary_reason = if r.outcome != "allow" || r.reason.is_some() {
+                format!(
+                    r#"<span class="decision-reason">{}</span>"#,
+                    render::excerpt(reason)
+                )
+            } else {
+                String::new()
+            };
+            body.push_str(&format!(r#"<details class="record"><summary data-row><span class="event-cell"><span class="badge {}">{}</span><strong>{}</strong></span><span><strong>{}</strong><small>{}</small></span><span class="mode">{}</span><time data-time="{}">{}</time><span class="decision-context">{preview}{summary_reason}</span></summary><div class="record-detail"><p class="reason">{}</p><dl class="facts"><dt>Session</dt><dd>{}</dd><dt>Project</dt><dd>{}</dd></dl><details><summary>Gate results</summary><pre><code>{}</code></pre></details><details><summary>Redacted payload</summary><pre><code>{}</code></pre></details></div></details>"#,escape(&r.outcome),escape(&r.outcome.replace('_'," ")),escape(&r.event),escape(&r.agent),escape(r.tool.as_deref().unwrap_or("Lifecycle")),escape(&r.mode),r.ts,r.ts,escape(reason),escape(&r.session_id),escape(&r.project),escape(&serde_json::to_string_pretty(&r.gates)?),escape(&r.payload)));
         }
         body.push_str("</div>");
     }
