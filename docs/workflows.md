@@ -249,6 +249,10 @@ Other bundled packs are `web-redirect`, `token-saver`, and `ui`.
 Token-saver requires an explicit executable wrapper, command prefix, and acknowledgment of Codex rewrite permissions.
 The UI pack supplies commented plan-check templates; replace them with real browser commands and screenshot paths before approving a plan.
 
+Use `yoke gates --verbose` to inspect the trusted commands, matchers, shell, timeout, environment allowances and expected exit code before debugging a gate.
+`yoke gates --json` includes snapshot freshness; `yoke log --json` shows recorded reasons and exit codes for actual hook events.
+Inspection never runs a gate, and observe mode still executes checks.
+
 ## Extension inventory and drift
 
 `yoke extensions` lists every skill, command, custom agent, plugin, MCP server, hook, memory file and rule that Claude Code and Codex read from their managed, user, project and local locations, and marks the hooks and presets Yoke manages.

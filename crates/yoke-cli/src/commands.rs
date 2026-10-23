@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::Value;
-use yoke_core::config::{self, LoadedConfig};
+use yoke_core::config::{self, GateAction, LoadedConfig};
 use yoke_core::store::Store;
 use yoke_core::{guard, trust};
 
@@ -243,7 +243,7 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
             let loaded =
                 config::load_trusted(&open_store(&home)?, &std::env::current_dir()?, &home)?;
             match other {
-                Some(Cmd::Gates) => gates(&loaded),
+                Some(Cmd::Gates { verbose, json }) => gates(&loaded, verbose, json)?,
                 Some(Cmd::Config { json: true }) => println!("{}", serde_json::to_string(&loaded)?),
                 Some(Cmd::Config { json: false }) => config(&loaded)?,
                 None => {
@@ -257,7 +257,7 @@ pub fn run(command: Option<Cmd>) -> Result<()> {
                         "project: {}",
                         quote(&loaded.project_root.display().to_string())
                     );
-                    gates(&loaded);
+                    gates(&loaded, false, false)?;
                     println!("help: \"Run yoke health to check that your agents are protected, yoke config to inspect trust, yoke log for decisions, or yoke --help for commands.\"");
                 }
                 _ => unreachable!(),
@@ -303,27 +303,71 @@ fn init() -> Result<()> {
     Ok(())
 }
 
-fn gates(loaded: &LoadedConfig) {
-    println!(
-        "gates[{}]{{name,event,action,source}}:",
-        loaded.config.gates.len()
-    );
+fn gates(loaded: &LoadedConfig, verbose: bool, json: bool) -> Result<()> {
+    let mut details = Vec::new();
     for gate in &loaded.config.gates {
+        let mut detail = serde_json::to_value(gate)?;
+        detail["source"] = loaded
+            .origins
+            .get(&format!("gate.{}", gate.name))
+            .map(String::as_str)
+            .unwrap_or("default")
+            .into();
+        if gate.action == GateAction::Check {
+            detail["shell"] = gate.shell.as_deref().unwrap_or("/bin/sh").into();
+            detail["expected_exit"] = 0.into();
+        } else {
+            detail["expected_exit"] = Value::Null;
+        }
+        details.push(detail);
+    }
+    if json {
         println!(
-            "  {},{},{},{}",
+            "{}",
+            serde_json::json!({
+                "project": loaded.project_root,
+                "mode": loaded.config.mode,
+                "pass_env": loaded.config.gate_environment.pass_env,
+                "gates": details,
+                "snapshots": loaded.snapshots,
+            })
+        );
+        return Ok(());
+    }
+    if verbose {
+        println!(
+            "project: {}",
+            quote(&loaded.project_root.display().to_string())
+        );
+        println!("mode: {}", loaded.config.mode.as_str());
+        println!(
+            "pass_env: {}",
+            serde_json::to_string(&loaded.config.gate_environment.pass_env)?
+        );
+    }
+    let columns = if verbose {
+        "name,event,action,source,settings"
+    } else {
+        "name,event,action,source"
+    };
+    println!("gates[{}]{{{columns}}}:", loaded.config.gates.len());
+    for (gate, detail) in loaded.config.gates.iter().zip(details) {
+        println!(
+            "  {},{},{},{}{}",
             quote(&gate.name),
             gate.on.as_str(),
             serde_json::to_string(&gate.action).expect("gate action serializes"),
-            quote(
-                loaded
-                    .origins
-                    .get(&format!("gate.{}", gate.name))
-                    .map(String::as_str)
-                    .unwrap_or("default")
-            )
+            detail["source"],
+            if verbose {
+                format!(",{}", quote(&detail.to_string()))
+            } else {
+                String::new()
+            }
         );
     }
     trust_help(loaded);
+    println!("help: \"Run yoke gates --verbose for full settings, yoke gates --json for structured inspection, or yoke log --json for recorded reasons, exit codes and timing.\"");
+    Ok(())
 }
 
 /// Tables of ignored settings look the same as tables of nothing; say which one this is.
@@ -462,14 +506,17 @@ fn trust(global: bool) -> Result<()> {
             println!("change: unchanged");
             continue;
         }
-        // Escaped full-line before/after display prevents terminal control injection.
-        if let Some(previous) = &snapshot.previous {
-            for line in previous.lines() {
-                println!("- {}", quote(line));
+        println!(
+            "change: {}",
+            if snapshot.previous.is_some() {
+                "modified"
+            } else {
+                "new"
             }
-        }
-        for line in snapshot.content.lines() {
-            println!("+ {}", quote(line));
+        );
+        for line in crate::preview::snapshot_lines(snapshot.previous.as_deref(), &snapshot.content)
+        {
+            println!("{line}");
         }
     }
     println!("Trust these exact snapshots?");
