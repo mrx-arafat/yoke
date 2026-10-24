@@ -17,6 +17,8 @@ On every hook event it runs the checks a human approved, records what it decided
 A plan is marked done only after Yoke itself has run the plan's checks on the final working tree.
 It is one binary and one SQLite file on your machine, with no daemon and no telemetry.
 
+New to Yoke? Read the [manual](MANUAL.md) first: a five-minute explanation of what it is and one full worked example.
+
 > [!IMPORTANT]
 > Yoke 0.1.0 is pre-release.
 > No binary release is published yet and the real-work release trials are still open, so build from source and read [Status](#status) before relying on it.
@@ -318,6 +320,7 @@ Read the [upgrade notes](docs/upgrade-notes.md) before replacing an existing Yok
 
 | Guide | Use it to |
 | --- | --- |
+| [Manual](MANUAL.md) | Get a five-minute explanation of what Yoke is and one full worked example |
 | [Getting started](docs/getting-started.md) | Build, install, trust a policy, and inspect your first decision |
 | [Configuration](docs/configuration.md) | Understand defaults, layered trust, gates, and event behavior |
 | [CLI reference](docs/cli.md) | Find every command, argument, and machine-readable output |
