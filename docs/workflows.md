@@ -360,16 +360,17 @@ Detailed dated history still reads the original samples.
 
 The report has these parts:
 
-- **Quota** is an aligned table of each agent's rate-limit windows: percent used, percent left, the reset time, the time until reset, how long ago the agent reported the figures, and the plan when the agent reports one (Codex does; Claude Code does not, so it shows `-`).
+- **Quota / account limits** aligns percent left, percent used, time until reset and reading age. Current windows come first, ordered by urgency.
   `--json` carries the same rows as structured records, including the window length in minutes, the plan and an `expired` flag.
-- **Usage** totals input, output, cache-read and cache-write tokens and the estimated cost per agent, since local midnight and over the 7 x 24 hours before now.
+- **Burn estimates** shows each window's rate, evidence duration, exhaustion outlook and exact reset time, with reported plans below it.
+- **Token history** aligns input, output, cache-read/write tokens and known API cost per agent for today and the last 7 x 24 hours. Unpriced sample counts stay separate from dollar amounts; those tokens remain counted.
 - **Sessions** lists the newest sessions with their models, start, duration, tokens, estimated cost and coverage.
   Duration runs from the earlier of the recorded session start and the first usage sample to the session's last usage sample, so it includes any idle time.
   Coverage is `full`, or says how much of an oversize transcript was counted (see below).
 - **Notes** say what is missing and what produces it, for example no state yet, a state schema older than usage times need, or an agent that has not reported its quota.
 
 Quota percentages are what each agent reported; Yoke never enforces a quota.
-The `quota_outlook` block estimates burn in percentage points/hour and when a window may reach 100% before reset, assuming that rate continues.
+The headline and Burn estimates section show when a window may reach 100% before reset, assuming recent burn continues.
 It requires at least one minute of same-reset observations from the most recent hour, with a last reading no more than five minutes old.
 Expired or stale readings have no projection. An absent projection means insufficient evidence, not unlimited capacity.
 `yoke usage --json` includes each window's bounded history, source time, staleness, burn rate, evidence span and projected exhaustion time.

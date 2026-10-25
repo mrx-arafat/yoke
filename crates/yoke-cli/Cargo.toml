@@ -26,6 +26,7 @@ tempfile.workspace = true
 toml_edit.workspace = true
 pulldown-cmark.workspace = true
 libc.workspace = true
+unicode-width.workspace = true
 
 [features]
 # Makes a hook honour HOME even when it differs from the account's home. Dev and test builds

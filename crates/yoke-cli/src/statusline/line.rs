@@ -5,14 +5,12 @@
 //! segments are dropped, least important first, and it never wraps. Color marks a level, never
 //! carries meaning alone: every colored word is also spelled out.
 
+use crate::terminal::{quota_tone as level, Tone};
 use yoke_core::quota::{self, Window};
 use yoke_core::redact::redact;
 use yoke_core::store::SessionCounts;
 use yoke_core::timefmt;
 
-/// Percent used from which a quota or context figure is shown as getting full, and as nearly full.
-const MID: f64 = 60.0;
-const HIGH: f64 = 85.0;
 const BAR_CELLS: usize = 8;
 const SEPARATOR: &str = " | ";
 /// Written as escapes so the source stays 7-bit; `YOKE_ASCII=1` replaces all of them.
@@ -70,15 +68,6 @@ pub(super) struct Facts {
     pub update: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Tone {
-    Plain,
-    Dim,
-    Good,
-    Warn,
-    Bad,
-}
-
 /// Importance when the line is too wide: the highest rank is dropped first, rank 0 never.
 mod rank {
     pub const MODE: u8 = 0;
@@ -118,35 +107,12 @@ impl Segment {
     fn paint(&self, color: bool) -> String {
         self.parts
             .iter()
-            .map(|(tone, text)| match (color, sgr(*tone)) {
-                (true, Some(code)) => format!("\x1b[{code}m{text}\x1b[0m"),
-                _ => text.clone(),
-            })
+            .map(|(tone, text)| tone.paint(text, color))
             .collect()
     }
 
     fn plain(&self) -> String {
         self.parts.iter().map(|(_, text)| text.as_str()).collect()
-    }
-}
-
-fn sgr(tone: Tone) -> Option<&'static str> {
-    match tone {
-        Tone::Plain => None,
-        Tone::Dim => Some("2"),
-        Tone::Good => Some("32"),
-        Tone::Warn => Some("33"),
-        Tone::Bad => Some("31"),
-    }
-}
-
-fn level(percent: f64) -> Tone {
-    if percent >= HIGH {
-        Tone::Bad
-    } else if percent >= MID {
-        Tone::Warn
-    } else {
-        Tone::Good
     }
 }
 

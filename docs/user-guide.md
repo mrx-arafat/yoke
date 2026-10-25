@@ -288,14 +288,20 @@ yoke usage --json
 ```
 
 `yoke usage` is read-only; it never creates, migrates or writes state, so it is safe while hooks are active.
-It prints four parts:
+It leads with current headroom or the earliest projected exhaustion, then groups the details:
 
-- **Quota** is a table of each agent's rate-limit windows with `used`, `left`, the reset time, the time until reset, how long ago the agent reported the figures (`observed`), and the plan when the agent reports one.
-  Its outlook shows recent burn and projected exhaustion when enough fresh same-window evidence exists; stale readings are labelled explicitly.
-- **Usage** totals input, output, cache-read and cache-write tokens and the estimated cost per agent, since local midnight and over the 7 x 24 hours before now.
+- **Quota / account limits** puts percent left first, followed by percent used, time until reset and reading age. The most urgent current windows come first; stale or expired windows follow them.
+- **Burn estimates** aligns each window's percentage points/hour (`pp/h`), evidence duration, exhaustion outlook and exact reset time. Plans appear below it when reported.
+- **Token history** aligns input, output and cache-read/write tokens per agent for today and the last 7 days. `Known USD` is the priced part of the estimate; `Unpriced` counts samples with no price. Their tokens are included.
 - **Sessions** lists the newest sessions with project, models, start, duration, tokens, estimated cost and coverage.
   `--limit` sets how many, default 10, range 1 through 100.
 - **Notes** say what is missing and what produces it.
+
+Numeric columns align right, percentages have one decimal place, and session metadata sits below its numeric row.
+Narrow terminals switch tables to labelled records and wrap long text; abbreviated session IDs are repeated in full below the row.
+Set `COLUMNS` to override the detected terminal width; without a terminal, the default is 80 columns.
+Interactive quota colors use the statusline's green/yellow/red thresholds at 60 and 85 percent used. `NO_COLOR` disables color; piped output is plain text.
+Use `--json` for the unchanged structured records.
 
 Where the figures come from:
 
