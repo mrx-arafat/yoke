@@ -66,6 +66,21 @@ fn notifications_hide_long_check_secrets_and_refuse_noninteractive_ack() {
         .unwrap()
         .contains(&"x".repeat(20)));
     assert!(rows[0]["detail"].as_str().unwrap().contains("[REDACTED]"));
+    let shown = yoke(&home, "notifications");
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        shown.contains("notifications: 1\n") && shown.contains("next steps: 1\n"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("LAST SEEN") && shown.contains("yoke plan status ship"),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("https://"),
+        "recovery URLs belong in full JSON records: {shown}"
+    );
+    assert!(rows[0]["doc"].as_str().unwrap().starts_with("https://"));
 }
 
 #[test]

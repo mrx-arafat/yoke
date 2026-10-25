@@ -23,7 +23,7 @@ pub fn run(json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
-        print(&report);
+        print(&report, &project, &home);
     }
     if report.drift.iter().any(Drift::fails_check) {
         std::io::stdout().flush()?;
@@ -136,48 +136,83 @@ fn summary(report: &Report) -> String {
 /// Text view: summary, then drift (the part to act on), then the inventory, then the notes
 /// that mean a file was not read. Links outside the scanned roots are only counted here;
 /// `--json` lists each target.
-fn print(report: &Report) {
+fn print(report: &Report, project: &Path, home: &Path) {
     println!("summary: {}", summary(report));
-    println!("drift[{}]{{kind,agent,name,detail}}:", report.drift.len());
-    for drift in &report.drift {
-        println!(
-            "  {},{},{},{}",
-            tag(drift.kind),
-            tag(drift.agent),
-            quote(&drift.name),
-            quote(&drift.detail)
-        );
-    }
-    println!(
-        "extensions[{}]{{agent,kind,name,scope,managed,origin,detail}}:",
-        report.items.len()
+    let drift = report
+        .drift
+        .iter()
+        .map(|item| {
+            vec![
+                tag(item.kind),
+                tag(item.agent),
+                item.name.clone(),
+                item.detail.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    print!(
+        "{}",
+        crate::table::render(
+            "drift",
+            &[
+                ("KIND", 4, 10),
+                ("AGENT", 6, 6),
+                ("NAME", 4, 28),
+                ("DETAIL", 6, 180)
+            ],
+            &drift
+        )
     );
-    for item in &report.items {
-        println!(
-            "  {},{},{},{},{},{},{}",
-            tag(item.agent),
-            tag(item.kind),
-            quote(&item.name),
-            tag(item.scope),
-            item.managed,
-            quote(&redact(&item.origin.display().to_string())),
-            quote(&item.detail)
-        );
-    }
+    let items = report
+        .items
+        .iter()
+        .map(|item| {
+            vec![
+                tag(item.agent),
+                tag(item.kind),
+                item.name.clone(),
+                tag(item.scope),
+                item.managed.to_string(),
+                redact(&crate::table::path(&item.origin, project, home)),
+                item.detail.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    print!(
+        "{}",
+        crate::table::render(
+            "extensions",
+            &[
+                ("AGENT", 6, 6),
+                ("KIND", 4, 12),
+                ("NAME", 4, 28),
+                ("SCOPE", 5, 12),
+                ("MANAGED", 7, 7),
+                ("ORIGIN", 6, 60),
+                ("DETAIL", 6, 180)
+            ],
+            &items
+        )
+    );
     let notes: Vec<_> = report
         .notes
         .iter()
         .filter(|note| !note.is_outside_link())
         .collect();
     if !notes.is_empty() {
-        println!("notes[{}]{{path,note}}:", notes.len());
-        for note in notes {
-            println!(
-                "  {},{}",
-                quote(&redact(&note.path.display().to_string())),
-                quote(&redact(&note.note))
-            );
-        }
+        let notes = notes
+            .iter()
+            .map(|note| {
+                vec![
+                    redact(&crate::table::path(&note.path, project, home)),
+                    redact(&note.note),
+                ]
+            })
+            .collect::<Vec<_>>();
+        print!(
+            "{}",
+            crate::table::render("notes", &[("PATH", 4, 60), ("NOTE", 4, 180)], &notes)
+        );
     }
     let help = if report.drift.is_empty() {
         "No drift. Run yoke extensions --json for redacted details, symlink targets and environment key names."

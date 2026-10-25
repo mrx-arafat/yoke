@@ -281,6 +281,16 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 
 ## Installation and health
 
+### Human record listings use aligned tables
+
+- What changed: `log`, notifications, plain `gates`, extensions and plan lists/status/checks use aligned tables, with labeled records when the columns cannot fit.
+  Ellipses mark shortened fields; known paths use project-relative or home-relative forms.
+  Log previews put failure reasons before commands, and notification recovery commands have their own table, with full documentation URLs in JSON.
+- Who is affected: people reading these commands and scripts parsing their default text output.
+- What to do: use `--json` for automation and complete values; its record fields and values are unchanged.
+  Set `COLUMNS` to control preview width and `YOKE_ASCII=1` for three-dot truncation markers.
+  `gates --verbose` retains its detailed format.
+
 ### Setup help and policy recovery guidance
 
 - What changed: top-level help shows the setup sequence, and `init`, `trust`, `install` and `health` help include examples and constraints.

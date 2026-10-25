@@ -8,6 +8,8 @@ Recovery links in tagged release builds point to that release's documentation.
 Local builds and manual packages without a matching release tag use the documentation on `main`; no release needs to exist for those links to work.
 Each notification names the section of this page that explains it.
 For command examples and setup constraints, use `yoke --help` or `yoke <command> --help`; help works without state or trusted policy.
+Record tables shorten long values with `…`; use `--json` for full text and identifiers, or set `COLUMNS=160` for wider previews.
+Notifications put recovery commands in a separate next-steps table; full recovery URLs are in `yoke notifications --json` under `doc`.
 On session start, hooks materialize at most 2,000 old decisions and queue one `notifications-drain` job for the rest.
 The existing job worker drains that history in paced transactions, so catching up does not require hundreds of later session starts.
 Run `yoke jobs --all` to inspect the job; failed jobs retry with backoff, and a human can run `yoke jobs retry <id>` for a dead job.

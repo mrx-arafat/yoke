@@ -9,6 +9,7 @@ fn yoke(home: &Path, project: &Path, args: &[&str], input: &[u8]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_yoke"))
         .args(args)
         .env("HOME", home)
+        .env("COLUMNS", "120")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
         // Installing refuses an agent's process, so a test must not inherit its markers.
@@ -272,18 +273,20 @@ fn extensions_text_leads_with_summary_and_drift_counts_outside_links_and_shows_d
         first.contains("symlinks outside the scanned roots 1"),
         "{first}"
     );
-    assert!(text.find("drift[").unwrap() < text.find("extensions[").unwrap());
+    assert!(text.find("drift:").unwrap() < text.find("extensions:").unwrap());
     assert!(
-        !text.contains("notes["),
+        !text.contains("notes:"),
         "outside links are counted, not listed: {text}"
     );
     assert!(!text.contains("symlink outside scanned roots"), "{text}");
     assert!(
-        text.contains("{agent,kind,name,scope,managed,origin,detail}"),
+        text.lines().any(|line| line
+            .split_whitespace()
+            .eq(["AGENT", "KIND", "NAME", "SCOPE", "MANAGED", "ORIGIN", "DETAIL"])),
         "{text}"
     );
     assert!(
-        text.contains("\"definitely-missing-program-xyz (1 arg)\""),
+        text.contains("definitely-missing-program-xyz") && text.contains("--json"),
         "{text}"
     );
 }

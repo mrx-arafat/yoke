@@ -13,8 +13,18 @@ Invalid arguments exit 2 and print usage on stderr; help and version requests ex
 Health exits 1 when it reports a failing check; a policy denial uses the agent's hook response rather than the ordinary CLI error format.
 On a terminal that is the only copy; when stdout is not a terminal the message also goes to stderr as `yoke: <message>`.
 Piping into a reader that closes early, such as `yoke log | head -1`, ends the command quietly.
-Text output shows times as local `YYYY-MM-DD HH:MM` (`yoke log` adds seconds); `--json` output keeps epoch seconds.
+Text output shows times as local `YYYY-MM-DD HH:MM` (`yoke log` and notifications add seconds); `--json` output keeps epoch seconds.
 Plan commands print a compact text view by default, and `--json` prints the full record.
+
+Record listings for `log`, notifications, plain `gates`, extensions and plans use aligned columns with a record count and uppercase headers.
+Empty lists say `0 (none)`; empty cells show `-`.
+Tables use `COLUMNS` (1 through 4096), then the terminal's width, or 120 columns when piped.
+If minimum column widths cannot fit, each record is shown as labeled fields.
+Fields stay on one line; controls and repeated whitespace become spaces, and Unicode display widths count toward the limit.
+Shortened cells end in `…` (`...` with `YOKE_ASCII=1`), with a reminder to use `--json` for complete records, identifiers and paths.
+Free-text columns allow up to 180 display cells; other columns have smaller field-specific caps.
+Gate sources, extension origins and plan paths use `./` for the project and `~/` for the home directory where possible.
+These are human previews: scripts should use `--json`, whose fields and values are unchanged, or `gates --verbose` for full gate settings.
 
 ## Policy and integration
 
@@ -98,8 +108,8 @@ Codex hook approval through `/hooks`, that approval's freshness, and Claude poli
 `--all` lists every project instead, and `--project` takes any path inside another project and matches the project that contains it; a path that is not a directory matches as written.
 `--all` and `--project` cannot be combined.
 `--session` searches every project unless `--project` is also given, because a session id names one session.
-The table shows local time with seconds, agent, session id, event, tool, outcome, the gates that did more than pass, and a short detail: what the tool acted on, then the reason.
-The session id is the value `yoke plan start --session` takes.
+The table shows local time with seconds, agent, session id, event, tool, outcome, the gates that did more than pass, and a short detail: the reason first when present, then what the tool acted on.
+The complete session id from `--json` is the value `yoke plan start --session` takes; do not copy an identifier ending in an ellipsis.
 Rows from more than one project also get a `project` column.
 `--tool` is an exact, case-sensitive match, and so is `--session`.
 An empty `--outcome deny` or `--outcome would_deny` listing says when the project has no trusted gate, so no gate has run, and names an untrusted `yoke.toml` that is the reason.
@@ -128,7 +138,9 @@ Notifications are derived from stored state each time you list them: hook errors
 Repeats of the same problem raise a count on one notification instead of adding rows.
 A repeated hook error or check failure becomes unread again; the observe-mode summary keeps counting without reopening.
 When the underlying condition clears, for example a resumed plan or a passing check, an unread notification is acknowledged by `yoke` instead of you.
-Each row names the next command to run and links the section of [troubleshooting](troubleshooting.md) that explains it as a full URL, because an installed machine has no `docs` folder.
+The summary table shows id, state, kind, count, local last-seen time with seconds and title.
+A separate next-steps table maps each id to its recovery command.
+`--json` also includes each notification's full recovery URL in `doc`, because an installed machine has no `docs` folder.
 For an untrusted or stale configuration the next command is `yoke trust` (`yoke trust --global` for the global file), which only a person at a terminal can run, after reviewing the file with `yoke config`.
 Acknowledgement requires a human terminal, because an agent that acknowledges an alert hides it from the person it is meant for.
 `ack all` acknowledges only what is already stored; it does not collect new notifications first.

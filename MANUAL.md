@@ -79,8 +79,13 @@ yoke log --limit 5
 ```
 
 ```
-"2026-10-24 09:12:03","claude","s1","pre_tool_use","Bash","would_deny","no-force-push","git push --force"
+decisions: 1
+  TIME                 AGENT   SESSION  EVENT         TOOL  OUTCOME     GATE           DETAIL
+  2026-10-24 09:12:03  claude  s1       pre_tool_use  Bash  would_deny  no-force-push  Force push is blocked by Yoke. P…
+  … shortened; full records: --json
 ```
+
+An ellipsis marks a shortened preview. Use `yoke log --json` for complete commands, reasons and session ids; `COLUMNS=160 yoke log` gives wider human previews.
 
 `would_deny` means Yoke correctly identified that the gate should have fired, but observe mode let it through so you could verify the rule is right before it starts blocking anything.
 

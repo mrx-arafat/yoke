@@ -813,7 +813,7 @@ fn plan_commands_explain_a_missing_first_commit_and_observe_mode() {
     let text = String::from_utf8_lossy(&checked.stdout);
     assert!(checked.status.success(), "{text}");
     assert!(
-        text.starts_with("plan: \"fixture\"\nstate: done\nresult: pass\nchecks[1]{name,result,blocking,ms,detail}:\n  \"diff\",pass,true,"),
+        text.starts_with("plan: \"fixture\"\nstate: done\nresult: pass\nchecks: 1\n"),
         "{text}"
     );
 }
@@ -1006,19 +1006,23 @@ fn plan_cli_validates_tracks_tasks_and_keeps_human_actions_human() {
     let text = String::from_utf8_lossy(&status.stdout);
     assert!(status.status.success(), "{text}");
     for line in [
-        "  tasks: 1/2 done",
-        "  \"build\",agent,done,\"Build it\"",
-        "  \"signoff\",human,ready,\"Sign off\"",
-        "  \"copy\",unsatisfied,\"A human approves the copy\"",
-        "open_feedback[1]{id,author,severity,state,anchor,text}:",
+        "tasks: 1/2 done",
+        "build agent done Build it",
+        "signoff human ready Sign off",
+        "copy unsatisfied A human approves the copy",
+        "open_feedback: 1",
     ] {
         assert!(
-            text.lines().any(|candidate| candidate == line),
+            text.lines().any(|candidate| candidate
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                == line),
             "missing {line:?} in\n{text}"
         );
     }
     let comment_id = comment["id"].as_i64().unwrap().to_string();
-    let reply_row = format!(",agent,reply,reply_to_{comment_id},\"heading:rollout\",\"Yes\"");
+    let reply_row = format!("agent reply reply_to_{comment_id} heading:rollout Yes");
     assert!(run(
         &home,
         &project,
@@ -1030,7 +1034,11 @@ fn plan_cli_validates_tracks_tasks_and_keeps_human_actions_human() {
     let replied = run(&home, &project, &["plan", "status", "fixture"], b"");
     let text = String::from_utf8_lossy(&replied.stdout);
     assert!(
-        text.lines().any(|line| line.ends_with(&reply_row)),
+        text.lines().any(|line| line
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .ends_with(&reply_row)),
         "a reply must sit under the comment it answers in\n{text}"
     );
     assert!(

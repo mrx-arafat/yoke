@@ -272,21 +272,36 @@ pub fn run(command: PlanCommand) -> Result<()> {
             println!("{}", serde_json::to_string(&rows)?);
         }
         PlanCommand::List { json: false } | PlanCommand::Status { slug: None, .. } => {
+            let home = commands::home()?;
             let plans = plan::list(&store, project)?;
             let sessions = plan::bound_sessions(&store, project)?;
-            println!("plans[{}]{{slug,state,session,file}}:", plans.len());
-            for row in plans {
-                println!(
-                    "  {},{},{},{}",
-                    commands::quote(&row.slug),
-                    row.state,
-                    sessions
-                        .get(&row.id)
-                        .map(|s| commands::quote(s))
-                        .unwrap_or_else(|| "none".into()),
-                    commands::quote(&row.file)
-                );
-            }
+            let rows = plans
+                .iter()
+                .map(|row| {
+                    vec![
+                        row.slug.clone(),
+                        row.state.clone(),
+                        sessions
+                            .get(&row.id)
+                            .cloned()
+                            .unwrap_or_else(|| "none".into()),
+                        crate::table::path(std::path::Path::new(&row.file), project, &home),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            print!(
+                "{}",
+                crate::table::render(
+                    "plans",
+                    &[
+                        ("SLUG", 4, 28),
+                        ("STATE", 8, 9),
+                        ("SESSION", 7, 24),
+                        ("FILE", 4, 180)
+                    ],
+                    &rows
+                )
+            );
         }
         PlanCommand::Status {
             slug: Some(slug),
@@ -305,6 +320,7 @@ pub fn run(command: PlanCommand) -> Result<()> {
                     plan::bound_sessions(&store, project)?
                         .get(&detail.plan.id)
                         .map(String::as_str),
+                    &commands::home()?,
                 );
             }
         }
@@ -669,18 +685,10 @@ fn close(
 }
 
 /// Longest feedback text a table row shows before pointing at `--json`.
-const TEXT_LIMIT: usize = 200;
+const TEXT_LIMIT: usize = 180;
 
 fn short(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    match flat.char_indices().nth(TEXT_LIMIT) {
-        Some((end, _)) => commands::quote(&format!(
-            "{}... ({} chars)",
-            &flat[..end],
-            flat.chars().count()
-        )),
-        None => commands::quote(&flat),
-    }
+    commands::quote(&crate::table::preview(text, TEXT_LIMIT))
 }
 
 fn print_feedback(name: &str, items: &[plan::Feedback]) {
@@ -692,10 +700,7 @@ fn feedback_table(name: &str, items: &[plan::Feedback]) -> String {
     if items.is_empty() {
         return format!("{name}: none\n");
     }
-    let mut text = format!(
-        "{name}[{}]{{id,author,severity,state,anchor,text}}:\n",
-        items.len()
-    );
+    let mut rows = Vec::new();
     for item in items {
         let mut anchor = item.anchor.clone();
         if !item.anchored {
@@ -708,15 +713,27 @@ fn feedback_table(name: &str, items: &[plan::Feedback]) -> String {
                 item.state.as_deref().unwrap_or("reply").to_owned(),
             ),
         };
-        text.push_str(&format!(
-            "  {},{},{severity},{state},{},{}\n",
-            item.id,
-            item.author,
-            commands::quote(&anchor),
-            short(&item.text)
-        ));
+        rows.push(vec![
+            item.id.to_string(),
+            item.author.clone(),
+            severity,
+            state,
+            anchor,
+            item.text.clone(),
+        ]);
     }
-    text
+    crate::table::render(
+        name,
+        &[
+            ("ID", 2, 8),
+            ("AUTHOR", 6, 8),
+            ("SEVERITY", 8, 8),
+            ("STATE", 5, 20),
+            ("ANCHOR", 6, 28),
+            ("TEXT", 4, 180),
+        ],
+        &rows,
+    )
 }
 
 fn help_lines(help: &[String]) -> String {
@@ -868,19 +885,29 @@ fn render_check(summary: &plan::CheckSummary) -> String {
     if summary.checks.is_empty() {
         text.push_str("checks: none declared\n");
     } else {
-        text.push_str(&format!(
-            "checks[{}]{{name,result,blocking,ms,detail}}:\n",
-            summary.checks.len()
-        ));
-    }
-    for run in &summary.checks {
-        text.push_str(&format!(
-            "  {},{},{},{},{}\n",
-            commands::quote(&run.name),
-            run.result,
-            run.blocking,
-            run.ms,
-            commands::quote(&check_detail(run))
+        let rows = summary
+            .checks
+            .iter()
+            .map(|run| {
+                vec![
+                    run.name.clone(),
+                    run.result.clone(),
+                    run.blocking.to_string(),
+                    run.ms.to_string(),
+                    check_detail(run),
+                ]
+            })
+            .collect::<Vec<_>>();
+        text.push_str(&crate::table::render(
+            "checks",
+            &[
+                ("NAME", 4, 28),
+                ("RESULT", 6, 12),
+                ("BLOCKING", 8, 8),
+                ("MS", 2, 10),
+                ("DETAIL", 6, 180),
+            ],
+            &rows,
         ));
     }
     if !summary.passed {
@@ -1027,7 +1054,7 @@ fn render_review(slug: &str, report: &review::ReviewReport) -> String {
 }
 
 /// AXI text view of one plan; `--json` carries every field and the plan body.
-fn status(detail: &plan::PlanDetail, session: Option<&str>) {
+fn status(detail: &plan::PlanDetail, session: Option<&str>, home: &std::path::Path) {
     let plan = &detail.plan;
     let progress = &detail.progress;
     let done = progress
@@ -1078,7 +1105,14 @@ fn status(detail: &plan::PlanDetail, session: Option<&str>) {
             .unwrap_or_else(|| "none".into())
     );
     println!("  revision: {}", plan.revision);
-    println!("  file: {}", commands::quote(&plan.file));
+    println!(
+        "  file: {}",
+        commands::quote(&crate::table::path(
+            std::path::Path::new(&plan.file),
+            std::path::Path::new(&plan.project),
+            home
+        ))
+    );
     println!("  tasks: {done}/{} done", progress.tasks.len());
     println!(
         "  requirements: {satisfied}/{} satisfied",
@@ -1097,71 +1131,113 @@ fn status(detail: &plan::PlanDetail, session: Option<&str>) {
     if progress.tasks.is_empty() {
         println!("tasks: none declared");
     } else {
-        println!("tasks[{}]{{id,owner,state,title}}:", progress.tasks.len());
-        for item in &progress.tasks {
-            println!(
-                "  {},{},{},{}",
-                commands::quote(&item.task.id),
-                item.task.owner.as_str(),
-                serde_json::to_value(item.state)
-                    .unwrap_or_default()
-                    .as_str()
-                    .unwrap_or(""),
-                short(&item.task.title)
-            );
-        }
+        let rows = progress
+            .tasks
+            .iter()
+            .map(|item| {
+                vec![
+                    item.task.id.clone(),
+                    item.task.owner.as_str().into(),
+                    word(&item.state),
+                    item.task.title.clone(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        print!(
+            "{}",
+            crate::table::render(
+                "tasks",
+                &[
+                    ("ID", 2, 24),
+                    ("OWNER", 5, 5),
+                    ("STATE", 5, 12),
+                    ("TITLE", 5, 180)
+                ],
+                &rows
+            )
+        );
     }
     if progress.requirements.is_empty() {
         println!("requirements: none declared");
     } else {
-        println!(
-            "requirements[{}]{{id,satisfied_by,text}}:",
-            progress.requirements.len()
+        let rows = progress
+            .requirements
+            .iter()
+            .map(|item| {
+                vec![
+                    item.requirement.id.clone(),
+                    word(&item.status),
+                    item.requirement.text.clone(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        print!(
+            "{}",
+            crate::table::render(
+                "requirements",
+                &[("ID", 2, 24), ("STATUS", 6, 16), ("TEXT", 4, 180)],
+                &rows
+            )
         );
-        for item in &progress.requirements {
-            println!(
-                "  {},{},{}",
-                commands::quote(&item.requirement.id),
-                serde_json::to_value(item.status)
-                    .unwrap_or_default()
-                    .as_str()
-                    .unwrap_or(""),
-                short(&item.requirement.text)
-            );
-        }
     }
     print_feedback("open_feedback", &thread);
     let shown = detail.checks.len().min(10);
     if shown == 0 {
         println!("checks: none run");
     } else {
-        println!(
-            "checks[{shown}]{{id,name,result,blocking}}: newest {shown} of {}",
-            detail.checks.len()
+        println!("check history: newest {shown} of {}", detail.checks.len());
+        let rows = detail
+            .checks
+            .iter()
+            .rev()
+            .take(shown)
+            .map(|run| {
+                vec![
+                    run.id.to_string(),
+                    run.name.clone(),
+                    run.result.clone(),
+                    run.blocking.to_string(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        print!(
+            "{}",
+            crate::table::render(
+                "checks",
+                &[
+                    ("ID", 2, 8),
+                    ("NAME", 4, 40),
+                    ("RESULT", 6, 12),
+                    ("BLOCKING", 8, 8)
+                ],
+                &rows
+            )
         );
-        for run in detail.checks.iter().rev().take(shown) {
-            println!(
-                "  {},{},{},{}",
-                run.id,
-                commands::quote(&run.name),
-                run.result,
-                run.blocking
-            );
-        }
     }
     if !detail.evidence.is_empty() {
-        println!("evidence[{}]{{check,path,status}}:", detail.evidence.len());
-        for item in &detail.evidence {
-            println!(
-                "  {},{},{}",
-                item.check_run_id,
-                commands::quote(&item.path),
-                serde_json::to_value(item.status)
-                    .unwrap_or_default()
-                    .as_str()
-                    .unwrap_or("")
-            );
-        }
+        let rows = detail
+            .evidence
+            .iter()
+            .map(|item| {
+                vec![
+                    item.check_run_id.to_string(),
+                    crate::table::path(
+                        std::path::Path::new(&item.path),
+                        std::path::Path::new(&plan.project),
+                        home,
+                    ),
+                    word(&item.status),
+                ]
+            })
+            .collect::<Vec<_>>();
+        print!(
+            "{}",
+            crate::table::render(
+                "evidence",
+                &[("CHECK", 5, 8), ("PATH", 4, 180), ("STATUS", 8, 10)],
+                &rows
+            )
+        );
     }
     let slug = &plan.slug;
     let mut help = Vec::new();
@@ -1289,7 +1365,13 @@ mod tests {
         let text = render_validation(&validation);
         assert!(text.contains("findings: 2 (1 blocking)"), "{text}");
         assert!(
-            text.contains("  2,reviewer,reply,reply_to_1,\"plan\","),
+            text.lines().any(|line| line.split_whitespace().take(5).eq([
+                "2",
+                "reviewer",
+                "reply",
+                "reply_to_1",
+                "plan"
+            ])),
             "{text}"
         );
         assert!(
@@ -1347,9 +1429,29 @@ mod tests {
                 run("lint", "fail", Some(1), "warn", false),
             ],
         };
-        assert_eq!(
-            render_check(&summary),
-            "plan: \"format-policy\"\nstate: building\nresult: fail\nchecks[3]{name,result,blocking,ms,detail}:\n  \"diff\",pass,true,5,\"\"\n  \"tests\",fail,true,5,\"exit 1: 3 failed left == right\"\n  \"lint\",fail,false,5,\"exit 1: warn\"\nhelp[2]:\n  Fix the blocking failures, then run `yoke plan check format-policy --agent <claude|codex>` again\n  Run `yoke plan status format-policy --json` for each check's full output\n"
+        let checked = render_check(&summary);
+        assert!(
+            checked
+                .starts_with("plan: \"format-policy\"\nstate: building\nresult: fail\nchecks: 3\n"),
+            "{checked}"
+        );
+        for row in [
+            "NAME RESULT BLOCKING MS DETAIL",
+            "diff pass true 5 -",
+            "tests fail true 5 exit 1: 3 failed left == right",
+            "lint fail false 5 exit 1: warn",
+        ] {
+            assert!(
+                checked
+                    .lines()
+                    .any(|line| line.split_whitespace().collect::<Vec<_>>().join(" ") == row),
+                "{row}: {checked}"
+            );
+        }
+        assert!(
+            checked.contains("Fix the blocking failures")
+                && checked.contains("--json` for each check's full output"),
+            "{checked}"
         );
         summary.passed = true;
         summary.plan.state = "done".into();

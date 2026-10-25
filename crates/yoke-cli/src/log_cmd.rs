@@ -8,9 +8,9 @@ use yoke_core::store::{DecisionFilter, DecisionRecord, Store};
 use yoke_core::{config, timefmt, trust};
 
 use crate::commands::{home, open_store, quote};
+use crate::table;
 
 const OUTCOMES: [&str; 5] = ["allow", "deny", "would_deny", "rewrite", "error"];
-const DETAIL_WIDTH: usize = 120;
 /// Tool input fields that say what a tool call acted on, most specific first.
 const TOOL_TARGETS: [&str; 5] = ["command", "cmd", "file_path", "path", "notebook_path"];
 
@@ -79,30 +79,37 @@ pub fn run(args: Args) -> Result<()> {
     }
     // Rows from several projects are told apart; a single project would only repeat itself.
     let projects = records.iter().any(|row| row.project != records[0].project);
-    let columns = if projects {
-        "time,agent,session,project,event,tool,outcome,gate,detail"
-    } else {
-        "time,agent,session,event,tool,outcome,gate,detail"
-    };
-    println!("decisions[{}]{{{columns}}}:", records.len());
+    let mut columns = vec![("TIME", 19, 19), ("AGENT", 6, 6), ("SESSION", 7, 16)];
+    if projects {
+        columns.push(("PROJECT", 7, 24));
+    }
+    columns.extend([
+        ("EVENT", 5, 18),
+        ("TOOL", 4, 12),
+        ("OUTCOME", 10, 10),
+        ("GATE", 4, 20),
+        ("DETAIL", 24, 180),
+    ]);
+    let mut rows = Vec::new();
     for row in &records {
         let mut fields = vec![
-            quote(&timefmt::local_time_secs(row.ts)),
-            quote(&row.agent),
-            quote(&row.session_id),
+            timefmt::local_time_secs(row.ts),
+            row.agent.clone(),
+            row.session_id.clone(),
         ];
         if projects {
-            fields.push(quote(&row.project));
+            fields.push(row.project.clone());
         }
         fields.extend([
-            quote(&row.event),
-            quote(row.tool.as_deref().unwrap_or("")),
-            quote(&row.outcome),
-            quote(&gate_names(row)),
-            quote(&detail(row)),
+            row.event.clone(),
+            row.tool.clone().unwrap_or_default(),
+            row.outcome.clone(),
+            gate_names(row),
+            detail(row),
         ]);
-        println!("  {}", fields.join(","));
+        rows.push(fields);
     }
+    print!("{}", table::render("decisions", &columns, &rows));
     println!(
         "help: {}",
         quote(&help(&store, &scope, &args, records.len()))
@@ -205,7 +212,7 @@ fn gate_names(row: &DecisionRecord) -> String {
         .join("+")
 }
 
-/// What the tool acted on, then the reason when there is one, on a single short line.
+/// Put failures first so a long command cannot hide the reason in a bounded preview.
 fn detail(row: &DecisionRecord) -> String {
     let target = serde_json::from_str::<Value>(&row.payload)
         .ok()
@@ -217,17 +224,9 @@ fn detail(row: &DecisionRecord) -> String {
         .unwrap_or_default();
     let reason = row.reason.as_deref().unwrap_or("");
     let text = match (target.is_empty(), reason.is_empty()) {
-        (false, false) => format!("{target} - {reason}"),
+        (false, false) => format!("{reason} - {target}"),
         (false, true) => target,
         (true, _) => reason.to_owned(),
     };
-    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if line.chars().count() > DETAIL_WIDTH {
-        format!(
-            "{}...",
-            line.chars().take(DETAIL_WIDTH - 3).collect::<String>()
-        )
-    } else {
-        line
-    }
+    text
 }

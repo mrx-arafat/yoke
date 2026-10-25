@@ -78,7 +78,10 @@ pub fn run(command: Option<NotificationsCommand>, unread: bool, json: bool) -> R
         if json {
             println!("[]");
         } else {
-            println!("notifications[0]{{id,state,kind,count,last_seen,title,next,doc}}:\nunread: 0\nhelp: \"No Yoke state exists yet; the first hook event creates it.\"");
+            print!("{}", crate::table::render("notifications", &[], &[]));
+            println!(
+                "unread: 0\nhelp: \"No Yoke state exists yet; the first hook event creates it.\""
+            );
         }
         return Ok(());
     };
@@ -107,21 +110,42 @@ pub fn run(command: Option<NotificationsCommand>, unread: bool, json: bool) -> R
         }
         return Ok(());
     }
-    println!(
-        "notifications[{}]{{id,state,kind,count,last_seen,title,next,doc}}:",
-        rows.len()
+    let records = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.id.to_string(),
+                row.state.clone(),
+                row.kind.clone(),
+                row.count.to_string(),
+                yoke_core::timefmt::local_time_secs(row.last_seen),
+                row.title.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    print!(
+        "{}",
+        crate::table::render(
+            "notifications",
+            &[
+                ("ID", 2, 8),
+                ("STATE", 6, 12),
+                ("KIND", 4, 24),
+                ("COUNT", 5, 8),
+                ("LAST SEEN", 19, 19),
+                ("TITLE", 5, 180)
+            ],
+            &records
+        )
     );
-    for row in &rows {
-        println!(
-            "  {},{},{},{},{},{},{},{}",
-            row.id,
-            quote(&row.state),
-            quote(&row.kind),
-            row.count,
-            quote(&yoke_core::timefmt::local_time(row.last_seen)),
-            quote(&row.title),
-            quote(&next_command(row)),
-            quote(notifications::help_for(&row.kind).doc)
+    if !rows.is_empty() {
+        let steps = rows
+            .iter()
+            .map(|row| vec![row.id.to_string(), next_command(row)])
+            .collect::<Vec<_>>();
+        print!(
+            "{}",
+            crate::table::render("next steps", &[("ID", 2, 8), ("COMMAND", 7, 180)], &steps)
         );
     }
     println!(
@@ -131,7 +155,7 @@ pub fn run(command: Option<NotificationsCommand>, unread: bool, json: bool) -> R
     if pending {
         println!("pending: true\nhelp: {}", quote(PENDING));
     } else {
-        println!("help: \"Acknowledge from your own terminal with yoke notifications ack <id|all>; add --json for full records.\"");
+        println!("help: \"Acknowledge from your own terminal with yoke notifications ack <id|all>; add --json for full records and recovery documentation links. Times are local.\"");
     }
     Ok(())
 }

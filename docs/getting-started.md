@@ -157,6 +157,8 @@ yoke log --outcome would_deny --limit 5
 
 This sends a simulated payload; it does not execute Git.
 Observe mode produces no hook output, and the decision log should contain `would_deny` when the trusted starter gate matches.
+Record listings use aligned tables, or labeled records on narrow terminals.
+An ellipsis marks shortened values; use `yoke log --json` for complete reasons, commands and session ids.
 If it does not, inspect [troubleshooting](troubleshooting.md).
 `yoke log` lists the project you run it in; add `--all` to see every project.
 An empty `would_deny` listing says when the project has no trusted gate, so no gate has run.
