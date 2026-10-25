@@ -106,8 +106,17 @@ fn plan_new_outside_git_tells_the_user_to_initialize_git() {
     ));
     assert!(output.contains("git init"), "{output}");
     let listed = text(&run(temp.path(), temp.path(), &["plan", "list"]));
-    assert!(listed.contains("{slug,state,session,file}"), "{listed}");
-    assert!(listed.contains(",none,"), "{listed}");
+    for expected in [
+        "SLUG",
+        "STATE",
+        "SESSION",
+        "FILE",
+        "first-plan",
+        "draft",
+        "none",
+    ] {
+        assert!(listed.contains(expected), "missing {expected}: {listed}");
+    }
     let detail = text(&run(
         temp.path(),
         temp.path(),
@@ -167,7 +176,7 @@ fn plan_new_outside_git_tells_the_user_to_initialize_git() {
         .unwrap();
     yoke_core::plan::start(&store, &project, "first-plan", "bound-session").unwrap();
     let listed = text(&run(temp.path(), &project, &["plan", "list"]));
-    assert!(listed.contains(",\"bound-session\","), "{listed}");
+    assert!(listed.contains("bound-session"), "{listed}");
     let detail = text(&run(
         temp.path(),
         &project,

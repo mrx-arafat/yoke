@@ -320,7 +320,7 @@ fn gates_inspection_exposes_trusted_commands_and_execution_settings() {
         "finish",
         "DATABASE_URL",
         "SERVICE_TOKEN",
-        "changed after it was trusted",
+        "changed or is missing after it was trusted",
         "yoke log --json",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
