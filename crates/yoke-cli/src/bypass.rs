@@ -208,7 +208,18 @@ fn read_settings(path: &Path) -> Option<Value> {
     if !metadata.is_file() || metadata.len() > MAX_SETTINGS_BYTES {
         return None;
     }
-    serde_json::from_reader(file).ok()
+    read_settings_content(file)
+}
+
+fn read_settings_content(file: impl Read) -> Option<Value> {
+    let mut bytes = Vec::new();
+    file.take(MAX_SETTINGS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_SETTINGS_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// What the statusline can see now without the health cache: a pause, a `YOKE_OFF` in this
@@ -458,6 +469,30 @@ pub fn pause(duration: Option<String>, clear: bool) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn settings_growth_after_the_size_check_is_bounded() {
+        use std::io::Seek;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        for size in [MAX_SETTINGS_BYTES, MAX_SETTINGS_BYTES + 2] {
+            fs::write(&path, "{}").unwrap();
+            let mut file = fs::File::open(&path).unwrap();
+            assert_eq!(file.metadata().unwrap().len(), 2);
+            // Append after the metadata snapshot, before the opened file is read.
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(&vec![b' '; size as usize - 2])
+                .unwrap();
+            assert_eq!(
+                read_settings_content(&mut file).is_some(),
+                size == MAX_SETTINGS_BYTES
+            );
+            assert!(file.stream_position().unwrap() <= MAX_SETTINGS_BYTES + 1);
+        }
+    }
 
     #[test]
     fn bypass_controls_reject_links_public_files_and_oversized_content() {

@@ -123,7 +123,9 @@ Sandbox prerequisites are described in the [Codex documentation](https://develop
 
 ## A hook error blocked work
 
-When a Yoke hook fails in enforce mode, or when the mode cannot be read, Yoke fails closed and denies blocking events instead of allowing them.
+Hook failures deny blocking events in enforce mode.
+If state cannot be read, a usable record of the project's [last known observe mode](#the-record-of-the-last-known-mode) allows the call with a warning; otherwise an unknown mode is treated as enforce.
+Observe mode blocks nothing.
 The redacted reason is stored as an `error` decision, or appended to `~/.yoke/error.log` when the database cannot be written.
 Read recent errors with `yoke log --outcome error --limit 10`.
 If the cause is storage, see [Storage failures block work](#storage-failures-block-work).

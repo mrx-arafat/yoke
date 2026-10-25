@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -13,12 +14,16 @@ use yoke_core::engine::execute_bounded;
 const STATUS_CAP: usize = 4 * 1024 * 1024;
 
 fn read_capped(path: &Path, cap: u64) -> Option<String> {
-    let mut text = String::new();
-    fs::File::open(path)
-        .ok()?
-        .take(cap)
-        .read_to_string(&mut text)
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
         .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(cap).read_to_string(&mut text).ok()?;
     Some(text)
 }
 
@@ -107,6 +112,17 @@ fn count_entries(stdout: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_metadata_links_are_not_read() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::create_dir(repo.path().join(".git")).unwrap();
+        let target = repo.path().join("target");
+        fs::write(&target, "ref: refs/heads/forged\n").unwrap();
+        std::os::unix::fs::symlink(&target, repo.path().join(".git/HEAD")).unwrap();
+        assert_eq!(branch(repo.path()), None);
+        assert_eq!(read_capped(Path::new("/dev/null"), 32), None);
+    }
 
     #[test]
     fn reads_branch_detached_head_and_worktree_gitdir_files() {

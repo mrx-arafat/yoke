@@ -5,6 +5,7 @@
 //!
 //! Git runs only in the session's own directory, never with a repository path from elsewhere.
 
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -33,12 +34,16 @@ struct Repo {
 
 fn read_small(path: &Path, limit: u64) -> Option<String> {
     use std::io::Read;
-    let mut text = String::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(limit)
-        .read_to_string(&mut text)
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
         .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(limit).read_to_string(&mut text).ok()?;
     Some(text)
 }
 
@@ -47,11 +52,14 @@ fn read_small(path: &Path, limit: u64) -> Option<String> {
 fn find(start: &Path) -> Option<Repo> {
     for directory in start.ancestors().take(LEVELS) {
         let dot = directory.join(".git");
-        let Ok(meta) = std::fs::metadata(&dot) else {
+        let Ok(meta) = std::fs::symlink_metadata(&dot) else {
             continue;
         };
         if meta.is_dir() {
             return Some(Repo { git_dir: dot });
+        }
+        if !meta.is_file() {
+            return None;
         }
         let text = read_small(&dot, 4096)?;
         let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
@@ -173,6 +181,29 @@ mod tests {
             started,
             value,
         }
+    }
+
+    #[test]
+    fn git_metadata_links_are_not_read() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let metadata = root.path().join("metadata");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir(&metadata).unwrap();
+        std::fs::write(metadata.join("HEAD"), "ref: refs/heads/forged\n").unwrap();
+        symlink(metadata.join("HEAD"), repo.join(".git/HEAD")).unwrap();
+        assert_eq!(head(&repo.join(".git")), None);
+        std::fs::remove_file(repo.join(".git/HEAD")).unwrap();
+        std::fs::remove_dir(repo.join(".git")).unwrap();
+        symlink(&metadata, repo.join(".git")).unwrap();
+        assert!(find(&repo).is_none());
+        std::fs::remove_file(repo.join(".git")).unwrap();
+        let pointer = root.path().join("pointer");
+        std::fs::write(&pointer, format!("gitdir: {}\n", metadata.display())).unwrap();
+        symlink(&pointer, repo.join(".git")).unwrap();
+        assert!(find(&repo).is_none());
+        assert_eq!(read_small(Path::new("/dev/null"), 32), None);
     }
 
     #[test]

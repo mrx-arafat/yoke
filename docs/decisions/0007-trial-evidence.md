@@ -33,4 +33,6 @@ Synthetic soak runs (`crates/yoke-cli/tests/soak.rs`) find defects and measure l
 
 A trial day with fewer than 6 active hours does not count, even when work was real.
 Plan incidents cannot be attributed to one agent, because plans belong to a project.
-Background update and job workers write error.log lines without a timestamp (`crates/yoke-cli/src/hook.rs:466`, `crates/yoke-cli/src/jobs.rs:104`), so the report cannot place them in a window and lists them with time `unknown`.
+Background update and job workers route Yoke diagnostics through `hook::diagnostic` and `append_error`, which prefix each line with a Unix timestamp (`crates/yoke-cli/src/hook.rs`, `crates/yoke-cli/src/jobs.rs`).
+The report can place these entries in its time window.
+Entries without a parseable timestamp, including legacy or fallback stderr lines, still appear with time `unknown`.

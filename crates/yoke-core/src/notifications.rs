@@ -237,8 +237,8 @@ pub const HELP: &[HelpTopic] = &[
     },
     HelpTopic {
         id: "hook-error",
-        title: "A hook error blocked work",
-        summary: "When a Yoke hook fails in enforce mode, or when the mode cannot be read, Yoke fails closed and denies blocking events instead of allowing them. The redacted reason is stored as an error decision, or appended to ~/.yoke/error.log when the database cannot be written.",
+        title: "A hook failed",
+        summary: "Hook failures deny blocking events in enforce mode. If state cannot be read, a usable record of the project's last known observe mode allows the call with a warning; otherwise an unknown mode is treated as enforce. Observe mode blocks nothing. The redacted reason is stored as an error decision, or appended to ~/.yoke/error.log when the database cannot be written.",
         steps: &[
             "Read the recent errors.",
             "Check free disk space and permissions for ~/.yoke. Never delete state.db or its WAL files.",

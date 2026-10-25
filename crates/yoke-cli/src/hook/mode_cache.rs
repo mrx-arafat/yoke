@@ -81,7 +81,7 @@ fn load(home: &Path) -> Result<Option<Vec<Entry>>, &'static str> {
     options
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    let mut file = match options.open(path(home)) {
+    let file = match options.open(path(home)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
@@ -100,9 +100,17 @@ fn load(home: &Path) -> Result<Option<Vec<Entry>>, &'static str> {
     if metadata.len() > MAX_BYTES {
         return Err("it is too large");
     }
+    read_entries(home, file).map(Some)
+}
+
+fn read_entries(home: &Path, file: impl Read) -> Result<Vec<Entry>, &'static str> {
     let mut text = String::new();
-    file.read_to_string(&mut text)
+    file.take(MAX_BYTES + 1)
+        .read_to_string(&mut text)
         .map_err(|_| "it is not valid text")?;
+    if text.len() as u64 > MAX_BYTES {
+        return Err("it is too large");
+    }
     let mut entries = Vec::new();
     for line in text.lines() {
         let rest = line.strip_prefix(TAG).ok_or("a line is malformed")?;
@@ -124,7 +132,7 @@ fn load(home: &Path) -> Result<Option<Vec<Entry>>, &'static str> {
             stamp,
         });
     }
-    Ok(Some(entries))
+    Ok(entries)
 }
 
 pub(super) fn recall(home: &Path, key: &str) -> Recall {
@@ -209,6 +217,34 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir(home.path().join(".yoke")).unwrap();
         home
+    }
+
+    #[test]
+    fn cache_growth_after_the_size_check_is_bounded() {
+        use std::io::Seek;
+        let home = home();
+        remember(home.path(), "aaa", Mode::Observe, 100);
+        let original = std::fs::read_to_string(path(home.path())).unwrap();
+        let original = original.trim_end();
+        for size in [MAX_BYTES, MAX_BYTES + 2] {
+            std::fs::write(path(home.path()), original).unwrap();
+            let mut file = std::fs::File::open(path(home.path())).unwrap();
+            assert!(file.metadata().unwrap().len() < MAX_BYTES);
+            // Trailing spaces keep the authenticated entry valid while the file grows.
+            OpenOptions::new()
+                .append(true)
+                .open(path(home.path()))
+                .unwrap()
+                .write_all(&vec![b' '; size as usize - original.len()])
+                .unwrap();
+            let entries = read_entries(home.path(), &mut file);
+            assert!(file.stream_position().unwrap() <= MAX_BYTES + 1);
+            if size == MAX_BYTES {
+                assert_eq!(entries.unwrap()[0].mode, Mode::Observe);
+            } else {
+                assert_eq!(entries, Err("it is too large"));
+            }
+        }
     }
 
     #[test]
