@@ -5,7 +5,7 @@ For the complete reference, see [docs/user-guide.md](docs/user-guide.md) (the lo
 
 ## What Yoke is, in one paragraph
 
-Yoke is a small program that watches what your AI coding agent (Claude Code or Codex) is about to do, checks it against rules you wrote and approved, and records what happened. In **observe mode** it only watches and logs. In **enforce mode** it can actually block an action and tell the agent why. It has no server, no account, and no background process: it's one executable and one SQLite file on your machine, invoked by the agent's own hook system each time something happens.
+Yoke is a small program that watches what your AI coding agent (Claude Code or Codex) is about to do, checks it against rules you wrote and approved, and records what happened. In **observe mode** it only watches and logs. In **enforce mode** it can actually block an action and tell the agent why. It has no server, no account, and no persistent daemon: it's one executable and one SQLite file on your machine, invoked by the agent's own hook system each time something happens. (A few commands, like `update` and `job`, launch a short-lived bounded worker; nothing runs continuously in the background.)
 
 ## Why it exists
 
@@ -74,9 +74,11 @@ This adds hook entries to Claude Code's and Codex's own settings, pointing them 
 
 **4. Watch it work, in observe mode first.**
 
-Ask your agent to do something like `git push --force` to a branch (or try it yourself in a tool call that mimics one). Nothing gets blocked yet, but check what Yoke saw:
+Send a simulated event instead of actually force-pushing. Observe mode doesn't block anything, so a real `git push --force` would genuinely push:
 
 ```sh
+printf '%s\n' '{"tool_name":"Bash","tool_input":{"command":"git push --force"}}' |
+  yoke run-hook --agent claude pre_tool_use
 yoke log --limit 5
 ```
 
