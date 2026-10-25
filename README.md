@@ -176,10 +176,13 @@ $ echo '{"tool_name":"Bash","tool_input":{"command":"git push --force origin mai
 
 $ yoke log --outcome deny --limit 1
 project: "/path/to/project"
-decisions[1]{time,agent,session,event,tool,outcome,gate,detail}:
-  "2026-10-14 08:55:56","claude","5f2a9c1e-0b7d-4c3a-9e55-1d6a7f0c2b48","pre_tool_use","Bash","deny","no-force-push","git push --force origin main - Force push is blocked by Yoke. Push without --force."
+decisions: 1
+  TIME                 AGENT   SESSION  EVENT         TOOL  OUTCOME     GATE           DETAIL
+  2026-10-14 08:55:56  claude  s1       pre_tool_use  Bash  deny        no-force-push  Force push is blocked by Yoke. P…
+  … shortened; full records: --json
 ```
 
+Record listings use aligned tables, with an ellipsis for shortened values; use `--json` for complete records and session ids.
 Only `pre_tool_use`, `user_prompt_submit` and `stop` can block; failures on other events are recorded and the agent continues.
 The sample matcher is an example, not complete protection against every way to spell a force push.
 `yoke preset add git-safety` appends readable deny gates for force pushes, hard resets, forced cleans and `git checkout --` discards, and they apply only after you run `yoke trust`.

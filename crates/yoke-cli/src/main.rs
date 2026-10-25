@@ -16,6 +16,7 @@ mod project;
 mod retention;
 mod starter;
 mod statusline;
+mod table;
 mod trial;
 mod update;
 mod usage_cmd;
@@ -171,7 +172,7 @@ enum Cmd {
         after_help = "Examples:\n  yoke init\n  yoke trust\n\nReview the generated yoke.toml, then run yoke trust in your own interactive terminal.\nCreating the file alone does not activate its policy."
     )]
     Init,
-    /// List effective, trusted gates in this project.
+    /// List effective, trusted gates in this project as an aligned table.
     Gates {
         /// Include commands, matchers, environment allowances and execution defaults.
         #[arg(long, conflicts_with = "json")]
@@ -203,7 +204,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Show the newest decisions of this project, or of every project with --all; optional exact-match filters.
+    /// Show the newest decisions as an aligned table; --all includes every project. Use --json for full records.
     Log {
         /// Only decisions for the project that contains this path; a path outside any project matches as written.
         #[arg(long)]
@@ -276,13 +277,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Inventory Claude Code and Codex extensions read-only; exits 1 when a stale or dangling definition is found.
+    /// Inventory extensions in aligned tables, read-only; exits 1 on stale or dangling definitions. Use --json for full records.
     Extensions {
         /// Print the inventory, drift and every note as JSON, with redacted details.
         #[arg(long)]
         json: bool,
     },
-    /// List actionable notifications for this project, unread first.
+    /// List actionable notifications and next-step commands in aligned tables, unread first.
     Notifications {
         #[command(subcommand)]
         command: Option<notifications::NotificationsCommand>,

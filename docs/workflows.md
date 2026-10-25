@@ -266,7 +266,9 @@ Inspection never runs a gate, and observe mode still executes checks.
 It then reports drift: one name defined at several scopes (with the winner each agent documents), Yoke-managed definitions that no longer match what this executable would install, and hook or MCP commands whose program is missing.
 The command reads files only and never executes or starts anything.
 It never prints values that could hold a secret: commands appear as the program name and an argument count, URLs as scheme and host, and environment variables and headers as names only.
-Text output starts with a summary line and the drift table, then the inventory; `--json` carries every note and symlink target.
+Text output starts with a summary line and aligned drift and inventory tables.
+Origins use `./` for the project and `~/` for the home directory; ellipses mark shortened values.
+`--json` keeps complete origins, every note and symlink target.
 It exits 1 when a Yoke-managed hook is stale or a command is missing, so a script can stop on it; shadowed names are reported with exit 0, since an override is often deliberate.
 It does not distribute or repair configuration; resolve shadowed names by renaming or removing one definition, and repair managed hooks with `yoke uninstall`, then `yoke install`; `yoke install` refuses while a managed hook is edited, with or without `--dry-run`.
 

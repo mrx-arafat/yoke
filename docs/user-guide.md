@@ -156,8 +156,10 @@ The first line says which project (`project: "<path>"`), or `project: all` with 
 
 ```text
 project: "/path/to/project"
-decisions[1]{time,agent,session,event,tool,outcome,gate,detail}:
-  "2026-10-17 23:00:10","claude","<session-id>","pre_tool_use","Bash","deny","no-force-push","git push --force origin main - Force push is blocked by Yoke. Push without --force."
+decisions: 1
+  TIME                 AGENT   SESSION  EVENT         TOOL  OUTCOME     GATE           DETAIL
+  2026-10-17 23:00:10  claude  s1       pre_tool_use  Bash  deny        no-force-push  Force push is blocked by Yoke. P…
+  … shortened; full records: --json
 ```
 
 | Column | Meaning |
@@ -169,13 +171,16 @@ decisions[1]{time,agent,session,event,tool,outcome,gate,detail}:
 | `tool` | The tool the agent used, such as `Bash` |
 | `outcome` | `allow`, `deny`, `would_deny`, `rewrite` or `error` |
 | `gate` | The gates that did more than pass |
-| `detail` | What the tool acted on, then ` - ` and the reason |
+| `detail` | The reason first when present, then ` - ` and what the tool acted on |
 
 `deny` is a block in enforce mode.
 `would_deny` is the same block in observe mode, recorded but not applied.
 `rewrite` means a rewrite gate changed the tool input.
 `error` means a hook failed; read the reason in `detail`.
 
+The aligned tables shorten long fields with an ellipsis; `--json` keeps complete identifiers, paths and text.
+Use the full session id from JSON when starting a plan.
+Set `COLUMNS=160` for wider previews; narrow terminals show labeled records.
 When rows come from more than one project, a `project` column follows `session`.
 Filters you will use most:
 
@@ -535,7 +540,8 @@ Open the printed link unchanged.
 The browser must use `127.0.0.1` and the forwarded port, because the console refuses any other host name as a defense against DNS rebinding.
 See [Console on a remote server](workflows.md#console-on-a-remote-server).
 
-Notifications collect hook errors, observe-mode would-deny summaries, waiting or stalled plans, failed checks, and stale or untrusted configuration, each with the next command.
+Notifications collect hook errors, observe-mode would-deny summaries, waiting or stalled plans, failed checks, and stale or untrusted configuration.
+A summary table lists each notification, and a separate next-steps table maps its id to the recovery command; `--json` includes the full recovery URL in `doc`.
 `yoke notifications` prints the same list for the current project and the global configuration.
 Acknowledging one with `yoke notifications ack <id|all>` is a **your terminal** step, because an agent that acknowledges an alert hides it from you.
 

@@ -11,17 +11,148 @@ use yoke_core::store::{DecisionRecord, Store};
 const T0: i64 = 1_792_144_800;
 
 fn yoke(home: &Path, cwd: &Path, args: &[&str]) -> Output {
+    yoke_width(home, cwd, args, 120)
+}
+
+fn yoke_width(home: &Path, cwd: &Path, args: &[&str], width: usize) -> Output {
     assert!(home.is_dir() && Some(home.to_path_buf()) != std::env::home_dir());
     Command::new(env!("CARGO_BIN_EXE_yoke"))
         .args(args)
         .env("HOME", home)
         // Six hours east of UTC, so local time differs from UTC without needing tzdata.
         .env("TZ", "UTC-6")
+        .env("COLUMNS", width.to_string())
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
         .current_dir(cwd)
         .output()
         .unwrap()
+}
+
+#[test]
+fn log_tables_bound_unicode_and_control_text_without_changing_json() {
+    use unicode_width::UnicodeWidthStr;
+    let home = seeded_home();
+    let store = Store::open(home.path().join(".yoke/state.db")).unwrap();
+    record(
+        &store,
+        4096,
+        (
+            T0 + 180,
+            "claude",
+            "/work/alpha",
+            "pre_tool_use",
+            Some("Bash"),
+        ),
+        (
+            "error",
+            Some(&"界🙂e\u{301}\n\x1b[31m".repeat(50)),
+            json!([]),
+            "{}",
+        ),
+    );
+    let json = |width| {
+        text(&yoke_width(
+            home.path(),
+            home.path(),
+            &["log", "--all", "--json"],
+            width,
+        ))
+    };
+    let before = json(120);
+    for width in [40, 80, 120] {
+        let out = yoke_width(home.path(), home.path(), &["log", "--all"], width);
+        assert!(out.status.success());
+        let shown = text(&out);
+        assert!(!shown.contains('\x1b'), "{shown}");
+        assert!(shown.contains('…') && shown.contains("--json"), "{shown}");
+        assert!(
+            shown
+                .lines()
+                .filter(|line| line.starts_with("  "))
+                .all(|line| line.width() <= width),
+            "{shown}"
+        );
+        if width == 40 {
+            assert!(
+                shown.contains("TIME:") && shown.contains("OUTCOME:"),
+                "{shown}"
+            );
+        }
+        assert_eq!(before, json(width));
+    }
+}
+
+#[test]
+fn gates_align_plain_rows_and_stale_global_policy_names_global_trust() {
+    use yoke_core::trust;
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    let project = home.join("project");
+    fs::create_dir_all(project.join(".git")).unwrap();
+    fs::create_dir(home.join(".yoke")).unwrap();
+    let global = home.join(".yoke/config.toml");
+    fs::write(&global, "mode='observe'\n").unwrap();
+    fs::write(project.join("yoke.toml"), "[[gate]]\nname='no-push'\non='pre_tool_use'\naction='deny'\nmatch_contains='push --force'\n").unwrap();
+    let store = Store::open(home.join(".yoke/state.db")).unwrap();
+    trust::prepare_global(&store, &home)
+        .unwrap()
+        .commit(&store)
+        .unwrap();
+    trust::prepare_project(&store, &project)
+        .unwrap()
+        .commit(&store)
+        .unwrap();
+    fs::write(&global, "mode='enforce'\n").unwrap();
+    let shown = text(&yoke(&home, &project, &["gates"]));
+    assert!(shown.starts_with("gates: 1\n"), "{shown}");
+    assert!(shown.contains("./yoke.toml"), "{shown}");
+    assert!(
+        shown.lines().any(|line| line
+            .split_whitespace()
+            .eq(["NAME", "EVENT", "ACTION", "SOURCE"])),
+        "{shown}"
+    );
+    assert!(
+        shown
+            .lines()
+            .any(|line| line
+                .split_whitespace()
+                .take(3)
+                .eq(["no-push", "pre_tool_use", "deny"])),
+        "{shown}"
+    );
+    for command in ["gates", "config"] {
+        let shown = text(&yoke(&home, &project, &[command]));
+        assert!(
+            shown
+                .lines()
+                .any(|line| line.contains(&global.display().to_string())
+                    && line.contains("trusted bytes")
+                    && line.contains("yoke trust --global")),
+            "{shown}"
+        );
+    }
+    let json: Value =
+        serde_json::from_slice(&yoke(&home, &project, &["gates", "--json"]).stdout).unwrap();
+    assert_eq!(json["gates"][0]["name"], "no-push");
+    assert_eq!(
+        json["gates"][0]["source"],
+        project.join("yoke.toml").to_str().unwrap()
+    );
+    assert!(text(&yoke(&home, &project, &["gates", "--verbose"]))
+        .contains("{name,event,action,source,settings}"));
+    fs::remove_file(global).unwrap();
+    for command in ["gates", "config"] {
+        let shown = text(&yoke(&home, &project, &[command]));
+        assert!(
+            shown
+                .lines()
+                .any(|line| line.contains("restore it first")
+                    && line.contains("yoke trust --global")),
+            "{shown}"
+        );
+    }
 }
 
 fn text(output: &Output) -> String {
@@ -215,24 +346,36 @@ fn a_closed_output_pipe_ends_the_command_quietly() {
 fn log_rows_name_agent_tool_and_command_in_local_time_and_json_flags_cut_payloads() {
     let home = seeded_home();
     let all = text(&yoke(home.path(), home.path(), &["log", "--all"]));
+    assert!(all.starts_with("project: all\ndecisions: 3\n"), "{all}");
     assert!(
-        all.starts_with("project: all\ndecisions[3]{time,agent,session,project,event,tool,outcome,gate,detail}:\n"),
+        all.lines().any(|line| line.split_whitespace().eq([
+            "TIME", "AGENT", "SESSION", "PROJECT", "EVENT", "TOOL", "OUTCOME", "GATE", "DETAIL"
+        ])),
         "{all}"
     );
-    for row in [
-        r#"  "2026-10-16 16:02:00","claude","s1","/work/beta","pre_tool_use","Bash","deny","no-force-push","git push --force - force push blocked""#,
-        r#"  "2026-10-16 16:01:00","codex","s1","/work/alpha","post_tool_use","Bash","allow","","git status second line""#,
-        r#"  "2026-10-16 16:00:00","codex","s1","/work/alpha","stop","","allow","","""#,
+    for (time, agent, outcome) in [
+        ("16:02:00", "claude", "deny"),
+        ("16:01:00", "codex", "allow"),
+        ("16:00:00", "codex", "allow"),
     ] {
-        assert!(all.lines().any(|line| line == row), "{row}\n{all}");
+        assert!(
+            all.lines()
+                .any(|line| line.contains(time) && line.contains(agent) && line.contains(outcome)),
+            "{all}"
+        );
     }
+    assert!(
+        all.contains("force push blocked") && all.contains("git status"),
+        "{all}"
+    );
+    assert!(!all.contains("\",\""), "{all}");
     let one = text(&yoke(
         home.path(),
         home.path(),
         &["log", "--project", "/work/alpha"],
     ));
     assert!(
-        one.starts_with("project: \"/work/alpha\"\ndecisions[2]{time,agent,session,event,tool,outcome,gate,detail}:\n"),
+        one.starts_with("project: \"/work/alpha\"\ndecisions: 2\n"),
         "{one}"
     );
 
@@ -272,7 +415,7 @@ fn log_filters_resolve_the_project_and_say_when_nothing_matches() {
     drop(store);
 
     let dot = text(&yoke(&home, &deep, &["log", "--project", "."]));
-    assert!(dot.contains("\ndecisions[1]"), "{dot}");
+    assert!(dot.contains("\ndecisions: 1"), "{dot}");
 
     let typo = yoke(&home, &home, &["log", "--outcome", "wouldeny"]);
     assert_eq!(typo.status.code(), Some(1));
@@ -287,7 +430,7 @@ fn log_filters_resolve_the_project_and_say_when_nothing_matches() {
     );
 
     let none = text(&yoke(&home, &home, &["log", "--all", "--tool", "bash"]));
-    assert!(none.contains("decisions[0]"), "{none}");
+    assert!(none.contains("decisions: 0"), "{none}");
     assert!(none.contains("case-sensitive"), "{none}");
 }
 
@@ -331,20 +474,17 @@ fn log_defaults_to_the_current_project_and_all_widens_it() {
 
     let here = text(&yoke(&home, &alpha.join("sub"), &["log"]));
     assert!(
-        here.starts_with(&format!(
-            "project: \"{}\"\ndecisions[1]{{time,agent,session,event,tool,outcome,gate,detail}}:\n",
-            alpha.display()
-        )),
+        here.starts_with(&format!("project: \"{}\"\ndecisions: 1\n", alpha.display())),
         "{here}"
     );
     assert!(
-        here.contains("\"session-a\"") && !here.contains("session-b"),
+        here.contains("session-a") && !here.contains("session-b"),
         "{here}"
     );
     assert!(here.contains("yoke log --all"), "{here}");
 
     let all = text(&yoke(&home, &alpha, &["log", "--all"]));
-    assert!(all.starts_with("project: all\ndecisions[2]{"), "{all}");
+    assert!(all.starts_with("project: all\ndecisions: 2\n"), "{all}");
     assert!(
         all.contains("session-a") && all.contains("session-b"),
         "{all}"
@@ -353,7 +493,7 @@ fn log_defaults_to_the_current_project_and_all_widens_it() {
     // A session id names one session, so it is searched everywhere unless a project is given.
     let session = text(&yoke(&home, &alpha, &["log", "--session", "session-b"]));
     assert!(
-        session.contains("\ndecisions[1]") && session.contains("session-b"),
+        session.contains("\ndecisions: 1") && session.contains("session-b"),
         "{session}"
     );
 
@@ -361,7 +501,7 @@ fn log_defaults_to_the_current_project_and_all_widens_it() {
     assert_eq!(conflict.status.code(), Some(2));
 
     let empty = text(&yoke(&home, &home.join("gamma"), &["log"]));
-    assert!(empty.contains("decisions[0]"), "{empty}");
+    assert!(empty.contains("decisions: 0"), "{empty}");
     assert!(
         empty.contains("No decisions recorded for this project yet"),
         "{empty}"
@@ -375,7 +515,7 @@ fn log_would_deny_with_no_rows_says_no_gate_has_run() {
     let gamma = home.join("gamma");
 
     let none = text(&yoke(&home, &gamma, &["log", "--outcome", "would_deny"]));
-    assert!(none.contains("decisions[0]"), "{none}");
+    assert!(none.contains("decisions: 0"), "{none}");
     assert!(
         none.contains("no gate has run") && none.contains("no trusted gates"),
         "{none}"

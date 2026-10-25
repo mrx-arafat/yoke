@@ -382,25 +382,58 @@ fn gates(loaded: &LoadedConfig, verbose: bool, json: bool) -> Result<()> {
             serde_json::to_string(&loaded.config.gate_environment.pass_env)?
         );
     }
-    let columns = if verbose {
-        "name,event,action,source,settings"
-    } else {
-        "name,event,action,source"
-    };
-    println!("gates[{}]{{{columns}}}:", loaded.config.gates.len());
-    for (gate, detail) in loaded.config.gates.iter().zip(details) {
-        println!(
-            "  {},{},{},{}{}",
-            quote(&gate.name),
-            gate.on.as_str(),
-            serde_json::to_string(&gate.action).expect("gate action serializes"),
-            detail["source"],
-            if verbose {
-                format!(",{}", quote(&detail.to_string()))
-            } else {
-                String::new()
-            }
+    if !verbose {
+        let home = home()?;
+        let rows = loaded
+            .config
+            .gates
+            .iter()
+            .zip(&details)
+            .map(|(gate, detail)| {
+                vec![
+                    gate.name.clone(),
+                    gate.on.as_str().into(),
+                    serde_json::to_value(gate.action)
+                        .unwrap_or_default()
+                        .as_str()
+                        .unwrap_or("")
+                        .into(),
+                    crate::table::path(
+                        Path::new(detail["source"].as_str().unwrap_or("default")),
+                        &loaded.project_root,
+                        &home,
+                    ),
+                ]
+            })
+            .collect::<Vec<_>>();
+        print!(
+            "{}",
+            crate::table::render(
+                "gates",
+                &[
+                    ("NAME", 4, 28),
+                    ("EVENT", 5, 20),
+                    ("ACTION", 6, 7),
+                    ("SOURCE", 6, 180)
+                ],
+                &rows
+            )
         );
+    } else {
+        println!(
+            "gates[{}]{{name,event,action,source,settings}}:",
+            loaded.config.gates.len()
+        );
+        for (gate, detail) in loaded.config.gates.iter().zip(details) {
+            println!(
+                "  {},{},{},{},{}",
+                quote(&gate.name),
+                gate.on.as_str(),
+                serde_json::to_string(&gate.action).expect("gate action serializes"),
+                detail["source"],
+                quote(&detail.to_string())
+            );
+        }
     }
     trust_help(loaded);
     println!("help: \"Run yoke gates --verbose for full settings, yoke gates --json for structured inspection, or yoke log --json for recorded reasons, exit codes and timing.\"");
@@ -433,10 +466,20 @@ fn trust_help(loaded: &LoadedConfig) {
         );
     }
     for snapshot in loaded.snapshots.iter().filter(|snapshot| snapshot.stale) {
+        let command = if snapshot.scope == "global" {
+            "yoke trust --global"
+        } else {
+            "yoke trust"
+        };
+        let restore = if snapshot.exists {
+            ""
+        } else {
+            "restore it first, then "
+        };
         println!(
             "help: {}",
             quote(&format!(
-                "{} changed after it was trusted; Yoke keeps using the trusted bytes until you review it and run yoke trust.",
+                "{} changed or is missing after it was trusted; Yoke keeps using the trusted bytes. To approve new bytes, {restore}review it and run {command} in your own terminal.",
                 snapshot.file.display()
             ))
         );
