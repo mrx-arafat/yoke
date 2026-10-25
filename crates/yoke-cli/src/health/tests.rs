@@ -192,6 +192,7 @@ fn mode_policy_freshness_last_event_and_plan_guidance_are_reported_separately() 
     store
         .record_decision(
             &DecisionRecord {
+                policy_hash: None,
                 ts: 5,
                 session_id: "health".into(),
                 agent: "claude".into(),

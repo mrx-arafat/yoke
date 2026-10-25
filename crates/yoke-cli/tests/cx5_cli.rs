@@ -149,6 +149,7 @@ fn plan_new_outside_git_tells_the_user_to_initialize_git() {
     store
         .record_decision(
             &yoke_core::store::DecisionRecord {
+                policy_hash: None,
                 ts: 1,
                 session_id: "bound-session".into(),
                 agent: "codex".into(),

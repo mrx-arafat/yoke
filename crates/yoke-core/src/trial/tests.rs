@@ -15,6 +15,7 @@ fn record(store: &Store, ts: i64, agent: &str, mode: &str, event: &str, outcome:
     store
         .record_decision(
             &DecisionRecord {
+                policy_hash: None,
                 ts,
                 session_id: format!("{agent}-{}", (ts - MONDAY) / DAY),
                 agent: agent.into(),

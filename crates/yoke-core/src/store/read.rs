@@ -67,11 +67,12 @@ impl Store {
         filter: &DecisionFilter,
         before_id: Option<i64>,
     ) -> Result<Vec<DecisionRow>> {
-        let mut statement = self.connection.prepare(
-            "SELECT id,ts,session_id,agent,project,event,tool,mode,outcome,reason,gates,payload FROM decisions
+        let policy = self.decision_policy_column()?;
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT id,ts,session_id,agent,project,event,tool,mode,outcome,reason,gates,payload,{policy} FROM decisions
              WHERE (?1 IS NULL OR project=?1) AND (?2 IS NULL OR session_id=?2)
              AND (?3 IS NULL OR outcome=?3) AND (?4 IS NULL OR tool=?4)
-             AND (?5 IS NULL OR id<?5) ORDER BY id DESC LIMIT ?6")?;
+             AND (?5 IS NULL OR id<?5) ORDER BY id DESC LIMIT ?6"))?;
         let rows = statement.query_map(
             params![
                 filter.project.as_deref().map(redact),
@@ -87,6 +88,7 @@ impl Store {
                     DecisionRow {
                         id: row.get(0)?,
                         record: DecisionRecord {
+                            policy_hash: row.get(12)?,
                             ts: row.get(1)?,
                             session_id: row.get(2)?,
                             agent: row.get(3)?,

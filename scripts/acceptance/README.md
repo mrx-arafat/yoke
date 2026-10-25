@@ -11,11 +11,13 @@ They never read or write the real `~/.yoke`, never run `yoke console`, and never
 
 ## Usage
 
+Repair the CLI-output compatibility blockers listed in the [run sheet](../../docs/console-acceptance.md#known-fixture-blockers) before using this kit.
+
 ```sh
 cargo build --locked -q -p yoke-cli
 sh scripts/acceptance/make-fixtures.sh
 sh scripts/acceptance/finish-fixtures.sh <review-home-printed-above>
-cd <launch-project-printed-above> && HOME=<review-home> ./target/debug/yoke console --no-open
+cd <launch-project-printed-above> && HOME=<review-home> /absolute/path/to/yoke/target/debug/yoke console --no-open
 ```
 
 `make-fixtures.sh --copy-live-db` first copies the live database into the review home with SQLite's read-only backup operation, exactly as [docs/next-steps.md](../../docs/next-steps.md) describes, so real history renders next to the fixtures.

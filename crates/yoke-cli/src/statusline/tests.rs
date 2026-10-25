@@ -43,6 +43,7 @@ fn decision(
     outcome: &str,
 ) -> DecisionRecord {
     DecisionRecord {
+        policy_hash: None,
         ts: NOW - 5,
         session_id: session.into(),
         agent: "claude".into(),

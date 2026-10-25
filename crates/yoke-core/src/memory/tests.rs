@@ -60,6 +60,7 @@ fn notes_facts_context_and_share_follow_project_boundaries() -> Result<()> {
     assert!(get(&store, first.id)?.unwrap().shared);
     assert!(store.list_trust("project", project)?.is_empty());
     let row = DecisionRecord {
+        policy_hash: None,
         ts: 4,
         session_id: "s".into(),
         agent: "codex".into(),
@@ -502,6 +503,7 @@ fn orphaned_sessions_are_idle_sessions_of_the_project_with_pending_facts() -> Re
     let project = directory.path().to_str().unwrap();
     let store = Store::open(directory.path().join("state.db"))?;
     let decision = |session: &str, event: &str, ts: i64| DecisionRecord {
+        policy_hash: None,
         ts,
         session_id: session.into(),
         agent: "claude".into(),
@@ -578,6 +580,7 @@ fn file_write_facts_stay_valid_json_while_secrets_are_masked() -> Result<()> {
     let project = directory.path().to_str().unwrap();
     let store = Store::open(directory.path().join("state.db"))?;
     let row = DecisionRecord {
+        policy_hash: None,
         ts: 1,
         session_id: "s".into(),
         agent: "claude".into(),

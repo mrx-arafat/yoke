@@ -113,7 +113,11 @@ pub(super) fn decisions(
             } else {
                 String::new()
             };
-            body.push_str(&format!(r#"<details class="record"><summary data-row><span class="event-cell"><span class="badge {}">{}</span><strong>{}</strong></span><span><strong>{}</strong><small>{}</small></span><span class="mode">{}</span><time data-time="{}">{}</time><span class="decision-context">{preview}{summary_reason}</span></summary><div class="record-detail"><p class="reason">{}</p><dl class="facts"><dt>Session</dt><dd>{}</dd><dt>Project</dt><dd>{}</dd></dl><details><summary>Gate results</summary><pre><code>{}</code></pre></details><details><summary>Redacted payload</summary><pre><code>{}</code></pre></details></div></details>"#,escape(&r.outcome),escape(&r.outcome.replace('_'," ")),escape(&r.event),escape(&r.agent),escape(r.tool.as_deref().unwrap_or("Lifecycle")),escape(&r.mode),r.ts,r.ts,escape(reason),escape(&r.session_id),escape(&r.project),escape(&serde_json::to_string_pretty(&r.gates)?),escape(&r.payload)));
+            let policy = match &r.policy_hash {
+                Some(hash) => format!(r#"<a data-nav href="{}">View recorded policy</a> <code>{}</code>"#, render::href("policy", &format!("hash={}", encode(hash))), escape(hash)),
+                None => "Policy version was not recorded. Older decisions and unavailable policy cannot be reconstructed.".into(),
+            };
+            body.push_str(&format!(r#"<details class="record"><summary data-row><span class="event-cell"><span class="badge {}">{}</span><strong>{}</strong></span><span><strong>{}</strong><small>{}</small></span><span class="mode">{}</span><time data-time="{}">{}</time><span class="decision-context">{preview}{summary_reason}</span></summary><div class="record-detail"><p class="reason">{}</p><dl class="facts"><dt>Session</dt><dd>{}</dd><dt>Project</dt><dd>{}</dd><dt>Policy</dt><dd>{policy}</dd></dl><details><summary>Gate results</summary><pre><code>{}</code></pre></details><details><summary>Redacted payload</summary><pre><code>{}</code></pre></details></div></details>"#,escape(&r.outcome),escape(&r.outcome.replace('_'," ")),escape(&r.event),escape(&r.agent),escape(r.tool.as_deref().unwrap_or("Lifecycle")),escape(&r.mode),r.ts,r.ts,escape(reason),escape(&r.session_id),escape(&r.project),escape(&serde_json::to_string_pretty(&r.gates)?),escape(&r.payload)));
         }
         body.push_str("</div>");
     }

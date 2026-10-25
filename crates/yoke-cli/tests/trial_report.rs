@@ -28,6 +28,7 @@ fn trial_report_reads_existing_state_and_never_creates_it() {
         store
             .record_decision(
                 &DecisionRecord {
+                    policy_hash: None,
                     ts,
                     session_id: "trial".into(),
                     agent: "codex".into(),

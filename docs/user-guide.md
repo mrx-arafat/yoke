@@ -510,6 +510,12 @@ New activity refreshes the view automatically; while you read an expanded record
 The console catches up after reconnecting, with the same protection for your reading and filters.
 An empty filtered result offers **Clear filters**, which keeps the selected project.
 
+Expanded decisions link to **View recorded policy** when the hook captured a version.
+The historical page shows the loaded trusted config bytes, their hashes, and the effective settings including defaults, even after a later `yoke trust`.
+Older decisions and failed captures say that no policy version was recorded; Yoke does not infer history from current files.
+These archives explain configuration, not historical gate executables or plan state, and never grant trust.
+Archived config text stays in the private state database and is not removed by log retention.
+
 On a remote server, reach the console through an SSH tunnel.
 Start it from the project in an interactive SSH session with `--no-open` and a fixed port:
 

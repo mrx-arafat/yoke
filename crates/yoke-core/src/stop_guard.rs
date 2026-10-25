@@ -479,6 +479,7 @@ mod tests {
 
     fn row() -> DecisionRecord {
         DecisionRecord {
+            policy_hash: None,
             ts: 10,
             session_id: "session".into(),
             agent: "codex".into(),

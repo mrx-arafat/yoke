@@ -67,6 +67,7 @@ fn nofollow_database_opens_preserve_parent_aliases_and_memory_databases() -> Res
 
 fn decision(ts: i64, outcome: &str) -> DecisionRecord {
     DecisionRecord {
+        policy_hash: None,
         ts,
         session_id: "session-one".into(),
         agent: "claude".into(),
@@ -394,7 +395,45 @@ const DOWNS: &[&str] = &[
     include_str!("014-session-anchors.down.sql"),
     include_str!("015-usage-summaries.down.sql"),
     include_str!("016-quota-warnings.down.sql"),
+    include_str!("017-policy-versions.down.sql"),
 ];
+
+#[test]
+fn policy_migration_leaves_existing_decisions_unversioned() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("state.db");
+    let db = Connection::open(&path)?;
+    for sql in MIGRATIONS.iter().take(16) {
+        db.execute_batch(sql)?;
+    }
+    db.pragma_update(None, "user_version", 16)?;
+    db.execute_batch("INSERT INTO sessions(id,agent,project,started_at) VALUES ('old','claude','/old',1);
+        INSERT INTO decisions(ts,session_id,agent,project,event,mode,outcome,gates,payload) VALUES (1,'old','claude','/old','stop','observe','allow','[]','{}');")?;
+    // Reading an old schema must continue to work without migration, too.
+    let reader = Store::open_read_only(&path)?;
+    assert!(reader.decisions(&DecisionFilter::default())?[0]
+        .policy_hash
+        .is_none());
+    assert!(reader.decision_page(&DecisionFilter::default(), None)?[0]
+        .record
+        .policy_hash
+        .is_none());
+    drop(reader);
+    drop(db);
+    let store = Store::open(&path)?;
+    assert!(store.decisions(&DecisionFilter::default())?[0]
+        .policy_hash
+        .is_none());
+    let archives: i64 =
+        store
+            .connection
+            .query_row("SELECT count(*) FROM policy_versions", [], |r| r.get(0))?;
+    assert_eq!(
+        archives, 0,
+        "migration must not guess the policy of old decisions"
+    );
+    Ok(())
+}
 
 #[test]
 fn quota_warning_migration_preserves_acknowledgements_and_rolls_back_only_new_kind() -> Result<()> {
@@ -523,7 +562,10 @@ fn migrations_reverse_only_in_disposable_fixture_and_preserve_core_rows() -> Res
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("rollback-fixture.db");
     let store = Store::open(&path)?;
-    store.record_decision(&decision(10, "allow"), 4096)?;
+    let loaded = crate::config::load_trusted(&store, directory.path(), directory.path())?;
+    let mut row = decision(10, "allow");
+    row.policy_hash = Some(store.record_policy_version(&loaded)?);
+    store.record_decision(&row, 4096)?;
     assert_eq!(
         DOWNS.len(),
         MIGRATIONS.len(),

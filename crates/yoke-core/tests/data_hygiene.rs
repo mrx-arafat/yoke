@@ -89,6 +89,7 @@ fn the_decision_log_keeps_the_size_of_a_tool_response_not_its_content() {
     store
         .record_decision(
             &DecisionRecord {
+                policy_hash: None,
                 ts: 1,
                 session_id: "s".into(),
                 agent: "claude".into(),

@@ -68,6 +68,7 @@ fn prints_one_snapshot_and_exits_0_without_changing_or_creating_state() {
         store
             .record_decision(
                 &DecisionRecord {
+                    policy_hash: None,
                     ts: now - offset,
                     session_id: "s1".into(),
                     agent: "claude".into(),
