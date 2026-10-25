@@ -395,11 +395,12 @@ pub fn run(command: MemoryCommand) -> Result<()> {
             }
             print_import_notes(&report);
             // The real import refuses on conflicts, so a dry run must fail the same way for scripts.
-            ensure!(
-                report.conflicts.is_empty(),
-                "the import would be refused because of {} conflict(s) listed above; no records changed",
-                report.conflicts.len()
-            );
+            if !report.conflicts.is_empty() {
+                return Err(commands::ReportedFailure(format!(
+                    "the import would be refused because of {} conflict(s) listed above; no records changed",
+                    report.conflicts.len()
+                )).into());
+            }
         }
         MemoryCommand::Pin { id, unpin } => {
             ensure!(id > 0, "memory id must be positive");

@@ -71,7 +71,11 @@ pub fn run(command: Option<NotificationsCommand>, unread: bool, json: bool) -> R
         let (store, loaded) =
             open_current()?.context("no notifications: Yoke state does not exist yet")?;
         let changed = notifications::acknowledge(&store, &loaded.project_root, &target, now)?;
-        println!("acknowledged: {changed}");
+        if json {
+            println!("{}", serde_json::json!({"acknowledged": changed}));
+        } else {
+            println!("acknowledged: {changed}");
+        }
         return Ok(());
     }
     let Some((store, loaded)) = open_current()? else {

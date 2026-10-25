@@ -24,7 +24,7 @@ mod workflow;
 
 use std::io::IsTerminal;
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use yoke_core::event::Agent;
 
 #[derive(Parser)]
@@ -337,7 +337,9 @@ fn main() {
         println!("{}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let json = json_requested(&matches);
+    let cli = Cli::from_arg_matches(&matches).expect("parsed CLI matches");
     if let Some(Cmd::RunHook { event, agent }) = &cli.cmd {
         std::process::exit(hook::run(event, (*agent).into()));
     }
@@ -361,20 +363,32 @@ fn main() {
         command => commands::run(command),
     };
     if let Err(error) = result {
+        let message = yoke_core::redact::redact(&format!("{error:#}"));
+        let help = format!("Run {} --help for usage.", command_path(&args));
+        if json {
+            if !error.is::<commands::ReportedFailure>() {
+                println!("{}", serde_json::json!({"error": message, "help": help}));
+            }
+            eprintln!("error: {}", commands::quote(&message));
+            eprintln!("help: {}", commands::quote(&help));
+            std::process::exit(1);
+        }
         // A person at a terminal reads stdout, so the stderr copy is only for logs and pipes.
         if !std::io::stdout().is_terminal() {
             hook::diagnostic(&format!("yoke: {error:#}"));
         }
-        println!(
-            "error: {}",
-            commands::quote(&yoke_core::redact::redact(&format!("{error:#}")))
-        );
-        println!(
-            "help: {}",
-            commands::quote(&format!("Run {} --help for usage.", command_path(&args)))
-        );
+        println!("error: {}", commands::quote(&message));
+        println!("help: {}", commands::quote(&help));
         std::process::exit(1);
     }
+}
+
+/// Inspect parsed flags so a literal `--json` after `--` remains ordinary argument data.
+fn json_requested(matches: &clap::ArgMatches) -> bool {
+    matches.try_get_one::<bool>("json").ok().flatten() == Some(&true)
+        || matches
+            .subcommand()
+            .is_some_and(|(_, sub)| json_requested(sub))
 }
 
 /// `yoke plan new` for `yoke plan new login --title x`: the deepest subcommand the arguments name.
@@ -398,6 +412,35 @@ fn command_path(args: &[std::ffi::OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_mode_comes_from_parsed_flags_including_nested_commands() {
+        for (args, expected) in [
+            (vec!["yoke", "config", "--json"], true),
+            (
+                vec![
+                    "yoke", "plan", "check", "demo", "--agent", "codex", "--json",
+                ],
+                true,
+            ),
+            (
+                vec![
+                    "yoke",
+                    "memory",
+                    "import",
+                    "archive.json",
+                    "--dry-run",
+                    "--json",
+                ],
+                true,
+            ),
+            (vec!["yoke", "remember", "--", "--json"], false),
+            (vec!["yoke", "config"], false),
+        ] {
+            let matches = Cli::command().try_get_matches_from(&args).unwrap();
+            assert_eq!(json_requested(&matches), expected, "{args:?}");
+        }
+    }
 
     #[test]
     fn the_error_help_line_names_the_subcommand_that_failed() {

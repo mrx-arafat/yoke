@@ -58,6 +58,11 @@ The displayed hash and typed `trust` confirmation still approve the captured byt
 | `review.models.claude`, `review.models.codex` | string | Unset | Model Yoke passes to that reviewer CLI (`claude --model`, `codex exec --model`); unset uses the CLI's default |
 | `memory.digest_models.claude`, `memory.digest_models.codex` | string | Unset | Model Yoke passes to the digest CLI; unset uses the CLI's default |
 
+`stop.max_blocks` limits consecutive plan-guard blocks without recorded activity, not total retries over a plan's lifetime.
+The count resets when the working-tree fingerprint changes or a new plan transition or check result is recorded, including failed checks.
+With the default of 5, five unchanged Stops are blocked; the next Stop stalls the plan and lets the agent stop. Observe mode reports the hypothetical block without advancing the counter; a separate gate's denial does not advance this plan counter either.
+This progress-aware design is retained because a hard total ceiling could interrupt legitimate repairs that need several check cycles. Recorded activity does not prove useful progress: repeated failing checks can reset the count indefinitely. Inspect `yoke plan status <slug>` for those loops, and use a supervising runner's time or token budget when total work must be bounded.
+
 Model values are checked when a file is parsed, so `yoke trust` refuses an invalid one: 1 to 128 letters, digits or `. _ : / @ [ ] -`, not starting with `-`, and only `claude` or `codex` keys.
 Yoke cannot check offline whether a model is available to your account.
 It never adds a fallback model, so an unavailable model fails the review or digest with the CLI's error and the review is recorded as failed.

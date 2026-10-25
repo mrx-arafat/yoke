@@ -9,9 +9,11 @@ Without a command, Yoke displays the current mode, project, and trusted gates.
 `yoke --version` prints the package version.
 Angle-bracket values below are placeholders to replace, not literal arguments.
 An execution failure prints `error:` and a `help:` line that names the subcommand that failed, and exits 1.
+With `--json`, those diagnostics go to stderr. A failed command keeps the JSON report it already printed; if execution failed before a report existed, stdout contains one object with `error` and `help` strings.
+For human-only `notifications --json ack <id|all>` and `jobs --json retry <id>`, stdout contains the acknowledgement count or the retried job record.
 Invalid arguments exit 2 and print usage on stderr; help and version requests exit 0.
 Health exits 1 when it reports a failing check; a policy denial uses the agent's hook response rather than the ordinary CLI error format.
-On a terminal that is the only copy; when stdout is not a terminal the message also goes to stderr as `yoke: <message>`.
+In text mode, a terminal gets one copy; when stdout is not a terminal the message also goes to stderr as `yoke: <message>`.
 Piping into a reader that closes early, such as `yoke log | head -1`, ends the command quietly.
 Text output shows times as local `YYYY-MM-DD HH:MM` (`yoke log` adds seconds); `--json` output keeps epoch seconds.
 Plan commands print a compact text view by default, and `--json` prints the full record.
@@ -203,7 +205,7 @@ A repository too slow for that shows its branch alone and is not retried for a m
 | `yoke review [<slug>] --agent claude\|codex [--session <session-id>] [--json]` | Record independent review evidence on a plan that has started; prints the verdict and findings, and `--json` adds the reviewer's raw output |
 
 Every plan command prints a compact text view with the next step, and `--json` prints the full stored record as one JSON value on stdout; `plan start` adds a note on stderr when the mode is observe.
-The human-only commands that ask for confirmation show the plan first as text, and `--json` replaces only the result they print after the confirmation.
+The human-only commands that ask for confirmation show the plan first as text. With `--json`, previews and prompts go to stderr; stdout contains the result, or `{"cancelled":true}` when confirmation is declined. They still require an interactive human terminal.
 `plan check` still exits 1 when a blocking check fails, after printing the rows.
 For `plan ask`, `--session` may replace `--slug` to resolve the active plan.
 Recovering an interrupted `checking` plan preserves its frozen approval even if the file was edited; the next check refuses an edited header until a human re-approves it.
@@ -211,6 +213,7 @@ Recovering an interrupted `checking` plan preserves its frozen approval even if 
 For `review`, provide a slug or `--session`.
 The required `--agent` identifies the building agent, allowing automatic selection of the other reviewer.
 An explicitly configured reviewer must also be the other agent. A plan with `review = false` does not select a reviewer.
+`plan check`, `plan validate` and `review` reject a declared `--agent` that contradicts recognized Claude Code or Codex process markers, including conflicting inherited markers. These mutable environment signals catch inconsistent declarations; their absence does not authenticate a builder or prove the caller is human.
 See [workflows](workflows.md) for the approval and evidence model.
 
 ## Memory and presets

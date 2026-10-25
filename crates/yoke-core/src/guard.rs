@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::event::{AgentEvent, EventKind};
+use crate::event::{Agent, AgentEvent, EventKind};
 
 const HUMAN_ONLY: &str = "this Yoke command is human-only; a human runs it in their own terminal";
 const DATABASE: &str = "agent shell access to state.db is protected";
@@ -1058,17 +1058,28 @@ pub fn agent_process_signal() -> Option<String> {
 }
 
 fn process_signal(get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    process_signals(get).first().map(|(_, key)| (*key).into())
+}
+
+/// All recognized mutable markers, for checking declarations rather than authenticating them.
+/// Returning every marker lets callers reject conflicting inherited agent environments.
+pub fn agent_process_signals() -> Vec<(Agent, &'static str)> {
+    process_signals(|key| std::env::var(key).ok())
+}
+
+fn process_signals(get: impl Fn(&str) -> Option<String>) -> Vec<(Agent, &'static str)> {
+    let mut signals = Vec::new();
     for key in ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"] {
         if get(key).as_deref() == Some("1") {
-            return Some(key.into());
+            signals.push((Agent::Claude, key));
         }
     }
     for key in ["CODEX_THREAD_ID", "CODEX_SESSION_ID"] {
         if get(key).is_some_and(|value| !value.is_empty()) {
-            return Some(key.into());
+            signals.push((Agent::Codex, key));
         }
     }
-    None
+    signals
 }
 
 #[cfg(test)]
@@ -1170,6 +1181,17 @@ mod tests {
         );
         assert_eq!(process_signal(|_| Some(String::new())), None);
         assert_eq!(process_signal(|_| None), None);
+        assert_eq!(
+            process_signals(|key| match key {
+                "CLAUDECODE" => Some("1".into()),
+                "CODEX_THREAD_ID" => Some("private-session".into()),
+                _ => None,
+            }),
+            vec![
+                (Agent::Claude, "CLAUDECODE"),
+                (Agent::Codex, "CODEX_THREAD_ID")
+            ]
+        );
     }
 
     fn shell(command: &str) -> AgentEvent {
