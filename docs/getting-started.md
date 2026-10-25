@@ -100,9 +100,9 @@ yoke init
 
 This creates `yoke.toml` at the project root without overwriting an existing file.
 Run from a subdirectory of a repository, it writes the repository's root file and prints that path, so one project never splits in two.
-The starter uses observe mode, names the project after its root directory, and contains a sample `no-force-push` gate matching the `Bash` tool and the literal text `push --force`.
+The starter uses observe mode, names the project after its root directory, and contains one `no-force-push` gate using the git-safety preset's force-push matcher across `Bash`, `exec_command`, `shell_command` and `shell`.
 A commented `[memory]` block shows where to turn on session digests.
-It is an example matcher, not comprehensive protection against every force-push spelling or tool name.
+It recognizes common force flags and refspecs, including `-f`, `--force-with-lease` and `+main`; aliases, expansions and other programs still need operating-system isolation.
 Inspect and edit the file for your agent's actual payloads before enabling enforcement.
 
 From your own interactive terminal:

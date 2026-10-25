@@ -32,7 +32,7 @@ Check gates show the resolved default shell (`/bin/sh`), timeout, and expected e
 `source` and `expected_exit` are inspection metadata, not configuration fields.
 `--json` includes those settings plus snapshot trust and staleness metadata for scripts; it prints no human help text.
 Both inspect approved snapshots without executing gates, so an edited command appears only after a human trusts it.
-Use `yoke log --json` for recorded failure reasons, gate exit codes and timing; gate stdout is not stored.
+Use `yoke log --json` for recorded failure reasons, gate exit codes and timing, plus output from checks that opt into capture below.
 
 When re-trusting, Yoke shows changed lines with two lines of context and `...` for omitted text.
 Each displayed line is JSON-quoted, including its line ending, so `\r\n`, `\n` and a missing final newline remain distinguishable.
@@ -86,6 +86,7 @@ Each `[[gate]]` defines one gate.
 | `on` | Required | Event name from the table below |
 | `action` | `"check"` | `check`, `deny`, or `rewrite` |
 | `run` | Required for `check` | Shell command; a nonzero exit fails the check |
+| `capture_output` | `false` | Check only: store redacted stdout/stderr tails with each execution's decision; see below |
 | `shell` | `"/bin/sh"` | Check shell, invoked with `-c`; valid only for checks |
 | `timeout` | `30` | Timeout in seconds, at least 1; `yoke trust` refuses check gates whose timeouts on one event add up to more than 530 s for `pre_tool_use` or `stop`, or 20 s for `user_prompt_submit`, so the hook can answer before the agent's own hook timeout |
 | `message` | Optional | Failure reason; otherwise check stderr is used |
@@ -125,6 +126,30 @@ Choose commands suitable for the governed repository.
 Observe mode executes `run` even though it does not block.
 If a check exits with `126` or `127`, Yoke keeps the shell's stderr even when `message` is set and adds recovery hints.
 These statuses usually indicate an unexecutable command or a missing command: inspect `yoke gates --verbose`, check permissions or `PATH`, and run `yoke trust` after editing the policy.
+
+### Retain check diagnostics
+
+Enable capture only for checks whose output you want retained, then run `yoke trust` in your own terminal:
+
+```toml
+[[gate]]
+name = "format-before-stop"
+on = "stop"
+run = "cargo fmt --all -- --check"
+capture_output = true
+message = "Fix formatting, then retry."
+```
+
+`yoke log --json --limit 20` includes an `output` object on each captured gate result, with `stdout`, `stderr`, `stdout_truncated` and `stderr_truncated`.
+The console's existing Gate results detail shows the same data.
+Capture applies to passing, failing and timed-out checks in both modes; it does not change the agent's decision or failure message.
+Each stream retains at most 4 KiB after recognized secrets are redacted and invalid UTF-8 is replaced.
+If a raw stream exceeded its buffer, the leading partial line is omitted before redaction because it may have lost a credential label; a long single line can leave an empty tail with its truncation flag set.
+The streams are separate tails, not an interleaved transcript.
+
+Captured output follows decision-log retention (`log.retention_days`); disabling capture affects future runs, not existing records.
+Capture is off by default and is not permitted on deny or rewrite gates.
+Redaction recognizes supported credential patterns, not arbitrary confidential data; choose check output accordingly.
 
 ## Events and decisions
 

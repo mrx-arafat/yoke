@@ -39,6 +39,17 @@ pub struct GateResult {
     pub result: String,
     pub ms: u64,
     pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<GateOutput>,
+}
+
+/// Opt-in, redacted diagnostic tails. These never affect the gate's decision.
+#[derive(Debug, Clone, Serialize)]
+pub struct GateOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
 
 #[derive(Debug, Default)]
@@ -166,6 +177,25 @@ struct CheckResult {
     reason: Option<String>,
     exit_code: Option<i32>,
     timed_out: bool,
+    output: Option<GateOutput>,
+}
+
+fn captured_stream(bytes: &[u8], truncated: bool) -> (String, bool) {
+    // A cut line may have lost a credential label; omit that fragment before redaction.
+    let bytes = if truncated {
+        &bytes[bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |i| i + 1)..]
+    } else {
+        bytes
+    };
+    let text = crate::redact::redact(&String::from_utf8_lossy(bytes));
+    let mut start = text.len().saturating_sub(OUTPUT_CAP);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    (text[start..].to_owned(), truncated || start > 0)
 }
 
 /// A NUL byte cannot be put in an environment variable and would stop the gate from starting.
@@ -332,6 +362,18 @@ fn run_gate(
         reason,
         exit_code: output.exit_code,
         timed_out: output.timed_out,
+        output: gate.capture_output.then(|| {
+            let (stdout, stdout_truncated) =
+                captured_stream(&output.stdout, output.stdout_truncated);
+            let (stderr, stderr_truncated) =
+                captured_stream(&output.stderr, output.stderr_truncated);
+            GateOutput {
+                stdout,
+                stderr,
+                stdout_truncated,
+                stderr_truncated,
+            }
+        }),
     })
 }
 
@@ -468,6 +510,7 @@ pub fn evaluate_for_agent_with_context(
                             check.reason,
                             kind,
                         );
+                        out.gates.last_mut().expect("record appends a gate").output = check.output;
                     }
                     Err(e) => out.record(
                         &gate.name,
@@ -552,6 +595,7 @@ impl Outcome {
             result: result.into(),
             ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
             exit_code,
+            output: None,
         });
         self.error |= result == "error";
         if let Some(reason) = reason {
@@ -1007,6 +1051,88 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn output_capture_is_opt_in_redacted_and_separate_from_decisions() {
+        let root = tempfile::tempdir().unwrap();
+        for capture in ["", "capture_output=true\n"] {
+            for exit in [0, 1] {
+                let cfg = Config::parse(&format!("[[gate]]\nname='checks'\non='stop'\n{capture}run=\"printf 'report token=stdout-hidden\\n'; printf 'diagnostic password=stderr-hidden\\n' >&2; exit {exit}\"\nmessage='Run checks first.'")).unwrap();
+                let out = evaluate_with_context(
+                    &cfg,
+                    EventKind::Stop,
+                    &AgentEvent::default(),
+                    &context(root.path()),
+                );
+                assert_eq!(out.blocked(), exit != 0);
+                let gate = serde_json::to_value(&out.gates[0]).unwrap();
+                if capture.is_empty() {
+                    assert!(gate.get("output").is_none(), "{gate}");
+                } else {
+                    let output = &gate["output"];
+                    assert_eq!(output["stdout"], "report token=[REDACTED]\n");
+                    assert_eq!(output["stderr"], "diagnostic password=[REDACTED]\n");
+                    assert_eq!(output["stdout_truncated"], false);
+                    assert_eq!(output["stderr_truncated"], false);
+                    assert!(!gate.to_string().contains("hidden"), "{gate}");
+                }
+                assert!(!out.reasons.join(" ").contains("report"));
+            }
+        }
+    }
+
+    #[test]
+    fn captured_output_bounds_unicode_tails_and_omits_cut_secret_labels() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = Config::parse(r#"[[gate]]
+name='checks'
+on='stop'
+capture_output=true
+run="i=0; while [ $i -lt 3000 ]; do printf 'éé\\n'; i=$((i+1)); done; printf 'token=' >&2; i=0; while [ $i -lt 5000 ]; do printf x >&2; i=$((i+1)); done; printf '\\nuseful error\\n' >&2; exit 1"
+"#).unwrap();
+        let out = evaluate_with_context(
+            &cfg,
+            EventKind::Stop,
+            &AgentEvent::default(),
+            &context(root.path()),
+        );
+        let gate = serde_json::to_value(&out.gates[0]).unwrap();
+        let output = &gate["output"];
+        let stdout = output["stdout"].as_str().unwrap();
+        let stderr = output["stderr"].as_str().unwrap();
+        assert!(
+            stdout.len() <= OUTPUT_CAP && stdout.ends_with("éé\n"),
+            "{output}"
+        );
+        assert_eq!(stderr, "useful error\n");
+        assert_eq!(output["stdout_truncated"], true);
+        assert_eq!(output["stderr_truncated"], true);
+
+        // Redaction may expand a stream that fit the raw buffer; cap it afterwards.
+        let raw = format!("{} token=x", "🙂".repeat(1022));
+        assert_eq!(raw.len(), OUTPUT_CAP);
+        let (text, truncated) = captured_stream(raw.as_bytes(), false);
+        assert!(text.len() <= OUTPUT_CAP && text.ends_with("token=[REDACTED]"));
+        assert!(truncated);
+        assert_eq!(captured_stream(b"", false), (String::new(), false));
+        assert_eq!(
+            captured_stream(&vec![b'x'; OUTPUT_CAP], true),
+            (String::new(), true)
+        );
+
+        let cfg = Config::parse("[[gate]]\nname='slow'\non='stop'\ncapture_output=true\ntimeout=1\nrun=\"printf 'before timeout'; sleep 3\"").unwrap();
+        let out = evaluate_with_context(
+            &cfg,
+            EventKind::Stop,
+            &AgentEvent::default(),
+            &context(root.path()),
+        );
+        assert_eq!(out.gates[0].result, "timeout");
+        assert_eq!(
+            serde_json::to_value(&out.gates[0]).unwrap()["output"]["stdout"],
+            "before timeout"
+        );
     }
 
     #[test]

@@ -46,12 +46,14 @@ This writes `yoke.toml` with `mode = "observe"` and one sample gate already in i
 [[gate]]
 name = "no-force-push"
 on = "pre_tool_use"
-match_tool = "Bash"
-match_contains = "push --force"
+match_tool = "Bash|exec_command|shell_command|shell"
+match_pattern = '\bgit(?:\s+(?:-C|-c|--git-dir|--work-tree)\s+[^\s;]+)*\s+push\b[^;\n]*\s(?:--force(?:-with-lease)?(?:[=\s\x22]|$)|-[A-Za-z]*f[A-Za-z]*(?:[\s\x22]|$)|\+[^\s\x22]+)'
 action = "deny"
 message = "Force push is blocked by Yoke. Push without --force."
 ```
 
+It uses the git-safety preset's force-push matcher, covering common force flags and refspecs on both agents' shell tools.
+This is a heuristic, not a shell parser; aliases and expansions can evade it.
 Read it. This file does nothing yet; it's just text on disk.
 
 **2. Approve it (you, not the agent).**

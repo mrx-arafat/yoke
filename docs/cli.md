@@ -83,6 +83,9 @@ Codex hook approval through `/hooks`, that approval's freshness, and Claude poli
 
 ## Decisions and surfaces
 
+Check gates with trusted `capture_output = true` add bounded, redacted stdout/stderr tails to their results in `yoke log --json` and the console's Gate results detail.
+See [retaining check diagnostics](configuration.md#retain-check-diagnostics) for limits and retention.
+
 | Command | Purpose |
 | --- | --- |
 | `yoke log [--all \| --project <path>] [--session <id>] [--outcome <outcome>] [--tool <name>] [--limit <n>] [--json]` | Read the newest decisions of the current project; `--all` reads every project |

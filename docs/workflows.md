@@ -255,6 +255,7 @@ The UI pack supplies commented plan-check templates; replace them with real brow
 
 Use `yoke gates --verbose` to inspect the trusted commands, matchers, shell, timeout, environment allowances and expected exit code before debugging a gate.
 `yoke gates --json` includes snapshot freshness; `yoke log --json` shows recorded reasons and exit codes for actual hook events.
+For check diagnostics, enable `capture_output = true` on that gate and trust the change; the decision log and console Gate results then include bounded, redacted stdout/stderr tails.
 Inspection never runs a gate, and observe mode still executes checks.
 
 ## Extension inventory and drift
@@ -495,6 +496,7 @@ What Yoke writes to disk is private to your user and bounded.
 `~/.yoke` is created with mode 0700, and `state.db`, its `-wal` and `-shm` files, `error.log` and the install backups with 0600 (backup folders 0700), because they hold redacted tool inputs, memories and configuration snapshots.
 An installation made by an older build is tightened the next time Yoke opens its database; if a file cannot be changed, for example because another user owns it, Yoke goes on and does not fail a hook.
 The decision log keeps the size and status flags of a tool's output (`tool_response`), never the output; a shell command's error output keeps its first 200 characters so that a sandbox error stays diagnosable, and a failed tool's `error` text is cut at 256 characters.
+Check gates can independently opt into bounded, redacted stdout/stderr capture with `capture_output = true`; this is off by default and follows decision-log retention.
 Notes you save and facts Yoke records are redacted with the patterns described under Project memory.
 Rows stored by an earlier build keep what they held until retention removes them or you forget them.
 
