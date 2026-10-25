@@ -48,6 +48,7 @@ impl Fixture {
         store
             .record_decision(
                 &DecisionRecord {
+                    policy_hash: None,
                     ts: 1,
                     session_id: "fixture-session".into(),
                     agent: "claude".into(),
@@ -581,6 +582,7 @@ fn record_session(f: &Fixture, id: &str) {
     f.store
         .record_decision(
             &DecisionRecord {
+                policy_hash: None,
                 ts: 2,
                 session_id: id.into(),
                 agent: "codex".into(),
@@ -1062,6 +1064,7 @@ fn plan_binds_a_session_whose_latest_event_is_in_another_project() {
     f.store
         .record_decision(
             &DecisionRecord {
+                policy_hash: None,
                 ts: 3,
                 session_id: "fixture-session".into(),
                 agent: "claude".into(),
@@ -1107,6 +1110,7 @@ fn starting_a_second_plan_names_the_unfinished_one_and_how_to_release_it() {
     f.store
         .record_decision(
             &DecisionRecord {
+                policy_hash: None,
                 ts: 3,
                 session_id: "fixture-session".into(),
                 agent: "claude".into(),

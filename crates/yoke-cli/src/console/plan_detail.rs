@@ -289,6 +289,7 @@ mod tests {
         store
             .record_decision(
                 &DecisionRecord {
+                    policy_hash: None,
                     ts: 1,
                     session_id: "s".into(),
                     agent: "codex".into(),

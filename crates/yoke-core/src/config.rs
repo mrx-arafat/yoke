@@ -237,6 +237,10 @@ fn default_rewrite_field() -> String {
 
 #[derive(Debug, Serialize)]
 pub struct LoadedConfig {
+    /// Exact trusted config rows read while loading; on-disk previews and ignored files
+    /// never enter this list. Kept separate from public config/status serialization.
+    #[serde(skip)]
+    pub policy_sources: Vec<crate::store::TrustRow>,
     pub config: Config,
     pub origins: BTreeMap<String, String>,
     pub project_root: PathBuf,

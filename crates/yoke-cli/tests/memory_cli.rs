@@ -37,6 +37,7 @@ fn run_as_agent(home: &Path, project: &Path, args: &[&str]) -> Output {
     store
         .record_decision(
             &yoke_core::store::DecisionRecord {
+                policy_hash: None,
                 ts: 1,
                 session_id: "memory-cli-agent".into(),
                 agent: "claude".into(),

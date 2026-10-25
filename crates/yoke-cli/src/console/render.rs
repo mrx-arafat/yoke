@@ -60,6 +60,7 @@ pub(super) fn title(page: &str) -> &'static str {
         "plans" => "Plans",
         "memory" => "Memory",
         "trust" => "Trust & config",
+        "policy" => "Historical policy",
         "usage" => "Usage",
         "notifications" => "Notifications",
         "settings" => "Workflow settings",

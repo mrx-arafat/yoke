@@ -131,6 +131,7 @@ fn oversight_fixture(temp: &std::path::Path) -> (Store, Console, String) {
         store
             .record_decision(
                 &DecisionRecord {
+                    policy_hash: None,
                     ts: 1_760_000_000,
                     session_id: session.into(),
                     agent: "claude".into(),
@@ -506,6 +507,75 @@ impl Live {
 }
 
 #[test]
+fn decisions_link_to_escaped_historical_policy_without_reading_current_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut live = Live::new(temp.path());
+    let file = live.c.project.join("yoke.toml");
+    let first = "mode='enforce'\n# <script>alert(1)</script>\n";
+    std::fs::write(&file, first).unwrap();
+    yoke_core::trust::prepare_project(&live.store, &live.c.project)
+        .unwrap()
+        .commit(&live.store)
+        .unwrap();
+    let loaded =
+        yoke_core::config::load_trusted(&live.store, &live.c.project, &live.c.home).unwrap();
+    let hash = live.store.record_policy_version(&loaded).unwrap();
+    let mut row = yoke_core::store::DecisionRecord {
+        policy_hash: None,
+        ts: unix_now(),
+        session_id: "history".into(),
+        agent: "claude".into(),
+        project: live.c.project.to_string_lossy().into_owned(),
+        event: "pre_tool_use".into(),
+        tool: Some("Bash".into()),
+        mode: "enforce".into(),
+        outcome: "deny".into(),
+        reason: Some("Denied by old policy".into()),
+        gates: serde_json::json!([]),
+        payload: "{}".into(),
+    };
+    live.store.record_decision(&row, 4096).unwrap();
+    row.policy_hash = Some(hash.clone());
+    live.store.record_decision(&row, 4096).unwrap();
+    std::fs::write(&file, "mode='observe'\n# new policy\n").unwrap();
+    yoke_core::trust::prepare_project(&live.store, &live.c.project)
+        .unwrap()
+        .commit(&live.store)
+        .unwrap();
+    std::fs::remove_file(&file).unwrap();
+    let base = launch::base(&live.c);
+    let cookie = vec![format!("Cookie: yoke_{}={}", live.port(), live.c.token)];
+    let decisions = live.exchange("GET", &format!("{base}decisions"), &cookie, b"");
+    assert!(
+        decisions.contains(&format!("href=\"policy?hash={hash}\"")),
+        "{decisions}"
+    );
+    assert!(decisions.contains("Policy version was not recorded"));
+    let policy = live.exchange("GET", &format!("{base}policy?hash={hash}"), &cookie, b"");
+    assert!(policy.starts_with("HTTP/1.1 200 "), "{policy}");
+    assert!(policy.contains("Historical policy"));
+    assert!(policy.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(!policy.contains("<script>alert(1)"));
+    assert!(!policy.contains("new policy"));
+    let missing = live.exchange(
+        "GET",
+        &format!("{base}policy?hash={}", "0".repeat(64)),
+        &cookie,
+        b"",
+    );
+    assert!(missing.starts_with("HTTP/1.1 404 "));
+    let invalid = live.exchange(
+        "GET",
+        &format!("{base}policy?hash=../../etc/passwd"),
+        &cookie,
+        b"",
+    );
+    assert!(invalid.starts_with("HTTP/1.1 400 "));
+    let unsigned = live.exchange("GET", &format!("{base}policy?hash={hash}"), &[], b"");
+    assert!(unsigned.starts_with("HTTP/1.1 403 "));
+}
+
+#[test]
 fn serve_rejects_foreign_hosts_traversal_and_unsafe_posts_and_sets_security_headers() {
     let temp = tempfile::tempdir().unwrap();
     let mut live = Live::new(temp.path());
@@ -713,6 +783,7 @@ fn hostile_records_render_escaped_and_secrets_redacted_on_every_page() {
     store
         .record_decision(
             &DecisionRecord {
+                policy_hash: None,
                 ts: now,
                 session_id: CLOSER.into(),
                 agent: "claude".into(),

@@ -314,6 +314,7 @@ mod tests {
             )
             .unwrap();
         let mut row = DecisionRecord {
+            policy_hash: None,
             ts: 1,
             session_id: "s".into(),
             agent: "codex".into(),
@@ -372,6 +373,7 @@ mod tests {
         store
             .record_decision(
                 &DecisionRecord {
+                    policy_hash: None,
                     ts: 1,
                     session_id: "move-session".into(),
                     agent: "codex".into(),

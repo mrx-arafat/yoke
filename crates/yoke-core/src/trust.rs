@@ -192,6 +192,7 @@ fn load_policy(
     let home = canonical_directory(home)?;
     let (policy, ignored) = select_policy(store, anchor, identity, event)?;
     let mut loaded = LoadedConfig {
+        policy_sources: Vec::new(),
         config: Config::default(),
         origins: Config::default_origins(),
         project_root: identity.to_path_buf(),
@@ -208,6 +209,7 @@ fn load_policy(
             let config = Config::parse(&row.content)
                 .with_context(|| format!("invalid trusted snapshot {}", file.display()))?;
             loaded.config.merge_from(config, &file, &mut loaded.origins);
+            loaded.policy_sources.push(row);
         }
     }
     let knowledge_file = policy.join(".yoke/knowledge.md");

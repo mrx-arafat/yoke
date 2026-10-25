@@ -267,6 +267,7 @@ pub fn run(event: &str, agent: Agent) -> i32 {
         cap: 4096,
         persisted: false,
         row: DecisionRecord {
+            policy_hash: None,
             ts: now(),
             session_id: String::new(),
             agent: agent.as_str().into(),
@@ -410,6 +411,7 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
     state.mode = Some(loaded.config.mode);
     publish(state.mode);
     state.row.mode = loaded.config.mode.as_str().into();
+    state.row.policy_hash = archive_policy(store, &home, &loaded);
     state.cap = loaded.config.log.payload_cap;
     let bytes = read_input(&mut state.input_read)?;
     state.row.payload = String::from_utf8_lossy(&bytes).into_owned();
@@ -460,12 +462,16 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
         publish(state.mode);
         state.row.mode = "unknown".into();
     }
+    // If selecting the event policy fails, do not attribute that error to the preliminary
+    // policy loaded before the session anchor and payload directory were known.
+    state.row.policy_hash = None;
     let trust::EventPolicy {
         loaded: policy,
         policy_root,
         ignored,
     } = trust::load_for_event(store, &anchor, &cwd, &home)?;
     loaded = policy;
+    state.row.policy_hash = archive_policy(store, &home, &loaded);
     state.mode = Some(loaded.config.mode);
     publish(state.mode);
     state.row.mode = loaded.config.mode.as_str().into();
@@ -871,6 +877,16 @@ fn ago(seconds: i64) -> String {
         s if s < 3600 => format!("{} min", s / 60),
         s if s < 2 * 86_400 => format!("{} h", s / 3600),
         s => format!("{} days", s / 86_400),
+    }
+}
+
+fn archive_policy(store: &Store, home: &Path, loaded: &config::LoadedConfig) -> Option<String> {
+    match store.record_policy_version(loaded) {
+        Ok(hash) => Some(hash),
+        Err(error) => {
+            warn_advisory(home, "decision policy version was not saved", &error);
+            None
+        }
     }
 }
 

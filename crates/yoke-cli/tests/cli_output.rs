@@ -95,6 +95,7 @@ fn record(
     store
         .record_decision(
             &DecisionRecord {
+                policy_hash: None,
                 ts,
                 session_id: "s1".into(),
                 agent: agent.into(),
@@ -284,6 +285,7 @@ fn two_projects() -> (tempfile::TempDir, std::path::PathBuf) {
         store
             .record_decision(
                 &DecisionRecord {
+                    policy_hash: None,
                     ts: T0,
                     session_id: session.into(),
                     agent: "claude".into(),

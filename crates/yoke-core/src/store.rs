@@ -4,7 +4,7 @@ use std::{os::unix::ffi::OsStrExt, path::Path, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::redact::{hook_payload, redact, redact_value};
@@ -26,8 +26,11 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/014-session-anchors.sql"),
     include_str!("store/015-usage-summaries.sql"),
     include_str!("store/016-quota-warnings.sql"),
+    include_str!("store/017-policy-versions.sql"),
 ];
 
+mod policy;
+pub use policy::PolicyVersion;
 mod read;
 pub use read::{DecisionRow, ProjectSummary, SessionCounts, SessionSummary, StatusSnapshot};
 
@@ -96,7 +99,7 @@ fn check_sidecars(path: &Path) -> Result<()> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TrustRow {
     pub scope: String,
     pub root: String,
@@ -108,6 +111,9 @@ pub struct TrustRow {
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct DecisionRecord {
+    /// Configuration captured by this hook, or None for history predating policy capture
+    /// and calls whose policy could not be read or archived. Never supplied by hook input.
+    pub policy_hash: Option<String>,
     pub ts: i64,
     pub session_id: String,
     pub agent: String,
@@ -329,10 +335,10 @@ impl Store {
             params![session, agent, project, row.ts],
         )?;
         transaction.execute(
-            "INSERT INTO decisions(ts,session_id,agent,project,event,tool,mode,outcome,reason,gates,payload)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT INTO decisions(ts,session_id,agent,project,event,tool,mode,outcome,reason,gates,payload,policy_hash)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![row.ts, session, agent, project, redact(&row.event), row.tool.as_deref().map(redact),
-                row.mode, row.outcome, row.reason.as_deref().map(redact), gates.to_string(), hook_payload(&row.payload, payload_cap)],
+                row.mode, row.outcome, row.reason.as_deref().map(redact), gates.to_string(), hook_payload(&row.payload, payload_cap), row.policy_hash],
         )?;
         if row.event == "session_end" {
             transaction.execute(
@@ -344,6 +350,7 @@ impl Store {
     }
 
     pub fn decisions(&self, filter: &DecisionFilter) -> Result<Vec<DecisionRecord>> {
+        let policy = self.decision_policy_column()?;
         // Only the filters that were given reach SQL. A term like `(?1 IS NULL OR project=?1)`
         // hides the column from the planner, so every filtered read scanned the whole table.
         let mut terms = Vec::new();
@@ -366,7 +373,7 @@ impl Store {
         };
         values.push((filter.limit.min(10_000) as i64).into());
         let mut statement = self.connection.prepare(&format!(
-            "SELECT ts,session_id,agent,project,event,tool,mode,outcome,reason,gates,payload FROM decisions{scope}
+            "SELECT ts,session_id,agent,project,event,tool,mode,outcome,reason,gates,payload,{policy} FROM decisions{scope}
              ORDER BY ts DESC,id DESC LIMIT ?{}",
             values.len()
         ))?;
@@ -374,6 +381,7 @@ impl Store {
             let gates: String = row.get(9)?;
             Ok((
                 DecisionRecord {
+                    policy_hash: row.get(11)?,
                     ts: row.get(0)?,
                     session_id: row.get(1)?,
                     agent: row.get(2)?,
@@ -491,6 +499,15 @@ impl Store {
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
         Ok((version, MIGRATIONS.len()))
+    }
+
+    // Read-only clients may inspect a pre-provenance schema without migrating it.
+    fn decision_policy_column(&self) -> Result<&'static str> {
+        Ok(if self.schema_version()?.0 >= 17 {
+            "policy_hash"
+        } else {
+            "NULL"
+        })
     }
 
     /// Time, event, mode and outcome of the newest decision an agent's hooks recorded.

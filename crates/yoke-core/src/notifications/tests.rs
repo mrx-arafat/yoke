@@ -21,6 +21,7 @@ fn store() -> (tempfile::TempDir, Store) {
 
 fn loaded(project: &str, snapshots: Vec<SnapshotStatus>) -> LoadedConfig {
     LoadedConfig {
+        policy_sources: Vec::new(),
         config: Config::default(),
         origins: Config::default_origins(),
         project_root: PathBuf::from(project),
@@ -31,6 +32,7 @@ fn loaded(project: &str, snapshots: Vec<SnapshotStatus>) -> LoadedConfig {
 
 fn decide(store: &Store, project: &str, ts: i64, outcome: &str, reason: &str) {
     let row = DecisionRecord {
+        policy_hash: None,
         ts,
         session_id: "s1".into(),
         agent: "claude".into(),
@@ -475,6 +477,7 @@ fn large_backlog_drains_in_bounded_calls_with_one_shot_results_and_rowid_ranges(
                 for i in 0..20_000_i64 {
                     let outcome = ["allow", "error", "would_deny", "deny"][(i % 4) as usize];
                     let row = DecisionRecord {
+                        policy_hash: None,
                         ts: 1_000_000 + i,
                         session_id: format!("s{}", i % 7),
                         agent: "codex".into(),
@@ -582,6 +585,7 @@ fn a_writer_with_no_busy_timeout_gets_the_lock_between_windows() {
         .transaction(|tx| {
             for i in 0..5_000_i64 {
                 let row = DecisionRecord {
+                    policy_hash: None,
                     ts: 1_000_000 + i,
                     session_id: "s".into(),
                     agent: "codex".into(),

@@ -109,6 +109,93 @@ fn isolated_command(bin: &Path, home: &Path) -> Command {
 fn payload() -> Value {
     json!({"session_id":"fixture-session","tool_name":"Bash","tool_input":{"command":"echo test","token":"private-token-value"}})
 }
+
+#[test]
+fn hook_records_the_loaded_policy_across_retrust_and_untrusted_disk_changes() {
+    let f = Fixture::new();
+    let first = "mode='enforce'\n[log]\npayload_cap=32\n[[gate]]\nname='first-policy'\non='pre_tool_use'\naction='deny'\nmatch_contains='echo test'\nmessage='First policy denied this command'\n";
+    f.snapshot(first);
+    let mut input = payload();
+    input["policy_hash"] = json!("f".repeat(64));
+    let output = f.hook("claude", "PreToolUse", input);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("First policy denied"));
+    let db = rusqlite::Connection::open(f.home.join(".yoke/state.db")).unwrap();
+    let hash: String = db
+        .query_row(
+            "SELECT policy_hash FROM decisions ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let content: String = db
+        .query_row(
+            "SELECT content FROM policy_versions WHERE sha256=?1",
+            [&hash],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let archived: Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(archived["sources"][0]["content"], first);
+    assert_eq!(archived["config"]["mode"], "enforce");
+    f.snapshot("mode='observe'\n");
+    // Disk content that was not trusted cannot become the next decision's policy.
+    fs::write(f.project.join("yoke.toml"), first).unwrap();
+    assert!(f.hook("codex", "PreToolUse", payload()).status.success());
+    let next: String = db
+        .query_row(
+            "SELECT policy_hash FROM decisions ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_ne!(next, hash);
+    let still_archived: String = db
+        .query_row(
+            "SELECT content FROM policy_versions WHERE sha256=?1",
+            [&hash],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(still_archived, content);
+    assert_ne!(hash, "f".repeat(64), "hook input cannot forge provenance");
+    // The preliminary policy is enough to attribute malformed-input errors; a normal
+    // Stop uses the same stamp through its atomic guard/decision transaction.
+    success(&f.run(&["run-hook", "--agent", "claude", "PreToolUse"], "{"));
+    let error = f
+        .store()
+        .decisions(&DecisionFilter::default())
+        .unwrap()
+        .remove(0);
+    assert_eq!(error.outcome, "error");
+    assert_eq!(error.policy_hash.as_deref(), Some(next.as_str()));
+    success(&f.hook("codex", "Stop", json!({"session_id":"policy-stop"})));
+    let stop = f
+        .store()
+        .decisions(&DecisionFilter::default())
+        .unwrap()
+        .remove(0);
+    assert_eq!(stop.event, "stop");
+    assert_eq!(stop.policy_hash.as_deref(), Some(next.as_str()));
+}
+
+#[test]
+fn policy_archive_failure_preserves_the_gate_outcome_and_marks_provenance_missing() {
+    let f = Fixture::new();
+    f.snapshot("mode='enforce'\n[[gate]]\nname='deny'\non='pre_tool_use'\naction='deny'\nmessage='policy says no'\n");
+    let db = rusqlite::Connection::open(f.home.join(".yoke/state.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_archive BEFORE INSERT ON policy_versions BEGIN SELECT RAISE(ABORT,'fixture archive unavailable'); END;").unwrap();
+    let output = f.hook("claude", "PreToolUse", payload());
+    success(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("policy says no"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("decision policy version was not saved")
+    );
+    let rows = f.store().decisions(&DecisionFilter::default()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, "deny");
+    assert!(rows[0].policy_hash.is_none());
+}
 /// True while the process runs. A killed orphan that nothing has reaped is a zombie on hosts
 /// whose PID 1 does not reap children (containers), and a zombie is not running.
 fn process_exists(pid: i32) -> bool {
@@ -1745,6 +1832,10 @@ fn a_blocking_hook_answers_itself_before_the_agent_timeout() {
     }
     let log = fs::read_to_string(f.home.join(".yoke/error.log")).unwrap();
     assert_eq!(log.matches("hook evaluation exceeded").count(), 2, "{log}");
+    for row in f.store().decisions(&DecisionFilter::default()).unwrap() {
+        let hash = row.policy_hash.expect("watchdog retains the loaded policy");
+        assert!(f.store().policy_version(&hash).unwrap().is_some());
+    }
 }
 
 #[test]

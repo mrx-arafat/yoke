@@ -26,6 +26,8 @@ mod notifications;
 mod pages;
 #[path = "console/plan_detail.rs"]
 mod plan_detail;
+#[path = "console/policy.rs"]
+mod policy;
 #[path = "console/projects.rs"]
 mod projects;
 #[path = "console/render.rs"]
@@ -59,7 +61,9 @@ impl std::fmt::Display for BadRequest {
 impl std::error::Error for BadRequest {}
 
 fn view_status(error: &anyhow::Error) -> u16 {
-    if error.downcast_ref::<BadRequest>().is_some() {
+    if error.downcast_ref::<policy::MissingVersion>().is_some() {
+        404
+    } else if error.downcast_ref::<BadRequest>().is_some() {
         400
     } else {
         500
@@ -326,7 +330,7 @@ fn serve(
             ),
         },
         "/" | "/decisions" | "/projects" | "/sessions" | "/plans" | "/memory" | "/trust"
-        | "/usage" | "/notifications" | "/settings" => {
+        | "/usage" | "/notifications" | "/settings" | "/policy" => {
             let page = if path == "/" { "decisions" } else { &path[1..] };
             let result = match page {
                 "notifications" => notifications::page(store, console, &params),
@@ -336,6 +340,7 @@ fn serve(
                 "plans" => views::plans(store, console, &params),
                 "memory" => views::memories(store, console, &params),
                 "trust" => views::trust(store, console),
+                "policy" => policy::page(store, console, &params),
                 "usage" => usage::page(store, console, &params),
                 _ => pages::decisions(store, console, &params),
             };

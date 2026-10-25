@@ -256,6 +256,7 @@ fn rows_read_from_the_state_keep_failing_gates_and_a_one_line_target() {
     let row = |reason: Option<&str>, gates, input| DecisionRow {
         id: 1,
         record: DecisionRecord {
+            policy_hash: None,
             ts: NOW,
             session_id: "s1".into(),
             agent: "codex".into(),
@@ -296,6 +297,7 @@ fn the_tally_counts_each_agent_and_session_and_then_reads_only_new_rows() {
         store
             .record_decision(
                 &DecisionRecord {
+                    policy_hash: None,
                     ts,
                     session_id: session.into(),
                     agent: agent.into(),
