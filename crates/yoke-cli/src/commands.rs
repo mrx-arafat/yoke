@@ -11,6 +11,31 @@ use yoke_core::{guard, trust};
 
 use crate::{install, memory, presets, update, workflow, AgentArg, Cmd};
 
+/// A command printed its result before discovering a failing verdict. Keep that result as
+/// the sole stdout value in JSON mode; `main` still prints diagnostics and exits 1.
+#[derive(Debug)]
+pub struct ReportedFailure(pub String);
+
+impl std::fmt::Display for ReportedFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ReportedFailure {}
+
+pub fn verify_building_agent(agent: AgentArg) -> Result<()> {
+    let declared = yoke_core::event::Agent::from(agent);
+    for (detected, signal) in guard::agent_process_signals() {
+        ensure!(
+            declared == detected,
+            "--agent {} conflicts with {signal}, which identifies {}; use the building agent's declaration and a consistent agent environment",
+            declared.as_str(), detected.as_str()
+        );
+    }
+    Ok(())
+}
+
 pub fn quote(value: &str) -> String {
     serde_json::to_string(value).expect("strings serialize")
 }
@@ -131,9 +156,21 @@ pub fn refuse_agent(action: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn confirm(phrase: &str) -> Result<bool> {
-    print!("Type {phrase} to confirm: ");
-    std::io::stdout().flush()?;
+pub fn preview(text: &str, json: bool) {
+    if json {
+        eprint!("{text}");
+    } else {
+        print!("{text}");
+    }
+}
+
+pub fn confirm(phrase: &str, json: bool) -> Result<bool> {
+    preview(&format!("Type {phrase} to confirm: "), json);
+    if json {
+        std::io::stderr().flush()?;
+    } else {
+        std::io::stdout().flush()?;
+    }
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
     Ok(answer.trim() == phrase)
@@ -520,7 +557,7 @@ fn trust(global: bool) -> Result<()> {
         }
     }
     println!("Trust these exact snapshots?");
-    if !confirm("trust")? {
+    if !confirm("trust", false)? {
         println!("trust: cancelled");
         return Ok(());
     }

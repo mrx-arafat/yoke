@@ -107,6 +107,8 @@ Changing the approved contract requires fresh human approval.
 Set `review = true` to require independent review.
 With `review.reviewer = "auto"`, Yoke selects the agent other than the building agent named by `--agent`.
 An explicit reviewer must also differ from the building agent; selecting the same agent is refused by `plan validate`, required review in `plan check`, and `review`.
+Before running checks or launching a reviewer, these commands compare `--agent` with recognized process markers: `CLAUDECODE=1`, `CLAUDE_CODE_CHILD_SESSION=1`, and nonempty `CODEX_THREAD_ID` or `CODEX_SESSION_ID`.
+Every recognized marker must agree; errors name the conflicting variable without printing its value. No markers means the declaration remains usable from a human terminal. Markers can be removed or forged, so this is a consistency check, not agent authentication.
 Plans with `review = false` run their checks without selecting a reviewer.
 The reviewer CLI must be installed and authenticated.
 An optional `[review.models]` table chooses the model Yoke passes to each reviewer CLI; without it the CLI uses its default model, and `plan check`, `review` and `plan validate` all follow the same setting.

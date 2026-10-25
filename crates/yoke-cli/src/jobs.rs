@@ -46,8 +46,12 @@ pub fn run(command: Option<JobsCommand>, all: bool, json: bool) -> Result<()> {
             let store = commands::open_store(&home)?;
             let job = jobs::retry(&store, id, timestamp()?)?;
             spawn_worker(&home)?;
-            println!("id: {}\nstate: {}", job.id, job.state);
-            println!("help: \"A background worker started; run yoke jobs to follow it.\"");
+            if json {
+                println!("{}", serde_json::to_string(&job)?);
+            } else {
+                println!("id: {}\nstate: {}", job.id, job.state);
+                println!("help: \"A background worker started; run yoke jobs to follow it.\"");
+            }
             Ok(())
         }
         Some(JobsCommand::Work) => work(),

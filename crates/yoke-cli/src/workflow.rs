@@ -217,6 +217,9 @@ pub enum TaskCommand {
 
 pub fn run(command: PlanCommand) -> Result<()> {
     match &command {
+        PlanCommand::Check { agent, .. } | PlanCommand::Validate { agent, .. } => {
+            commands::verify_building_agent(*agent)?;
+        }
         PlanCommand::Approve { .. } => commands::require_human("plan approve")?,
         PlanCommand::Accept { .. } => commands::require_human("plan accept")?,
         PlanCommand::Resolve { .. } => commands::require_human("plan resolve")?,
@@ -338,14 +341,17 @@ pub fn run(command: PlanCommand) -> Result<()> {
             let definition = plan::task(&store, project, &slug, &task)?;
             let actor = if definition.owner == plan::Actor::Human {
                 commands::require_human("plan task done")?;
-                println!(
-                    "plan: {}\ntask: {}\ntitle: {}",
-                    commands::quote(&slug),
-                    commands::quote(&task),
-                    commands::quote(&definition.title)
+                commands::preview(
+                    &format!(
+                        "plan: {}\ntask: {}\ntitle: {}\n",
+                        commands::quote(&slug),
+                        commands::quote(&task),
+                        commands::quote(&definition.title)
+                    ),
+                    json,
                 );
-                if !commands::confirm(&format!("done {task}"))? {
-                    println!("task: cancelled");
+                if !commands::confirm(&format!("done {task}"), json)? {
+                    print_cancelled("task: cancelled", json);
                     return Ok(());
                 }
                 plan::Actor::Human
@@ -373,14 +379,17 @@ pub fn run(command: PlanCommand) -> Result<()> {
                 .iter()
                 .find(|item| item.requirement.id == requirement)
                 .with_context(|| format!("plan {slug} has no requirement {requirement:?}"))?;
-            println!(
-                "plan: {}\nrequirement: {}\ntext: {}\nevidence: {}",
-                commands::quote(&slug),
-                commands::quote(&requirement),
-                commands::quote(&item.requirement.text),
-                commands::quote(&evidence)
+            commands::preview(
+                &format!(
+                    "plan: {}\nrequirement: {}\ntext: {}\nevidence: {}\n",
+                    commands::quote(&slug),
+                    commands::quote(&requirement),
+                    commands::quote(&item.requirement.text),
+                    commands::quote(&evidence)
+                ),
+                json,
             );
-            if commands::confirm(&format!("accept {requirement}"))? {
+            if commands::confirm(&format!("accept {requirement}"), json)? {
                 let accepted =
                     plan::accept_requirement(&store, project, &slug, &requirement, &evidence)?;
                 if json {
@@ -389,7 +398,7 @@ pub fn run(command: PlanCommand) -> Result<()> {
                     print!("{}", render_requirement(&slug, &accepted));
                 }
             } else {
-                println!("accept: cancelled");
+                print_cancelled("accept: cancelled", json);
             }
         }
         PlanCommand::Comment {
@@ -447,16 +456,22 @@ pub fn run(command: PlanCommand) -> Result<()> {
         )?,
         PlanCommand::Approve { slug, json } => {
             let prepared = plan::prepare_approval(&store, project, &slug)?;
-            println!("plan: {}", commands::quote(&slug));
-            print!("{}", render_approval_header(&prepared.header));
-            println!("digest: {}", prepared.digest);
-            print_feedback("open_feedback", &prepared.open_feedback);
-            if commands::confirm(&format!("approve {slug}"))? {
+            commands::preview(
+                &format!(
+                    "plan: {}\n{}digest: {}\n{}",
+                    commands::quote(&slug),
+                    render_approval_header(&prepared.header),
+                    prepared.digest,
+                    feedback_table("open_feedback", &prepared.open_feedback)
+                ),
+                json,
+            );
+            if commands::confirm(&format!("approve {slug}"), json)? {
                 let approved = plan::approve(&store, &prepared)?;
                 let help = [format!("Run `yoke plan start {slug} --session <session-id>`; the session column of `yoke log` lists recorded session ids")];
                 print_record(&approved, &[], &help, json)?;
             } else {
-                println!("approval: cancelled");
+                print_cancelled("approval: cancelled", json);
             }
         }
         PlanCommand::Start {
@@ -503,25 +518,25 @@ pub fn run(command: PlanCommand) -> Result<()> {
             print_record(&waiting, &[("question", short(&question))], &help, json)?;
         }
         PlanCommand::Resume { slug, json } => {
-            print_preview(&plan::get(&store, project, &slug)?);
-            if commands::confirm(&format!("resume {slug}"))? {
+            print_preview(&plan::get(&store, project, &slug)?, json);
+            if commands::confirm(&format!("resume {slug}"), json)? {
                 let resumed = plan::resume(&store, project, &slug)?;
                 let help = [format!(
                     "Continue the work, then run `yoke plan check {slug} --agent <claude|codex>`"
                 )];
                 print_record(&resumed, &[], &help, json)?;
             } else {
-                println!("resume: cancelled");
+                print_cancelled("resume: cancelled", json);
             }
         }
         PlanCommand::Cancel { slug, reason, json } => {
-            print_preview(&plan::get(&store, project, &slug)?);
-            if commands::confirm(&format!("cancel {slug}"))? {
+            print_preview(&plan::get(&store, project, &slug)?, json);
+            if commands::confirm(&format!("cancel {slug}"), json)? {
                 let reason = reason.as_deref().unwrap_or("cancelled by human");
                 let cancelled = plan::cancel(&store, project, &slug, reason)?;
                 print_record(&cancelled, &[("reason", short(reason))], &[], json)?;
             } else {
-                println!("cancel: aborted");
+                print_cancelled("cancel: aborted", json);
             }
         }
         PlanCommand::Reassign {
@@ -529,12 +544,12 @@ pub fn run(command: PlanCommand) -> Result<()> {
             session,
             json,
         } => {
-            print_preview(&plan::get(&store, project, &slug)?);
-            if commands::confirm(&format!("reassign {slug}"))? {
+            print_preview(&plan::get(&store, project, &slug)?, json);
+            if commands::confirm(&format!("reassign {slug}"), json)? {
                 let moved = plan::reassign(&store, project, &slug, &session)?;
                 print_record(&moved, &[("session", commands::quote(&session))], &[], json)?;
             } else {
-                println!("reassign: aborted");
+                print_cancelled("reassign: aborted", json);
             }
         }
         PlanCommand::Check { slug, agent, json } => {
@@ -559,10 +574,12 @@ pub fn run(command: PlanCommand) -> Result<()> {
             } else {
                 print!("{}", render_check(&summary));
             }
-            ensure!(
-                summary.passed,
-                "plan checks did not pass; inspect yoke plan status {slug}"
-            );
+            if !summary.passed {
+                return Err(commands::ReportedFailure(format!(
+                    "plan checks did not pass; inspect yoke plan status {slug}"
+                ))
+                .into());
+            }
         }
         PlanCommand::Diff { slug, json } => {
             ensure!(plan::has_head(project), "{}", plan::NO_HEAD_ADVICE);
@@ -578,6 +595,7 @@ pub fn review(
     agent: AgentArg,
     json: bool,
 ) -> Result<()> {
+    commands::verify_building_agent(agent)?;
     let (store, loaded) = commands::load_project()?;
     let slug = match slug {
         Some(slug) => slug,
@@ -624,10 +642,12 @@ pub fn review(
     } else {
         print!("{}", render_review(&slug, &report));
     }
-    ensure!(
-        persisted_pass,
-        "review did not pass; inspect yoke plan status {slug}"
-    );
+    if !persisted_pass {
+        return Err(commands::ReportedFailure(format!(
+            "review did not pass; inspect yoke plan status {slug}"
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -654,16 +674,19 @@ fn close(
         .iter()
         .find(|item| item.id == id)
         .with_context(|| format!("plan {slug} has no feedback #{id}"))?;
-    print_feedback("feedback", std::slice::from_ref(item));
+    commands::preview(
+        &feedback_table("feedback", std::slice::from_ref(item)),
+        json,
+    );
     let verb = match closure {
         plan::Closure::Resolved => "resolve",
         plan::Closure::Acknowledged => "acknowledge",
     };
-    if commands::confirm(&format!("{verb} {id}"))? {
+    if commands::confirm(&format!("{verb} {id}"), json)? {
         let item = plan::close(store, project, slug, id, closure, note.as_deref())?;
         print_added(&item, json)?;
     } else {
-        println!("{verb}: cancelled");
+        print_cancelled(&format!("{verb}: cancelled"), json);
     }
     Ok(())
 }
@@ -801,8 +824,16 @@ fn print_record(
 }
 
 /// The plan a human is about to change, shown before the confirmation prompt.
-fn print_preview(record: &plan::PlanRecord) {
-    print!("{}", render_record(record, &[], &[]));
+fn print_preview(record: &plan::PlanRecord, json: bool) {
+    commands::preview(&render_record(record, &[], &[]), json);
+}
+
+fn print_cancelled(text: &str, json: bool) {
+    if json {
+        println!("{}", serde_json::json!({"cancelled": true}));
+    } else {
+        println!("{text}");
+    }
 }
 
 /// `facts` are extra `key: value` lines whose values are already quoted where they need to be.

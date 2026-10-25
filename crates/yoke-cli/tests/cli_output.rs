@@ -29,6 +29,24 @@ fn text(output: &Output) -> String {
 }
 
 #[test]
+fn json_runtime_errors_are_one_value_with_diagnostics_on_stderr() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["trial", "report", "--json"],
+        vec!["log", "--outcome", "invalid", "--json"],
+        vec!["plan", "check", "missing", "--agent", "codex", "--json"],
+    ] {
+        let output = yoke(home.path(), home.path(), &args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        let error: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{args:?}: {error}; {output:?}"));
+        assert!(error["error"].is_string(), "{error}");
+        assert!(error["help"].as_str().unwrap().contains("--help"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("error:"));
+    }
+}
+
+#[test]
 fn onboarding_help_shows_examples_and_boundaries_without_creating_state() {
     let home = tempfile::tempdir().unwrap();
     for (args, expected) in [

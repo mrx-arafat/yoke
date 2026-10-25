@@ -23,6 +23,11 @@ fn isolated_command(bin: &Path, home: &Path) -> Command {
         .env("HOME", &home)
         .env_remove("CODEX_HOME")
         .env_remove("CLAUDE_CONFIG_DIR")
+        // This harness launches both agents; do not inherit the caller's identity.
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_CHILD_SESSION")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_SESSION_ID")
         .env("YOKE_CURL", curl);
     command
 }
@@ -128,6 +133,24 @@ fn memory_transfer_preserves_identity_and_fresh_home_dry_run_writes_nothing() {
     let repeated = json(run(&fresh, &destination, &args, b""));
     assert_eq!(repeated["additions"], 0);
     assert_eq!(repeated["duplicates"], 1);
+    let conflicting_mapping = format!("{}={}", source.display(), source.display());
+    let conflict = run(
+        &fresh,
+        &destination,
+        &[
+            "memory",
+            "import",
+            archive.to_str().unwrap(),
+            "--map",
+            &conflicting_mapping,
+            "--dry-run",
+            "--json",
+        ],
+        b"",
+    );
+    assert!(!conflict.status.success());
+    let conflict: Value = serde_json::from_slice(&conflict.stdout).unwrap();
+    assert!(!conflict["conflicts"].as_array().unwrap().is_empty());
     let recalled = json(run(
         &fresh,
         &destination,
@@ -1290,11 +1313,27 @@ fn plan_check_persists_unavailable_and_malformed_reviewer_failures() {
         let checked = run_with_path(
             &home,
             &project,
-            &["plan", "check", "fixture", "--agent", "claude"],
+            &["plan", "check", "fixture", "--agent", "claude", "--json"],
             b"",
             Some(&path),
         );
         assert!(!checked.status.success());
+        let summary: Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert_eq!(summary["passed"], false);
+        assert_eq!(summary["plan"]["state"], "building");
+        if available {
+            let reviewed = run_with_path(
+                &home,
+                &project,
+                &["review", "fixture", "--agent", "claude", "--json"],
+                b"",
+                Some(&path),
+            );
+            assert!(!reviewed.status.success());
+            let report: Value = serde_json::from_slice(&reviewed.stdout).unwrap();
+            assert_eq!(report["passed"], false);
+            assert!(report["error"].as_str().unwrap().contains("malformed"));
+        }
         let store = Store::open(home.join(".yoke/state.db")).unwrap();
         let detail = plan::detail(&store, &project, "fixture").unwrap();
         assert_eq!(detail.plan.state, "building");
@@ -1311,6 +1350,263 @@ fn plan_check_persists_unavailable_and_malformed_reviewer_failures() {
             "{}",
             review.output_tail
         );
+    }
+}
+
+#[test]
+fn reviewer_commands_reject_a_declared_agent_that_conflicts_with_process_markers() {
+    use yoke_core::{plan, store::Store};
+    let (_temp, home, project, path) = plan_with_work_committed_after_start();
+    for (marker, value, declared) in [
+        ("CODEX_THREAD_ID", "private-session-value", "claude"),
+        ("CODEX_SESSION_ID", "private-session-value", "claude"),
+        ("CLAUDECODE", "1", "codex"),
+        ("CLAUDE_CODE_CHILD_SESSION", "1", "codex"),
+    ] {
+        for args in [
+            vec!["plan", "check", "fixture", "--agent", declared],
+            vec!["plan", "validate", "fixture", "--agent", declared],
+            vec!["review", "fixture", "--agent", declared],
+        ] {
+            let output = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), &home)
+                .args(&args)
+                .env("PATH", &path)
+                .env(marker, value)
+                .current_dir(&project)
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{args:?}: {output:?}");
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            assert!(diagnostic.contains("--agent"), "{diagnostic}");
+            assert!(diagnostic.contains(marker), "{diagnostic}");
+            assert!(
+                !diagnostic.contains("private-session-value"),
+                "{diagnostic}"
+            );
+            assert!(!home.join("review-input").exists());
+            let store = Store::open(home.join(".yoke/state.db")).unwrap();
+            let detail = plan::detail(&store, &project, "fixture").unwrap();
+            assert_eq!(detail.plan.state, "building");
+            assert!(detail.checks.is_empty());
+        }
+    }
+}
+
+#[test]
+fn matching_process_markers_allow_review_but_conflicting_markers_do_not() {
+    let (_temp, home, project, path) = plan_with_work_committed_after_start();
+    let invoke = |conflicting| {
+        let mut command = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), &home);
+        command
+            .args(["review", "fixture", "--agent", "claude", "--json"])
+            .env("PATH", &path)
+            .env("CLAUDECODE", "1")
+            .current_dir(&project);
+        if conflicting {
+            command.env("CODEX_THREAD_ID", "private-session-value");
+        }
+        command.output().unwrap()
+    };
+    let conflict = invoke(true);
+    assert!(!conflict.status.success());
+    assert!(!home.join("review-input").exists());
+    let error: Value = serde_json::from_slice(&conflict.stdout).unwrap();
+    assert!(error["error"].as_str().unwrap().contains("CODEX_THREAD_ID"));
+    let matching = invoke(false);
+    assert!(matching.status.success(), "{matching:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&matching.stdout).unwrap()["passed"],
+        true
+    );
+}
+
+#[test]
+fn json_human_commands_keep_stdout_parseable_on_success_cancel_and_a_racing_edit() {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::time::{Duration, Instant};
+
+    fn nonblocking(file: &impl AsRawFd) {
+        // SAFETY: the borrowed descriptor stays open throughout fcntl.
+        unsafe {
+            let flags = libc::fcntl(file.as_raw_fd(), libc::F_GETFL);
+            assert!(flags >= 0);
+            assert_eq!(
+                libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK),
+                0
+            );
+        }
+    }
+    fn drain(file: &mut impl Read, bytes: &mut Vec<u8>) {
+        let mut chunk = [0; 4096];
+        loop {
+            match file.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.raw_os_error() == Some(libc::EIO) =>
+                {
+                    break
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
+
+    for action in ["cancel", "approve", "race", "ack", "retry"] {
+        let (_temp, home, project, _path) = plan_with_work_committed_after_start();
+        let args: Vec<String> = match action {
+            "ack" => ["notifications", "--json", "ack", "all"]
+                .map(String::from)
+                .to_vec(),
+            "retry" => {
+                let store = yoke_core::store::Store::open(home.join(".yoke/state.db")).unwrap();
+                let (job, _) = yoke_core::jobs::enqueue(
+                    &store,
+                    "fixture",
+                    "fixture-retry",
+                    project.to_str().unwrap(),
+                    "{}",
+                    1,
+                )
+                .unwrap();
+                rusqlite::Connection::open(home.join(".yoke/state.db"))
+                    .unwrap()
+                    .execute("UPDATE jobs SET state='dead' WHERE id=?1", [job.id])
+                    .unwrap();
+                vec![
+                    "jobs".into(),
+                    "--json".into(),
+                    "retry".into(),
+                    job.id.to_string(),
+                ]
+            }
+            _ => ["plan", "approve", "fixture", "--json"]
+                .map(String::from)
+                .to_vec(),
+        };
+        let (mut master_fd, mut slave_fd) = (-1, -1);
+        // SAFETY: openpty initializes both descriptor outputs; no optional name or settings.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master_fd,
+                    &mut slave_fd,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        // SAFETY: the successful openpty call transferred these two owned descriptors.
+        let (mut master, slave) = unsafe {
+            (
+                fs::File::from_raw_fd(master_fd),
+                fs::File::from_raw_fd(slave_fd),
+            )
+        };
+        // SAFETY: the master descriptor is owned here and must not leak into spawned workers.
+        assert_eq!(
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
+        // Disable terminal echo so simulated user input is not mixed with process stdout.
+        // SAFETY: tcgetattr initializes the live termios output before tcsetattr reads it.
+        unsafe {
+            let mut settings = std::mem::MaybeUninit::uninit();
+            assert_eq!(libc::tcgetattr(slave.as_raw_fd(), settings.as_mut_ptr()), 0);
+            let mut settings = settings.assume_init();
+            settings.c_lflag &= !libc::ECHO;
+            assert_eq!(
+                libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &settings),
+                0
+            );
+        }
+        let mut child = isolated_command(Path::new(env!("CARGO_BIN_EXE_yoke")), &home)
+            .args(&args)
+            .current_dir(&project)
+            .stdin(slave.try_clone().unwrap())
+            .stdout(slave)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        nonblocking(&master);
+        nonblocking(&stderr);
+        let (mut output, mut diagnostic) = (Vec::new(), Vec::new());
+        let mut answered = false;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let status = loop {
+            drain(&mut master, &mut output);
+            drain(&mut stderr, &mut diagnostic);
+            if !answered && diagnostic.ends_with(b"Type approve fixture to confirm: ") {
+                if action == "race" {
+                    let file = project.join(".yoke/plans/fixture.md");
+                    let content = fs::read_to_string(&file)
+                        .unwrap()
+                        .replace("title='Fixture'", "title='Changed'");
+                    fs::write(file, content).unwrap();
+                }
+                master
+                    .write_all(if action == "cancel" {
+                        b"no\n"
+                    } else {
+                        b"approve fixture\n"
+                    })
+                    .unwrap();
+                answered = true;
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!(
+                    "confirmation hung: {}",
+                    String::from_utf8_lossy(&diagnostic)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        drain(&mut master, &mut output);
+        drain(&mut stderr, &mut diagnostic);
+        assert!(
+            answered || matches!(action, "ack" | "retry"),
+            "{}",
+            String::from_utf8_lossy(&diagnostic)
+        );
+        let value: Value = serde_json::from_slice(&output).unwrap_or_else(|error| {
+            panic!(
+                "{action}: {error}; stdout {} stderr {}",
+                String::from_utf8_lossy(&output),
+                String::from_utf8_lossy(&diagnostic)
+            )
+        });
+        match action {
+            "cancel" => {
+                assert!(status.success());
+                assert_eq!(value["cancelled"], true);
+            }
+            "approve" => {
+                assert!(status.success());
+                assert_eq!(value["state"], "approved");
+            }
+            "ack" => {
+                assert!(status.success());
+                assert!(value["acknowledged"].is_number());
+            }
+            "retry" => {
+                assert!(status.success());
+                assert_eq!(value["state"], "queued");
+            }
+            _ => {
+                assert!(!status.success());
+                assert!(value["error"].as_str().unwrap().contains("changed"));
+            }
+        }
     }
 }
 

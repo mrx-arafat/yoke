@@ -54,6 +54,11 @@ fn isolated_command(bin: &Path, home: &Path) -> Command {
         .env("HOME", &home)
         .env_remove("CODEX_HOME")
         .env_remove("CLAUDE_CONFIG_DIR")
+        // This harness launches both agents; do not inherit the caller's identity.
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_CHILD_SESSION")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_SESSION_ID")
         .env("YOKE_CURL", curl);
     command
 }
@@ -804,6 +809,8 @@ fn plan_check_faults_are_bounded_and_still_reach_the_stop_cap() {
         &[],
     );
     assert!(!checked.status.success());
+    let summary: Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(summary["passed"], false);
     let detail = plan::detail(&trial.store, &trial.project, "check-faults").unwrap();
     assert_eq!(detail.plan.state, "building");
     let runs = &detail.checks;
