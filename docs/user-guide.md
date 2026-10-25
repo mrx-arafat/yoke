@@ -71,8 +71,8 @@ Building from source the first time adds compile time.
    ```
 
    It writes `yoke.toml` without overwriting an existing file.
-   The starter is in observe mode and holds one sample gate, `no-force-push`, that matches the `Bash` tool and the text `push --force`.
-   It is an example, not complete protection against every way to spell a force push.
+   The starter is in observe mode and holds one gate, `no-force-push`, using the git-safety preset's force-push matcher for both agents' shell tools.
+   It recognizes common force flags and refspecs, but cannot parse shell aliases or expansions.
    Read the file and adjust it for your agent's real payloads.
 
 4. **Your terminal:** approve the policy.

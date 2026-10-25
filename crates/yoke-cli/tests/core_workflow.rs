@@ -144,6 +144,64 @@ fn success(output: &Output) {
 }
 
 #[test]
+fn trusted_output_capture_is_logged_without_changing_hook_decisions() {
+    let f = Fixture::new();
+    for mode in ["observe", "enforce"] {
+        let mut baseline = None;
+        for capture in [false, true] {
+            f.snapshot(&format!("mode='{mode}'\n[[gate]]\nname='checks'\non='pre_tool_use'\ncapture_output={capture}\nrun=\"printf 'report token=stdout-hidden\\n'; printf 'diagnostic password=stderr-hidden\\n' >&2; exit 1\"\nmessage='Run checks first.'"));
+            // Only the captured, approved setting may decide whether output is retained.
+            fs::write(
+                f.project.join("yoke.toml"),
+                format!(
+                    "[[gate]]\nname='checks'\non='pre_tool_use'\ncapture_output={}\nrun='true'",
+                    !capture
+                ),
+            )
+            .unwrap();
+            for agent in ["claude", "codex"] {
+                let response = f.hook(agent, "PreToolUse", payload());
+                success(&response);
+                if let Some(expected) = &baseline {
+                    assert_eq!(&response.stdout, expected);
+                } else {
+                    baseline = Some(response.stdout.clone());
+                }
+                if mode == "observe" {
+                    assert!(response.stdout.is_empty());
+                } else {
+                    let response: Value = serde_json::from_slice(&response.stdout).unwrap();
+                    assert!(response["hookSpecificOutput"]["permissionDecisionReason"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Run checks first."));
+                }
+                let log = f.run(&["log", "--json", "--limit", "1"], "");
+                success(&log);
+                let rows: Value = serde_json::from_slice(&log.stdout).unwrap();
+                assert_eq!(
+                    rows[0]["outcome"],
+                    if mode == "observe" {
+                        "would_deny"
+                    } else {
+                        "deny"
+                    }
+                );
+                let gate = &rows[0]["gates"][0];
+                assert_eq!(gate["exit_code"], 1);
+                if capture {
+                    assert_eq!(gate["output"]["stdout"], "report token=[REDACTED]\n");
+                    assert_eq!(gate["output"]["stderr"], "diagnostic password=[REDACTED]\n");
+                } else {
+                    assert!(gate.get("output").is_none());
+                }
+                assert!(!String::from_utf8(log.stdout).unwrap().contains("hidden"));
+            }
+        }
+    }
+}
+
+#[test]
 fn gates_inspection_exposes_trusted_commands_and_execution_settings() {
     let f = Fixture::new();
     let unapproved = "[[gate]]\nname='unapproved'\non='stop'\nrun='touch ran'\n";

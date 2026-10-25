@@ -152,8 +152,8 @@ mode = "enforce"
 [[gate]]
 name = "no-force-push"
 on = "pre_tool_use"
-match_tool = "Bash"
-match_contains = "push --force"
+match_tool = "Bash|exec_command|shell_command|shell"
+match_pattern = '\bgit(?:\s+(?:-C|-c|--git-dir|--work-tree)\s+[^\s;]+)*\s+push\b[^;\n]*\s(?:--force(?:-with-lease)?(?:[=\s\x22]|$)|-[A-Za-z]*f[A-Za-z]*(?:[\s\x22]|$)|\+[^\s\x22]+)'
 action = "deny"
 message = "Force push is blocked by Yoke. Push without --force."
 

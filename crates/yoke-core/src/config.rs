@@ -212,6 +212,8 @@ pub struct Gate {
     pub match_pattern: Option<String>,
     #[serde(default)]
     pub run: String,
+    #[serde(default)]
+    pub capture_output: bool,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
     #[serde(default)]
@@ -391,6 +393,11 @@ impl Config {
                     ensure!(
                         gate.run.is_empty() && gate.shell.is_none(),
                         "gate {} run/shell are only valid for check",
+                        gate.name
+                    );
+                    ensure!(
+                        !gate.capture_output,
+                        "gate {} capture_output is only valid for check",
                         gate.name
                     );
                 }
@@ -613,6 +620,22 @@ mod tests {
             home_from(Some("/isolated/home".into())).unwrap(),
             PathBuf::from("/isolated/home")
         );
+    }
+
+    #[test]
+    fn output_capture_defaults_off_and_requires_a_check() {
+        let config = Config::parse("[[gate]]\nname='check'\non='stop'\nrun='true'").unwrap();
+        assert!(!config.gates[0].capture_output);
+        for fields in [
+            "action='deny'",
+            "action='rewrite'\nrewrite_pattern='x'\nrewrite_to='y'",
+        ] {
+            let error = Config::parse(&format!(
+                "[[gate]]\nname='bad'\non='pre_tool_use'\ncapture_output=true\n{fields}"
+            ))
+            .unwrap_err();
+            assert!(error.to_string().contains("capture_output"), "{error:#}");
+        }
     }
 
     #[test]
