@@ -130,6 +130,12 @@ yoke log --outcome would_deny --limit 10 --json
 
 `usage` never creates, migrates or writes state.
 `--limit` sets how many recent sessions to list (default 10, range 1 through 100).
+Human output leads with the tightest current quota or earliest projected exhaustion, followed by separate quota, burn, token-history and session sections.
+Percentages use one decimal place; numeric columns align right. `Known USD` shows the priced portion, with unpriced sample counts kept separate.
+Tables become labelled records when they do not fit. Width comes from `COLUMNS`, then stdout's terminal size, otherwise 80 columns; prose and long identifiers wrap within that width.
+Quota colors match the statusline: green below 60 percent used, yellow from 60 and red from 85. Projected exhaustion is red; stale readings are labelled explicitly.
+Color is enabled only on an interactive stdout, and disabled by a non-empty `NO_COLOR` or `TERM=dumb`. Pipes remain plain text.
+`--json` retains its existing fields, ordering and formatting and ignores these presentation settings.
 Quota percentages are what each agent last reported, with the time it reported them; costs are API-price estimates, not subscription bills.
 [Usage and quota](workflows.md#usage-and-quota) explains where each figure comes from and what it means when one is missing.
 

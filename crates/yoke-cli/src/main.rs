@@ -17,6 +17,7 @@ mod retention;
 mod starter;
 mod statusline;
 mod table;
+mod terminal;
 mod trial;
 mod update;
 mod usage_cmd;

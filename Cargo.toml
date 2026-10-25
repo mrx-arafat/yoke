@@ -27,3 +27,4 @@ tempfile = "3.27.0"
 libc = "0.2.186"
 toml_edit = "0.22.27"
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+unicode-width = { version = "0.2.2", default-features = false }
