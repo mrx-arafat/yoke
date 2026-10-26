@@ -243,7 +243,8 @@ fn guidance_with(report: &Report, needle: &str) -> bool {
 fn stale_policy_guidance_uses_its_scope_and_restores_missing_files_before_trust() {
     use yoke_core::trust;
     let (dir, options) = fixture();
-    let root = dir.path();
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let root = canonical_root.as_path();
     let global = root.join(".yoke/config.toml");
     let project = root.join("yoke.toml");
     let knowledge = root.join(".yoke/knowledge.md");
