@@ -10,24 +10,74 @@ It produces findings about the experience, such as wrong guidance, silent failur
 This page records what was tested, how Yoke behaves in real use, the second-wave audit and failure-mode passes, every finding with its status, and how to repeat the test.
 It is a record of observations, not a release acceptance claim.
 
+## Round 2 and wave 3 verification 2026-10-26
+
+The wave commit is `15f613f`, following `20b8801` (canonical macOS health fixture), `d7ee984` (gate-reason redaction, quota locking and recovery messages) and `2e8a549` (HOME wording and command examples).
+The current checkpoint is `dca970c`, which restores the license allowance required by the merged dependency graph.
+Round 2 is the 25-commit range `5e86630..091ffde`; it adds policy-version archives, schema 17, quota history/headroom, aligned CLI tables, JSON output consistency and clearer decision previews.
+The orchestrator's combined local gate passed 47/47 checks in the default temporary layout and `TMPDIR=/tmp` before pushing the wave.
+[Installer run 40275283119](https://github.com/mrx-arafat/yoke/actions/runs/40275283119) passed all 11 jobs at `15f613f`.
+[CI run 40275283127](https://github.com/mrx-arafat/yoke/actions/runs/40275283127) passed formatting, clippy, documentation/scripts and both Linux/macOS test jobs, but failed the dependency license check.
+The resolved graph includes `foldhash 0.2.0` under `Zlib`, which the older wave policy removed as unused.
+`dca970c` restores that explicit allowance and removes the unused BSD-2-Clause allowance; [CI run 40275918992](https://github.com/mrx-arafat/yoke/actions/runs/40275918992) passed all six jobs, including deny and both platform test jobs.
+W3-CI is fixed with hosted evidence; green CI and the passing Installer run remain separate from release acceptance.
+
+Independent focused checks passed 28 console tests, 11 updater tests, three loopback installer tests and the raw-terminal cleanup regression.
+The integration owner also checked the affected console, update, install, terminal and usage targets in both temporary layouts, plus formatting, clippy with warnings denied, release scripts and documentation.
+Console evidence covers valid launch and mutation as well as foreign-origin refusals, scoped state, escaping and confined artifacts; no browser or human-only console session was run.
+Installer/updater evidence verifies release-wide `SHA256SUMS` before replacement and preserves existing bytes on invalid downloads; provenance remains a manual check.
+
+S-6 is fixed in source: a real debug Stop hook recovered 1,702 missing dates on a schema-17 fixture without deleting raw samples, and all 3,331 samples matched the independent source epoch and day/CLI totals.
+Recovery replays bounded transcript chunks and fills matching NULL times; closed sessions, missing source times and unsupported partial records can remain undated until recoverable data is imported.
+This is not a claim that every installed historical sample was repaired.
+The round-2 audit also found a new labelled-secret leak in failure-reason truncation, a missing schema-17 warning, omitted Codex `cmd` previews and weakened log-row assertions.
+All four have committed focused fixes, with the original secret-leak reproduction and its controls passing after redaction was moved before truncation.
+
+### Current Linux field evidence
+
+The official installer built exact revision `091ffde1ded94ada3e1be6198bd9f170794c504a`, version `0.1.0`, and upgraded the field-test database from schema 14 to 17.
+Fresh health and read-only schema checks confirmed 17/17; both agents remained connected and protected-file hashes stayed unchanged through the journeys.
+Claude and Codex each allowed an ordinary command, then denied the marker after resuming the same session ID from another directory.
+The hook payload cwd changed while the stored project and session anchor retained the original trusted project.
+This proves the resume/cwd transition; a continuous-process interactive directory change remains untested.
+Linux PTY watch passed filter, refresh and quit interactions, and compact/detailed statuslines fit widths 60, 100 and 160 using a real Claude callback.
+The callback had no quota data, so quota-present layout and terminal colors remain unverified.
+This live evidence is for `091ffde`, not the later integrated wave or a published artifact.
+
+The field test also confirmed missing Codex child-rollout usage: hooks carry a parent session ID while related child transcript metadata has its own ID, and the importer rejects it before accounting commits.
+Earlier parent samples survive, but three inspected child identities had no samples; copied parent history prevents a trustworthy missing-token total.
+W3-9 remains open: accounting needs independent stream identity and deduplication without weakening unrelated-transcript rejection or changing policy anchors.
+
+### Corrected 700 MB timing evidence
+
+The initial W3-6 all-case latency failure included a newly started guard shell in every timed invocation on a loaded shared Mac and is superseded as a direct-hook budget verdict.
+W3-10 measured the identical optimized `20b8801` executable with a persistent guard that checks isolated HOME immediately before each fresh Yoke process.
+On a 704.5 MB schema-17 fixture, the corrected full matrix passed 29/32 cases; the three misses passed focused 700 MB repeats after a host-idle check.
+Every case's latest measurement meets p50 below 10 ms and p99 below 50 ms: p50 5.646-8.267 ms and p99 7.060-19.639 ms.
+Both runs and the first-run misses are retained; this is not one uninterrupted green matrix or a guarantee against host scheduling stalls.
+Old/current paired repeats did not establish a p50 regression above the 1 ms investigation threshold, and no product-code fix was needed.
+The measurement covers macOS steady state without transcripts, gates, active plans, migration or maintenance backlog at `20b8801`; the later integrated wave and Linux were not optimized-benchmarked by that evidence.
+All owned benchmark state, targets and binaries were removed, with zero fixture-project leaks into real state.
+The maintained benchmark still needs its measurement-boundary correction; do not compare its fresh-shell digits directly with this acceptance boundary.
+
 ## Implementation verification 2026-10-18
 
-The current source is `9df0602`, following code commit `6a98f22` and CI/installer commit `a2b3428`.
+At that historical checkpoint, the source was `9df0602`, following code commit `6a98f22` and CI/installer commit `a2b3428`.
 Final local verification passed all 41 checks, including formatting, clippy, script checks and Rust targets in both the default temporary layout and `TMPDIR=/tmp`.
 The six integration fixture failures were reconciled against the new security contracts before that final pass.
 [Installer run 39058112818](https://github.com/mrx-arafat/yoke/actions/runs/39058112818) passed all 11 jobs at `9df0602`.
 [CI run 39058112836](https://github.com/mrx-arafat/yoke/actions/runs/39058112836) passed formatting, clippy, docs/scripts and dependency checks, but failed the test jobs on both macOS and Ubuntu.
 Both failures are `digest_rejects_fifo_without_waiting_for_a_writer`: the fixture reaches absolute reviewer lookup without a stubbed `claude` executable, so it stops before the intended regular-file refusal.
-The reported local fix validates the bounded regular transcript before resolving the reviewer and checks the FIFO case with an empty PATH; a new commit and green hosted CI are still required.
+At that checkpoint, the reported local fix validated the bounded regular transcript before resolving the reviewer and checked the FIFO case with an empty PATH; the newer verification above supersedes that pending-work list.
 The local 41-check pass therefore does not establish hosted CI acceptance.
-Installed real-agent evidence below remains at `d5d4ed5`, schema 14, while the new source supports schema 15.
+Installed real-agent evidence at that checkpoint was `d5d4ed5`, schema 14, while the source supported schema 15.
 The orchestrator rehearsed migration 015 on a schema-14 state copy: notifications were retained, session totals matched raw samples and the integrity check passed.
-That rehearsal also found Codex usage samples without timestamps, which are excluded from per-day totals (S-6); timestamp recovery and backfill remain open.
+That rehearsal found Codex usage samples without timestamps, excluded from per-day totals (S-6); the source recovery is now verified above.
 
 New benchmark fixtures stayed below 50 MB.
 A 20,000-decision background drain completed in 261 ms with exact-count checks, and final bounded function measurements were p50 1.229/1.368 ms and p99 1.610/1.834 ms without/with durable queue work.
 These are separate from complete debug-process hook medians of 16.7 to 17.8 ms, which miss the p50 below 10 ms target.
-The 700 MB target and optimized-release latency remain unverified in this wave; the older scale measurements below are historical evidence.
+The 700 MB target and optimized-release latency were unverified at that checkpoint; the corrected October 26 measurements above supersede that gap for their stated workload.
 
 ## Field test 2026-10-17: current installer and real agents
 
@@ -352,19 +402,20 @@ Commits `6a98f22` and `a2b3428` add durable notification catch-up and exact usag
   A window of 20,000 in the hook took 350 to 620 ms per hook (unoptimized build); 2,000 takes 40 to 120 ms there.
 - Stop re-reads the whole transcript.
   It took 35 to 60 ms for a 5 MB transcript and grows with the file.
-- `yoke usage` grows linearly with the number of samples, because usage is never pruned.
+- The older usage timings above predate migration 015's maintained session/model/day summaries; raw samples remain for detailed history, while current aggregate reads use those summaries.
 - Cold-cache first runs after a reboot are several times slower than the numbers above for any command that scans a table.
 
 ## Findings ledger
 
 One row per finding, retaining its original severity and source location.
-It holds 154 rows: 83 from the first field test (79 journey findings and 4 observations from the first check of the fixed build), 69 from the second wave, one release-rehearsal finding from the current Linux field test and one usage finding from the schema-15 rehearsal.
-Of the 154, 145 are fixed, 6 are partly fixed, 1 is open and 2 are declined.
-The six partly fixed rows are SEC-8, SEC-10, SEC-16, SEC-23, SEC-28 and C13; release acceptance remains separate from implementation status.
+It holds 162 rows: the previous 154 findings, four round-2 audit findings, one current child-usage finding, two explicitly incomplete exhaustive audits and the current hosted license-policy regression.
+Of the 162, 152 are fixed, 5 are partly fixed, 3 are open and 2 are declined.
+The five partly fixed rows are SEC-8, SEC-10, SEC-23, SEC-28 and C13; release acceptance remains separate from implementation status.
 Status is `fixed in <short sha>`, `partly fixed in <short sha>` with what remains in brackets, `open` or `declined`.
 The first wave is carried by `250dd84`, `ca1cb8f` and `746cef9`.
 The second wave is carried by `6947257` (code), `a42a20e` (release and installer paths) and `0afac36` (documentation only).
-The current implementation wave is carried by `6a98f22` (code), `a2b3428` (CI, benchmark and installer migration) and `9df0602` (documentation).
+The October 18 implementation wave is carried by `6a98f22`, `a2b3428` and `9df0602`.
+The round-2/wave-3 code is `15f613f`, following `20b8801`, `d7ee984` and `2e8a549`; `dca970c` corrects the merged license policy.
 The ID prefix says where a row came from:
 
 | Prefix | Source |
@@ -376,14 +427,25 @@ The ID prefix says where a row came from:
 | `G-1` to `G-11` | the project layout pass (there is no `G-9`) |
 | `S-1` to `S-5` | the large-database pass |
 | `proc-`, `out-`, `anchor-`, `health-`, `release-` | found while fixing and testing the second wave |
+| `W3-4-`, `W3-5`, `W3-7-` | round-2 audit, current Linux accounting finding and incomplete exhaustive audits |
+| `W3-CI` | hosted check of the committed wave against the current dependency graph |
 
 The audit and layout reports gave their own severities.
 The severities of `C1` to `C17`, `S-1` to `S-5`, `proc-1`, `anchor-1` and `release-1` were assigned when this ledger was written, from the effect each report describes.
 Several findings share a cause, such as the log scope (j1-2 and j3-memory-14), the notification link (j1-7 and j4-5) and the project policy that followed the agent's directory (SEC-1, SEC-4 and G-1).
+The two W3-7 coverage gaps are recorded as P3 follow-up work; they do not establish that every unreviewed command or message is defective.
 
 | ID | Severity | Area | Summary | Status | Where |
 | --- | --- | --- | --- | --- | --- |
-| S-6 | P2 | Usage | Codex usage samples with NULL timestamps are excluded from per-day totals, despite contributing to session totals | open (found during the schema-15 copy rehearsal; investigate rollout timestamps and backfill where recoverable after CI is green) | `crates/yoke-core/src/usage.rs`, `crates/yoke-core/src/store/015-usage-summaries.sql` |
+| W3-CI | P2 | Release | the wave's license-policy cleanup removed Zlib before the round-2 graph added foldhash 0.2.0 requiring it | fixed in dca970c (explicit allowance restored; CI 40275918992 passed all six jobs after the recorded license failure at 15f613f) | `deny.toml`, `Cargo.lock` |
+| W3-4-F01 | P2 | Security | command-failure guidance could strip a credential label before persistence redaction | fixed in d7ee984 (sanitize bounded stderr and the assembled reason before tail truncation; persisted-canary regression and original hook reproduction pass in both layouts) | `crates/yoke-core/src/engine.rs` |
+| W3-4-F02 | P2 | Upgrade | schema 17 lacked its older-writer refusal, backup and private policy-archive warning | fixed in 15f613f | `docs/upgrade-notes.md` |
+| W3-4-F03 | P3 | Console | collapsed Codex decisions omitted the existing tool_input.cmd field | fixed in 15f613f (known-field preview restored; escaped and Unicode regression passed) | `crates/yoke-cli/src/console/pages.rs` |
+| W3-4-F04 | P3 | Tests | aligned log rows lost semantic tool, gate, event, session and project assertions | fixed in d7ee984 (complete normalized rows and a failing missing-TOOL mutation restore the behavior contract) | `crates/yoke-cli/tests/cli_output.rs` |
+| W3-5 | P2 | Usage | Codex parent hook IDs reject related child rollouts before usage accounting, leaving child work uncounted | open (W3-9 needs stream-specific accounting and copied-history deduplication while preserving unrelated-ID rejection and policy anchors) | `crates/yoke-core/src/usage.rs`, `crates/yoke-cli/src/hook.rs` |
+| W3-7-docs | P3 | Audit coverage | exhaustive documentation-command verification is incomplete | open (76 argv cover 349 of 1,226 extracted occurrences; 877 were not executed; 58 help paths passed; shell programs and human/prerequisite paths remain unverified) | `README.md`, `MANUAL.md`, `docs/*.md` |
+| W3-7-errors | P3 | Audit coverage | exhaustive actionable-error review is incomplete | open (66 of 394 macro sites context-reviewed, 328 lexical-only; context, Display and external error chains add further scope) | `crates/yoke-cli/src`, `crates/yoke-core/src` |
+| S-6 | P2 | Usage | Codex usage samples with NULL timestamps are excluded from per-day totals, despite contributing to session totals | fixed in 15f613f (bounded source replay fills matching NULL dates without deleting samples; exact schema-17 recovery verified; closed/unrecoverable records can remain unknown) | `crates/yoke-core/src/usage.rs`, `crates/yoke-core/src/store/015-usage-summaries.sql` |
 | SEC-7 | P2 | Security | `yoke run-hook` accepts forged events from an agent shell and writes decisions, facts and the Stop counter | fixed in 6a98f22, 9df0602 (guard denies agent run-hook commands; records OS parent PID/name/start identity rather than trusting submitted provenance; same-user provenance is not cryptographic authentication) | `crates/yoke-cli/src/hook.rs`, `crates/yoke-core/src/guard.rs` |
 | SEC-12 | P2 | Review | the author of a diff can imitate the review delimiter and spoof the independent verdict | fixed in 6a98f22, 9df0602 (independent review uses unpredictable framing and JSON encoding for diff data; delimiter injection regression covered) | `crates/yoke-core/src/review.rs` |
 | SEC-13 | P2 | Review | review sends the unredacted diff and untracked files to the other vendor | fixed in 6a98f22, 9df0602 (review inputs redact known secret forms and skip secret-looking files; vendor/data disclosure documented; arbitrary unknown-secret detection is not guaranteed) | `crates/yoke-core/src/review/input.rs` |
@@ -393,7 +455,7 @@ Several findings share a cause, such as the log scope (j1-2 and j3-memory-14), t
 | SEC-18 | P3 | Gates | on Codex a rewrite gate answers `allow` and skips Codex's approval prompt | fixed in 6a98f22, 9df0602 (Codex rewrite requires narrow tool and content matchers; documented explicit allow behavior and configuration regression preserved) | `crates/yoke-core/src/wire.rs` |
 | SEC-20 | P3 | Repository | four tracked files embed a maintainer's account name and home path | fixed in 6a98f22, a2b3428, 9df0602 (portable and relative paths; tracked-tree scan clean; six bypass tests passed) | `scripts/acceptance/lib.sh`, `docs/specs/`, `crates/yoke-cli/src/console/artifacts/impeccable.json` |
 | SEC-22 | P3 | Plans | `yoke plan approve` prints the header as one JSON string, and Unicode formatting characters could change what a person reads (terminal rendering not verified) | fixed in 6a98f22 (line-preserving escaped preview has focused coverage; human terminal acceptance remains unverified) | `crates/yoke-cli/src/workflow.rs` |
-| SEC-23 | P3 | Installer | the hook command is the executable path as found, with no check that the file or its directories are writable by others | partly fixed in 6a98f22, 9df0602 (regular executable and canonical path required; unprotected world-write is a problem, group-write is guidance and protected sticky ancestors are accepted; shell pre-execution regular-file check remains a proposal) | `crates/yoke-cli/src/install.rs` |
+| SEC-23 | P3 | Installer | the hook command is the executable path as found, with no check that the file or its directories are writable by others | partly fixed in 6a98f22, 9df0602, 15f613f (canonical executable and location checks retained; installer candidate/stage regular-executable and no-symlink checks verified with invalid-file and valid-download controls; mutable-directory and TOCTOU limits remain) | `crates/yoke-cli/src/install.rs`, `install.sh` |
 | SEC-27 | P3 | Installer | installer and health robustness: the JSON re-render drops whitespace, the unchanged check runs before the write, the install lock has no liveness check, and `yoke health` can block on a FIFO | fixed in 6a98f22, 9df0602 (whitespace-preserving JSON changes, OS-held live locks, nonblocking descriptor checks and atomic exchange preserve and report a displaced concurrent save) | `crates/yoke-cli/src/install/` |
 | G-7 | P3 | Plans | `yoke plan new` outside a repository, or in a bare one, says to make an initial commit, which cannot be followed there | fixed in 6a98f22 (missing repository, empty repository and bare repository guidance distinguished; CLI regression passed) | `crates/yoke-cli/src/workflow.rs` |
 | G-11 | P3 | Guidance | every "trusted policy unavailable" denial ends with a storage hint, and a no-op Codex install repeats the hook review warning | fixed in 6a98f22, 9df0602 (policy denials have relevant guidance; actual Codex changes emit approval warning and no-op reinstall does not, with focused assertion) | `crates/yoke-cli/src/hook.rs`, `crates/yoke-cli/src/install.rs` |
@@ -402,16 +464,16 @@ Several findings share a cause, such as the log scope (j1-2 and j3-memory-14), t
 | out-4 | P3 | Installer | the installer's migration step `yoke log --limit 1` now depends on the project of the working directory | fixed in a2b3428 (migration uses `log --all --limit 1`; installer regression passed) | `install.sh` |
 | anchor-1 | P3 | Notifications | a stale trusted nested policy makes the notification sync log an error line, because its lookup uses the project root | fixed in 6a98f22, 9df0602 (nested trusted-policy notification lookup derives its own lookup scope and handles stale snapshots) | `crates/yoke-core/src/notifications.rs` |
 | SEC-8 | P2 | Security | session-start memory injection was unlabeled, and an agent could plant and pin notes for any project | partly fixed in 6947257, 6a98f22, 9df0602 (untrusted fencing, human-only pinning, anchored agent memory scope, per-item cap and reserved injection budgets; trusted-only injection and memory authorship remain unimplemented) | `crates/yoke-core/src/memory.rs`, `crates/yoke-cli/src/memory.rs` |
-| SEC-10 | P2 | Release | release authenticity was a same-origin SHA-256, and the source fallback built an unpinned branch | partly fixed in a42a20e (source builds use one exact revision, named before it is built, and releases gain `SHA256SUMS` and build provenance; the installer and the updater do not verify provenance, there is no detached signature, and the workflow has not run on a real release) | `install.sh`, `.github/workflows/release.yml` |
+| SEC-10 | P2 | Release | release authenticity was a same-origin SHA-256, and the source fallback built an unpinned branch | partly fixed in a42a20e, 15f613f (exact source revision and automated release-wide SHA256SUMS validation verified; provenance stays manual, no detached signature exists and published-release workflow acceptance remains pending) | `install.sh`, `crates/yoke-cli/src/update.rs`, `.github/workflows/release.yml` |
 | SEC-14 | P2 | Security | gates and approved plan checks run project code outside the agent's sandbox, and approval freezes the command text, not the code | fixed in 6a98f22, 9df0602 (approval binds declared input hashes; gates inherit compatible resource limits with core dumps off, documented default environment and trusted pass_env, plus process-group wall timeout) | `docs/workflows.md`, `crates/yoke-core/src/engine.rs` |
 | C13 | P2 | State | a zero-byte `state.db` silently became a fresh install, so trust was gone and enforcement was off | partly fixed in 6947257 (a loud warning on stderr and in `error.log`; failing closed was declined, see D2) | `crates/yoke-core/src/store.rs` |
-| SEC-16 | P3 | Hooks | a very large tool input overflows the environment of a check gate | partly fixed in 6a98f22, 9df0602 (32 KiB marked gate input and truncation flag implemented; matchers see full input and NULs are scrubbed; troubleshooting table still describes the former environment-size denial) | `crates/yoke-core/src/engine.rs` |
+| SEC-16 | P3 | Hooks | a very large tool input overflows the environment of a check gate | fixed in 6a98f22, 15f613f (32 KiB marked input and truncation flag, full matcher input and NUL scrubbing retained; troubleshooting corrected; checks requiring complete input must explicitly reject truncation) | `crates/yoke-core/src/engine.rs`, `docs/troubleshooting.md` |
 | SEC-29 | P3 | Hardening | same-user races and stale state: FIFO opens, preset lock ownership, ambiguous memory markers, unlocked sharing and unbounded extension scans | fixed in 6a98f22 (locks, unambiguous entries and bounded extension reads verified; corrected FIFO/swap test passed with a checked child count, nonblocking hash descriptors and regular-file validation; earlier zero-test result withdrawn) | `crates/yoke-core/src/plan/files.rs`, `crates/yoke-core/src/memory.rs` |
 | SEC-17 | P3 | Security | relative `PATH` entries and the Git, agent and shell commands resolve against the agent's directory | fixed in 6a98f22, 9df0602 (shared absolute executable lookup rejects relative/empty PATH entries, scrubs inherited Git overrides and disables fsmonitor/hooks/optional locks) | `crates/yoke-core/src/plan/files.rs`, `crates/yoke-core/src/review.rs` |
 | SEC-19 | P3 | Updates | the daily release check has no opt-out, and the updater launched the `curl` found on `PATH` | fixed in 6a98f22, 9df0602 (prior transport fixes retained; trusted `update.check = false` suppresses scheduling and child launch, defaults on and merges explicitly; focused proof checked) | `crates/yoke-core/src/config.rs`, `crates/yoke-cli/src/hook.rs` |
 | SEC-24 | P3 | Installer | the receipt and backups keep full copies of the agent settings, which can hold tokens, are never pruned and survive uninstall | fixed in 6a98f22, 9df0602 (receipts store owned entries/structure/hashes; bounded five private backups may still contain credentials and survive uninstall; dry-run hides unrelated values and pre-existing event names; expired backup ownership preserved) | `crates/yoke-cli/src/install/files.rs` |
-| SEC-28 | P3 | Release | the release workflow used floating tools, `tags: ['*']` and no protected environment | partly fixed in a42a20e (tag filter, pinned toolchain and `cargo-deny`, deny in its own job, a green-CI gate, a protected `release` environment and reproducible archives; there is no scheduled advisory run or dependency-update automation, `ci.yml` still uses floating stable, and none of it has run) | `.github/workflows/release.yml` |
-| S-3 | P3 | Scale | the first runs after an upgrade needed 124 notification syncs to read 500 thousand old decisions | fixed in 6a98f22, a2b3428 (bounded hooks queue one durable drain; windows skip deleted ids; focused queue/gap tests passed and an exact-count 20,000-row job drained in 261 ms; 700 MB performance remains unverified) | `crates/yoke-core/src/notifications.rs` |
+| SEC-28 | P3 | Release | the release workflow used floating tools, `tags: ['*']` and no protected environment | partly fixed in a42a20e, 15f613f (release gates and pinned tools retained; repository Rust pin now governs ordinary CI Cargo and matches release Rust 1.95.0; scheduled advisories, dependency-update automation, repository protection and release execution remain maintainer/acceptance work) | `.github/workflows/release.yml`, `rust-toolchain.toml`, `deny.toml` |
+| S-3 | P3 | Scale | the first runs after an upgrade needed 124 notification syncs to read 500 thousand old decisions | fixed in 6a98f22, a2b3428 (bounded hooks queue one durable drain; windows skip deleted ids; exact-count 20,000-row drain verified; corrected 700 MB steady-state timing at 20b8801 is recorded above, while backlog-drain latency at that size is unmeasured) | `crates/yoke-core/src/notifications.rs` |
 | SEC-21 | P3 | Hooks | a hook killed with SIGKILL leaves a running gate command behind | declined (see the failure-mode decisions below, D5) | `crates/yoke-core/src/review/process.rs` |
 | after-fix-2 | note | Usage | `yoke usage` showed only a weekly Codex window | declined: not a defect, Codex reported only a 7-day window on that plan | none |
 | release-2 | P1 | Acceptance | archive acceptance runs hooks, which can use real account state despite a temporary HOME in shipped optimized builds; CLI install, update and health honour HOME | fixed in 9df0602 (disposable account or container required for archive acceptance; current acceptance summaries mark a safe rerun pending; account and container execution remain unrun) | `docs/release-acceptance.md` |
@@ -565,49 +627,46 @@ No P1 is open.
 
 ### Release blockers, in priority order
 
-1. Commit and verify the digest input-validation ordering fix in hosted CI; Installer passed all 11 jobs at `9df0602`, while both hosted test jobs failed the FIFO case.
-2. After CI is green, investigate Codex samples missing timestamps and recover per-day attribution where possible (S-6); reconcile the SEC-16 troubleshooting text, SEC-23 shell precheck proposal and remaining policy items below.
-3. Coordinate the schema-15 installed-binary upgrade, then test current-source enforcement and a real hook payload cwd transition with both agents.
-4. Complete shipped-artifact rehearsal in disposable accounts or containers, human-only release gates, observe-day and enforce-week trials, repository settings and console acceptance.
-5. Establish optimized hook latency against the large-database target; current bounded debug-process medians exceed the p50 target and the 700 MB timings were not rerun.
+1. Complete Codex child-rollout accounting without losing parent/sibling usage, double-counting copied history or weakening transcript and policy-session identity (W3-5, W3-9).
+2. Validate the final source after that fix, including installed-binary and optimized evidence where needed; the current CI is green at `dca970c`, Installer passed at `15f613f` and scale evidence is scoped to `20b8801`.
+3. Finish the exhaustive command and error audits (W3-7-docs, W3-7-errors), preserving their measured partial coverage and prioritizing frequently encountered recovery gaps.
+4. Coordinate any further installed-binary upgrade, then exercise remaining live cases: continuous-process cwd changes, pause tokens, settings reload, plan Stop holds and quota-present statuslines.
+5. Complete safe shipped-artifact/four-platform release rehearsal, repository protections, provenance/compliance review, human console acceptance and observe-day/enforce-week trials.
 
 The implementation packages and their follow-ons are committed; that does not establish release acceptance.
-S-6 is the one fully open row, and the partial items below retain their specific limits.
+S-6, the four confirmed round-2 regressions and the hosted license gate are fixed; the child-usage defect and two exhaustive audits remain open.
 
 ### P2, open
 
-- S-6: determine why the Codex importer leaves sample timestamps empty, recover event times from rollout records where possible, and verify per-day totals after backfill.
-  The schema-15 rehearsal preserved session totals but exposed this gap in daily attribution.
-  This follow-up waits until CI is green.
+- W3-5: related Codex child rollouts fail the parent-hook session check, so child usage can be omitted.
+  W3-9 must keep independent accounting cursors, deduplicate inherited history and preserve both unrelated-ID refusal and the trusted policy anchor.
+  Do not rewrite transcript IDs or reset the database as a workaround.
 
 ### Partly fixed, with what remains
 
 - SEC-8: agent memory scope and injection caps/reserved budgets are implemented; trusted-only injection and memory authorship remain unimplemented.
   Pins that an agent made before the fix cannot be told apart, so the [upgrade notes](upgrade-notes.md) ask people to review their pins.
-- SEC-10: decide whether the installer and updater verify build provenance or leave it a documented manual step, add a detached signature, and run the release workflow once to prove the attestation, the `release` environment and the gate.
+- SEC-10: automated SHA256SUMS verification is implemented; provenance remains a documented manual step, detached signing is absent and published-release attestation/environment/gate acceptance remains pending.
   Reviewers, tag protection and branch protection are repository settings that the code cannot show.
-- SEC-16: bounded marked input and `YOKE_TOOL_INPUT_TRUNCATED` are implemented and described in [configuration](configuration.md).
-  The troubleshooting failure table still describes the former environment-size denial and needs reconciliation.
 - SEC-23: executable registration and health checks are implemented, including sticky-directory protection and group-write guidance.
-  The shell installer's explicit regular-executable check before execution remains an unapplied proposal.
-- SEC-28: scheduled advisory checks, dependency-update automation and a pinned CI toolchain remain undone.
-  The first two are a maintainer's policy choice; release workflow execution and repository protection also need acceptance.
+  The shell candidate/stage checks are now tested; mutable ancestors and replacement races remain outside those checks' guarantee.
+- SEC-28: the repository/CI/release compiler pin is implemented; scheduled advisory checks and dependency-update automation remain maintainer policy choices.
+  Release workflow execution and repository protections still need acceptance.
 - C13: a zero-byte `state.db` still falls back to defaults with a loud warning (see D2 below).
 
 ### Not verified live
 
 These rest on tests, isolated debug builds, reading code or documentation, not on a real agent session.
 
-- The session anchor after an actual change to hook payload cwd, the human `yoke pause` token flow, and whether a settings file's `env` block reaches hooks and is reloaded in a running session (SEC-2).
-  The current Linux field test confirmed protected-settings denials and that `YOKE_OFF=1` without a token does not disable enforcement, but did not exercise those remaining cases.
-- The statusline styles in a real Claude Code session: colors, the terminal width, and a second line.
+- Continuous-process interactive cwd changes, the human `yoke pause` token flow, and whether settings `env` reaches hooks and reloads in a running session (SEC-2).
+  The current Linux field test verified both agents' changed payload cwd across same-session resume while retaining the original anchor.
+- Quota-present statusline callbacks and terminal colors; a real quota-absent Claude callback passed both styles at three widths.
 - The escaped plan approval preview and shared-note console disclosure in human interaction.
   Focused source/action tests cover the changes; no browser or human approval was run in this wave.
-- `yoke watch` in a Linux terminal emulator.
-  A non-terminal Linux snapshot passed; the interactive view was driven through a pseudo-terminal on macOS only.
+- Human terminal-emulator visual acceptance of `yoke watch`; automated Linux PTY filter/refresh/quit interaction passed at `091ffde`.
 - Linux behaviour of the failure-mode pass: the environment size limit for a gate, a full ext4 disk, and the file modes of private state.
 - `yoke pause` end to end, and the human-only plan commands `approve`, `resume`, `cancel` and `reassign`: they refuse agent processes, so only their parts and renderers have tests.
-- The release-profile behaviour of `honor-home-env`: it is tested through its decision function, not by running an optimized binary.
+- Optimized timing of the final integrated wave and Linux hooks, transcript recovery, gates and maintenance backlog; `honor-home-env` optimized execution was exercised safely in W3-10 at `20b8801`.
 - Whether the review and digest child agents keep Yoke's hooks out, now that hooks refuse `YOKE_OFF=1`: Claude children start with no setting sources, and the Codex flag was read from code, not tested.
 - The release workflow: `actions/attest`, the `release` environment, the green-CI gate, the `SHA256SUMS` step and `gh attestation verify` have not run, because they need a tag or a dispatch.
 - The wget path of `install.sh`, and the installer's sudo prompt for a missing C compiler on a real server with a password-protected `sudo`.
@@ -618,10 +677,12 @@ These rest on tests, isolated debug builds, reading code or documentation, not o
 
 ### Free-model work
 
-- The audit of panics in production code finished, but a free model graded its own hits.
-  None of its labels was independently checked, its summary counts (112 SAFE, 8 RISKY, 3 FIX-NOW) do not match its own table, and at least one FIX-NOW label calls its own invariant safe.
-- The check that every command in the documentation runs as written (a free model) and the audit of user-facing error messages (a free model) produced no report.
-  The error audit left only a raw evidence file.
+- CX7 replaced the earlier panic summary with a 94-file, 2,543-site classified snapshot and fixed watch terminal cleanup.
+  The administrator reviewed the cleanup defect and selected invariants; the historical inventory is not a current whole-program safety proof after round 2.
+- W3-7-docs stays open: 76 literal argv covered 349 of 1,226 extracted occurrences; 877 were not executed, and 58 help paths passed.
+  Template, shell-expansion, prerequisite, human-only and historical examples are not established by that argv inventory.
+- W3-7-errors stays open: 66 of 394 macro sites were reviewed in context and 328 remain lexical-only; other error chains add further scope.
+  Installer/reviewer recovery fixes are committed and focused-tested, which does not complete the exhaustive audit.
 
 ### Declined after the failure-mode tests
 
