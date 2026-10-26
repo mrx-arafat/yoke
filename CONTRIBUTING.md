@@ -46,10 +46,11 @@ To fake GitHub in a test, point `YOKE_CURL` at a stub script: `yoke update` and 
 
 ## Testing against real state
 
-A hook uses the account's own home directory, not `HOME`, whenever the two differ and the account home already holds Yoke state.
-Only a debug build or a build made with `--features honor-home-env` honours `HOME`.
-So never run an optimized (`--release`) binary on a machine that has a real `~/.yoke` and expect an isolated `HOME` to protect it: the hook writes to the real database.
-For an optimized run under an isolated home, build into a throwaway target directory and delete it afterwards:
+Normal CLI commands honour `HOME` in every build.
+An optimized (`--release`) hook invoked through `yoke run-hook` uses the account's own home directory when it differs from `HOME` and already holds Yoke state.
+Debug hooks and hooks built with `--features honor-home-env` honour `HOME` instead.
+Never run optimized hooks without that feature on a machine with real `~/.yoke` state and expect an isolated `HOME` to protect it.
+For optimized hook tests under an isolated home, build into a throwaway target directory and delete it afterwards:
 
 ```sh
 CARGO_TARGET_DIR="$(mktemp -d)" cargo build --release -p yoke-cli --features honor-home-env
@@ -58,7 +59,8 @@ CARGO_TARGET_DIR="$(mktemp -d)" cargo build --release -p yoke-cli --features hon
 Never build into the `target/release` that installed hooks run, and never enable the feature in `release.yml` or the installer.
 CI and containers have no real state, so `cargo test` and release builds there need no feature.
 `cargo test --release` needs `--features honor-home-env`, because the integration tests rely on `HOME`.
-Before any run that could touch a real `~/.yoke`, set `HOME` to a fresh directory with `T=$(mktemp -d) && export HOME="${T:?}"`.
+For CLI commands and debug or `honor-home-env` hook tests, set `HOME` to a fresh directory with `T=$(mktemp -d) && export HOME="${T:?}"`.
+Shipped-archive acceptance runs optimized hooks without that feature, so use a disposable OS account or container.
 
 ## Continuous integration
 

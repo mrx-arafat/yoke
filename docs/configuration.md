@@ -130,6 +130,8 @@ message = "Run cargo fmt --all, then retry."
 Choose commands suitable for the governed repository.
 Observe mode executes `run` even though it does not block.
 If a check exits with `126` or `127`, Yoke keeps the shell's stderr even when `message` is set and adds recovery hints.
+Failure reasons are redacted before their final 4 KiB limit is applied.
+If the raw stderr buffer was truncated, Yoke omits its leading partial line because it may have lost a credential label.
 These statuses usually indicate an unexecutable command or a missing command: inspect `yoke gates --verbose`, check permissions or `PATH`, and run `yoke trust` after editing the policy.
 
 ### Retain check diagnostics

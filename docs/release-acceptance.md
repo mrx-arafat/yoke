@@ -5,7 +5,8 @@
 This page is the checklist a human completes before publishing a Yoke release, and the record of what has been verified.
 The commands that take a release from ready to published are in [Releasing](releasing.md).
 Local focused checks are not release acceptance, and nothing on this page is complete until its evidence is recorded here.
-Shipped optimized binaries can ignore `HOME`; run them in a disposable OS account or a throwaway container so acceptance cannot write to your real Yoke state.
+Normal CLI commands honour `HOME`, but shipped optimized hooks invoked through `yoke run-hook` use the account home when it already holds Yoke state and differs from `HOME`.
+Acceptance runs hooks, so use a disposable OS account or a throwaway container to protect your real Yoke state.
 
 A Git push never publishes a binary.
 Pushing a tag runs the release workflow, which builds every target on its own native runner and creates a draft release.
@@ -178,7 +179,8 @@ Record the date, the tag, the workflow run URL and the person who checked each i
 
 Run the archive's executable inside one of the isolation environments below, with no real agent settings or state mounted or copied into it.
 Changing `HOME` alone does not isolate a shipped optimized binary when the account already has `~/.yoke`.
-A temporary HOME is valid only for a debug build or a build made with `--features honor-home-env`, not for acceptance of a shipped archive.
+A temporary HOME isolates normal CLI commands in every build, and hooks in debug builds or builds made with `--features honor-home-env`.
+It does not isolate shipped-archive acceptance, which also runs optimized hooks without that feature; use a disposable OS account or container.
 Account creation and deletion require a human administrator; the commands below are instructions, not permission for an agent to create accounts.
 
 ### Throwaway Linux container, on Linux or macOS
