@@ -7,7 +7,10 @@ import json
 import math
 import os
 from pathlib import Path
+import select
+import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -42,43 +45,117 @@ def percentile(values: list[float], fraction: float) -> float:
     return sorted(values)[max(0, math.ceil(len(values) * fraction) - 1)]
 
 
-def run(
-    binary: Path,
-    home: Path,
-    project: Path,
-    real_home: Path,
-    args: list[str],
-    payload: dict | None = None,
-) -> subprocess.CompletedProcess:
-    """Assert isolated HOME in the invoking shell before every program execution."""
-    if (
-        not home.is_dir()
-        or home.resolve() == real_home
-        or home.resolve().is_relative_to(ROOT)
-    ):
-        raise ValueError(
-            "benchmark HOME must be an existing disposable directory outside the repository"
+class Launcher:
+    """Launch fresh programs from one guarded shell, outside its startup cost."""
+
+    def __init__(
+        self, binary: Path, home: Path, project: Path, real_home: Path
+    ) -> None:
+        self.home = home
+        self.real_home = real_home.resolve()
+        self._check_home()
+        self.binary = binary
+        self.guard = (
+            'test -n "$HOME" && test "$HOME" != '
+            f'{shlex.quote(str(real_home))} && test -d "$HOME" || exit 1\n'
         )
-    env = os.environ.copy()
-    env["HOME"] = str(home)
-    for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "YOKE_OFF"):
-        env.pop(key, None)
-    guard = 'real_home=$1; shift; test -n "$HOME" && test "$HOME" != "$real_home" && test -d "$HOME" || exit 1; exec "$@"'
-    result = subprocess.run(
-        ["/bin/sh", "-c", guard, "yoke-benchmark", str(real_home), str(binary), *args],
-        cwd=project,
-        env=env,
-        input=json.dumps(payload) if payload is not None else "",
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    if result.returncode:
-        raise RuntimeError(
-            f"{' '.join(args)} exited {result.returncode}: {result.stderr[:500]}"
+        self.io = tempfile.TemporaryDirectory(prefix="benchmark-io-", dir=home)
+        self.input = Path(self.io.name) / "stdin"
+        self.output = Path(self.io.name) / "stdout"
+        self.errors = Path(self.io.name) / "stderr"
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "YOKE_OFF"):
+            env.pop(key, None)
+        try:
+            self.process = subprocess.Popen(
+                ["/bin/sh"],
+                cwd=project,
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            self.io.cleanup()
+            raise
+        try:
+            self.process.stdin.write(b"printf 'ready\\n'\n")
+            self.process.stdin.flush()
+            if self._line() != b"ready\n":
+                raise RuntimeError("benchmark launcher did not become ready")
+        except BaseException:
+            self.close()
+            raise
+
+    def _check_home(self) -> None:
+        if (
+            not self.home.is_dir()
+            or self.home.resolve() == self.real_home
+            or self.home.resolve().is_relative_to(ROOT)
+        ):
+            raise ValueError(
+                "benchmark HOME must be an existing disposable directory outside the repository"
+            )
+
+    def _line(self) -> bytes:
+        if not select.select([self.process.stdout], [], [], 30)[0]:
+            raise subprocess.TimeoutExpired(str(self.binary), 30)
+        line = self.process.stdout.readline()
+        if not line:
+            raise RuntimeError("benchmark launcher stopped before reporting completion")
+        return line
+
+    def run(
+        self, args: list[str], payload: dict | None = None
+    ) -> subprocess.CompletedProcess:
+        """Keep data out of shell syntax and capture each program's streams separately."""
+        self._check_home()
+        self.input.write_text(json.dumps(payload) if payload is not None else "")
+        command = shlex.join([str(self.binary), *args])
+        script = self.guard + (
+            f"{command} < {shlex.quote(str(self.input))} "
+            f"> {shlex.quote(str(self.output))} 2> {shlex.quote(str(self.errors))}\n"
+            "printf '%s\\n' \"$?\"\n"
         )
-    return result
+        self.process.stdin.write(script.encode())
+        self.process.stdin.flush()
+        code = int(self._line())
+        result = subprocess.CompletedProcess(
+            [str(self.binary), *args],
+            code,
+            self.output.read_text(),
+            self.errors.read_text(),
+        )
+        if code:
+            raise RuntimeError(f"{' '.join(args)} exited {code}: {result.stderr[:500]}")
+        return result
+
+    def close(self) -> None:
+        """Reap the launcher and any timed-out children before removing their fixture."""
+        try:
+            try:
+                self.process.stdin.close()
+            except BrokenPipeError:
+                pass
+            try:
+                self.process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.process.wait()
+        finally:
+            self.process.stdout.close()
+            self.io.cleanup()
+
+    def __enter__(self) -> "Launcher":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
 
 def seed(
@@ -176,9 +253,11 @@ def benchmark(args: argparse.Namespace) -> dict:
         (home / ".yoke").mkdir(mode=0o700)
         before = real_test_rows(real_home, project)
         db = sqlite3.connect(home / ".yoke/state.db")
+        launcher = None
         try:
             now = int(time.time())
             seed(db, home, project, args.decisions, args.usage_samples, now)
+            launcher = Launcher(binary, home, project, real_home)
             session = "benchmark-" + uuid.uuid4().hex
             rows = []
             for event in EVENTS:
@@ -192,11 +271,7 @@ def benchmark(args: argparse.Namespace) -> dict:
                 times = []
                 for index in range(args.samples + 1):
                     started = time.perf_counter()
-                    run(
-                        binary,
-                        home,
-                        project,
-                        real_home,
+                    launcher.run(
                         ["run-hook", "--agent", "claude", event],
                         payload,
                     )
@@ -218,9 +293,7 @@ def benchmark(args: argparse.Namespace) -> dict:
                     "hook decisions are missing; timings cannot be accepted"
                 )
             started = time.perf_counter()
-            usage = json.loads(
-                run(binary, home, project, real_home, ["usage", "--json"]).stdout
-            )
+            usage = json.loads(launcher.run(["usage", "--json"]).stdout)
             usage_ms = (time.perf_counter() - started) * 1000
             if args.usage_samples and not usage["sessions"]:
                 raise RuntimeError("seeded usage sessions are missing from yoke usage")
@@ -247,7 +320,7 @@ def benchmark(args: argparse.Namespace) -> dict:
             )
             db.commit()
             started = time.perf_counter()
-            run(binary, home, project, real_home, ["jobs", "work"])
+            launcher.run(["jobs", "work"])
             drain_ms = (time.perf_counter() - started) * 1000
             job_state = db.execute(
                 "SELECT state FROM jobs WHERE kind='notifications-drain'"
@@ -286,7 +359,11 @@ def benchmark(args: argparse.Namespace) -> dict:
                 "limit": "below 50 MiB; 700 MB unverified",
             }
         finally:
-            db.close()
+            try:
+                if launcher is not None:
+                    launcher.close()
+            finally:
+                db.close()
 
 
 def main() -> int:
