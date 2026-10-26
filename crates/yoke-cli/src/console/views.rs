@@ -210,7 +210,7 @@ fn read_preview(path: &std::path::Path) -> Result<Vec<u8>> {
     let file = options.open(path)?;
     ensure!(
         file.metadata()?.is_file(),
-        "Configuration preview requires a regular file."
+        "Configuration preview requires a regular file; back up the policy entry and restore a regular UTF-8 file, then refresh Trust and review it with yoke trust in your own terminal."
     );
     let mut bytes = Vec::new();
     file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;

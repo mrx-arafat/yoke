@@ -165,7 +165,7 @@ pub fn create(
     let root = files::project(project)?;
     ensure!(
         storage::find(store, &root, slug)?.is_none(),
-        "plan already exists"
+        "plan already exists; inspect yoke plan status {slug} or choose a different slug for yoke plan new"
     );
     let path = files::new_path(&root, plans_dir, slug)?;
     let header = PlanHeader {
@@ -292,7 +292,7 @@ pub fn approve(store: &Store, prepared: &PreparedApproval) -> Result<PlanRecord>
     }
     ensure!(
         files::hash(prepared.header.as_bytes()) == prepared.digest,
-        "approval digest mismatch"
+        "approval digest mismatch; have a human rerun yoke plan approve <slug> in the project terminal and review the current header before confirming"
     );
     let (header, parsed) = files::parse(&files::read(&prepared.plan)?)?;
     let header = files::approval_header(&prepared.plan, header, &parsed)?;

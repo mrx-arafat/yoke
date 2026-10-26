@@ -145,8 +145,8 @@ fn pin_scoped(store: &Store, project: Option<&str>, id: i64, pinned: bool) -> Re
 
 fn not_found(id: i64, project: Option<&str>) -> String {
     match project {
-        Some(_) => format!("memory {id} not found in this project"),
-        None => format!("memory {id} not found"),
+        Some(_) => format!("memory {id} not found in this project; run yoke recall --json in the intended project and use an ID from its results"),
+        None => format!("memory {id} not found; run yoke recall --json in the intended project and use an ID from its results"),
     }
 }
 
@@ -235,7 +235,7 @@ pub fn restore_snapshot(store: &Store, snapshot: &MemorySnapshot) -> Result<()> 
     store.transaction(|tx| {
         for id in &snapshot.fact_ids {
             let matches: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM facts WHERE id=?1 AND project=?2)", params![id,memory.project], |row| row.get(0))?;
-            if !matches { bail!("cannot restore missing or mismatched fact {id}"); }
+            if !matches { bail!("cannot restore missing or mismatched fact {id}; refresh Memory to inspect current records; if the note is still needed, add it again with yoke remember <text>; do not edit fact IDs in state.db"); }
         }
         let occupied: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)", [memory.id], |row| row.get(0))?;
         let preferred_id = (!occupied).then_some(memory.id);
@@ -683,7 +683,7 @@ fn knowledge_lock(directory: &Path) -> Result<fs::File> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(directory.join("knowledge.lock"))?;
     if !file.metadata()?.is_file() {
-        bail!("knowledge lock must be a regular file");
+        bail!("knowledge lock must be a regular file; stop other knowledge writers, back up .yoke/knowledge.lock and restore a regular lock file before retrying yoke share <id>");
     }
     file.try_lock()
         .context("project knowledge is locked; retry after the other writer finishes")?;
@@ -698,14 +698,14 @@ fn knowledge_paths(project: &str) -> Result<(PathBuf, PathBuf)> {
         .symlink_metadata()
         .is_ok_and(|meta| meta.file_type().is_symlink())
     {
-        bail!("knowledge directory must not be a symlink");
+        bail!("knowledge directory must not be a symlink; back up the project's .yoke entry and replace the link with a project-local directory before retrying yoke share <id>");
     }
     let path = directory.join("knowledge.md");
     if path
         .symlink_metadata()
         .is_ok_and(|meta| meta.file_type().is_symlink())
     {
-        bail!("knowledge file must not be a symlink");
+        bail!("knowledge file must not be a symlink; back up .yoke/knowledge.md and replace the link with a regular project-local copy before retrying yoke share <id>");
     }
     Ok((directory, path))
 }
@@ -718,12 +718,12 @@ fn read_knowledge(path: &Path) -> Result<Option<String>> {
     {
         Ok(file) => {
             if !file.metadata()?.is_file() || file.metadata()?.len() > KNOWLEDGE_LIMIT {
-                bail!("knowledge must be a regular file at most 4 MiB");
+                bail!("knowledge must be a regular file at most 4 MiB; back up .yoke/knowledge.md and restore a regular UTF-8 file within that limit before retrying yoke share <id>");
             }
             let mut text = String::new();
             file.take(KNOWLEDGE_LIMIT + 1).read_to_string(&mut text)?;
             if text.len() as u64 > KNOWLEDGE_LIMIT {
-                bail!("knowledge file exceeds 4 MiB");
+                bail!("knowledge file exceeds 4 MiB; back up .yoke/knowledge.md and shorten it before retrying yoke share <id>");
             }
             Ok(Some(text))
         }

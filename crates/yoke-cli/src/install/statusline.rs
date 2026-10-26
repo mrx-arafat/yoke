@@ -56,17 +56,17 @@ pub(super) fn build(
     let mut after = before.clone().unwrap_or_else(|| json!({"type":"command"}));
     ensure!(
         after.is_object() && after["type"] == "command",
-        "existing statusLine must be a command object; no settings changed"
+        "existing statusLine must be a command object; no settings changed; back up Claude settings.json and correct statusLine.type to command with a nonempty command string, or retry yoke install --agent claude --statusline-if-absent to keep the existing entry"
     );
     let command = match before.as_ref() {
         None => base(executable, style.unwrap_or_default()),
         Some(value) => {
             let existing = value["command"]
                 .as_str()
-                .context("existing statusLine command must be a string")?;
+                .context("existing statusLine command must be a string; back up Claude settings.json and correct statusLine.command, or retry yoke install --agent claude --statusline-if-absent to keep the existing entry")?;
             ensure!(
                 !existing.trim().is_empty() && existing.len() <= 4096 && !existing.contains('\0'),
-                "existing statusLine command is empty or exceeds wrapper limits"
+                "existing statusLine command is empty or exceeds wrapper limits; back up Claude settings.json and use a nonempty command of at most 4096 bytes without NUL, or retry yoke install --agent claude --statusline-if-absent to keep the existing entry"
             );
             // A pre-existing identical entry belongs to the user; asking for the other style
             // restyles it, and uninstall puts it back as it was rather than wrapping it.
@@ -76,7 +76,7 @@ pub(super) fn build(
                 ensure!(
                     !existing.starts_with(&format!("{compact} --wrap "))
                         && !existing.starts_with(&format!("{detailed} --wrap ")),
-                    "existing Yoke statusline lacks matching receipt; refusing recursive wrapping"
+                    "existing Yoke statusline lacks matching receipt; refusing recursive wrapping; back up Claude settings.json and the install receipt, restore the original statusLine from a known-good settings backup, then retry yoke install --agent claude --statusline; use --statusline-if-absent to keep the existing entry"
                 );
                 format!(
                     "{} --wrap {}",

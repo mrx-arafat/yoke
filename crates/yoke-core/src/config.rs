@@ -296,6 +296,10 @@ impl Config {
 
     /// Parse one layer, retaining which settings were explicitly supplied.
     pub fn parse(s: &str) -> Result<Self> {
+        Self::parse_layer(s).map_err(|error| anyhow::anyhow!("{error:#}; edit the policy file to correct the reported field or TOML, then run yoke trust in your own terminal (yoke trust --global for ~/.yoke/config.toml)"))
+    }
+
+    fn parse_layer(s: &str) -> Result<Self> {
         let value: toml::Value = toml::from_str(s).context("parsing Yoke config (TOML)")?;
         let mut config: Self = value
             .clone()

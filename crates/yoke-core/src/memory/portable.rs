@@ -138,14 +138,14 @@ pub fn export_archive(
          UNION ALL SELECT length(CAST(detail AS BLOB))+length(CAST(project AS BLOB))+length(CAST(session_id AS BLOB))+length(CAST(kind AS BLOB))+256 FROM facts WHERE (?1 IS NULL OR project=?1))",
         [project],|row| Ok((row.get(0)?,row.get(1)?)))?;
     if count > RECORD_LIMIT as i64 || size > ARCHIVE_LIMIT as i64 {
-        bail!("selected project scope exceeds supported archive limit (16 MiB or 20000 records); a single oversized project cannot currently be exported");
+        bail!("selected project scope exceeds supported archive limit (16 MiB or 20000 records); retry without --all to export one project at a time; a single oversized project cannot currently be exported, so keep state.db and its sidecars together and report the limit with yoke --version rather than deleting records");
     }
     let mut memories = tx.prepare(&format!("SELECT {MEMORY_COLUMNS} FROM memories WHERE (?1 IS NULL OR project=?1) ORDER BY id LIMIT ?2"))?
         .query_map(params![project,RECORD_LIMIT as i64 + 1], memory_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut facts = tx.prepare("SELECT id,identity,ts,session_id,project,kind,detail,digested FROM facts WHERE (?1 IS NULL OR project=?1) ORDER BY id LIMIT ?2")?
         .query_map(params![project,RECORD_LIMIT as i64 + 1], fact_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
     if memories.len() + facts.len() > RECORD_LIMIT {
-        bail!("selected scope exceeds {RECORD_LIMIT} records; a single oversized project is unsupported");
+        bail!("selected scope exceeds {RECORD_LIMIT} records; retry without --all to export one project at a time; a single oversized project is unsupported, so keep state.db and its sidecars together and report the limit with yoke --version rather than deleting records");
     }
     let links = tx.prepare("SELECT m.identity,f.identity FROM memory_facts l JOIN memories m ON m.id=l.memory_id JOIN facts f ON f.id=l.fact_id WHERE (?1 IS NULL OR m.project=?1) ORDER BY m.identity,f.identity LIMIT ?2")?
         .query_map(params![project,RECORD_LIMIT as i64 + 1], |row| Ok(Link {memory:row.get(0)?,fact:row.get(1)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -188,7 +188,7 @@ pub fn export_archive(
         links,
     };
     // Shape only: a local clock that ran ahead must not make the export fail.
-    validate(&archive, i64::MAX)?;
+    validate(&archive, i64::MAX).context("stored memory records cannot form a valid archive; keep state.db and its sidecars together, collect yoke --version and this diagnostic, and report the invalid stored record; do not edit record identities; no export file was written")?;
     let mut buffer = ArchiveBuffer(Vec::new());
     serde_json::to_writer_pretty(&mut buffer, &archive)?;
     let bytes = buffer.0;
@@ -224,7 +224,7 @@ pub fn import_archive(
         now,
     } = *options;
     if !fs::symlink_metadata(path)?.file_type().is_file() {
-        bail!("archive must be a regular file, not a symlink or special file");
+        bail!("archive must be a regular file, not a symlink or special file; keep the original and pass a regular file created by yoke memory export <file>, then retry yoke memory import <file> --dry-run with the required --map values");
     }
     // O_NONBLOCK prevents a swapped FIFO from blocking; O_NOFOLLOW closes the symlink race.
     let file = OpenOptions::new()
@@ -232,19 +232,19 @@ pub fn import_archive(
         .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
         .open(path)?;
     if !file.metadata()?.file_type().is_file() {
-        bail!("archive must be a regular file");
+        bail!("archive must be a regular file; keep the original and pass a regular file created by yoke memory export <file>, then retry yoke memory import <file> --dry-run with the required --map values");
     }
     if file.metadata()?.len() > ARCHIVE_LIMIT as u64 {
-        bail!("archive exceeds 16 MiB");
+        bail!("archive exceeds 16 MiB; keep the original and export individual projects without --all on the source machine; preview each new archive with yoke memory import <file> --dry-run and the required --map values");
     }
     let mut bytes = Vec::new();
     file.take(ARCHIVE_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > ARCHIVE_LIMIT {
-        bail!("archive exceeds 16 MiB");
+        bail!("archive exceeds 16 MiB; keep the original and export individual projects without --all on the source machine; preview each new archive with yoke memory import <file> --dry-run and the required --map values");
     }
-    let mut archive: Archive = serde_json::from_slice(&bytes).context("invalid memory archive")?;
-    validate(&archive, now)?;
+    let mut archive: Archive = serde_json::from_slice(&bytes).context("invalid memory archive; keep the original file and create a fresh archive with yoke memory export <file> on the source machine; do not edit record identities")?;
+    validate(&archive, now).map_err(|error| anyhow::anyhow!("{error:#}; keep the original file and create a fresh archive with yoke memory export <file> on the source machine, then preview it with yoke memory import <file> --dry-run and the required --map values; no records changed"))?;
     if mappings.len() != archive.projects.len()
         || archive
             .projects
@@ -408,7 +408,7 @@ pub fn import_archive(
     }
     if !report.conflicts.is_empty() {
         bail!(
-            "memory import conflicts; no records changed: {}",
+            "memory import conflicts; no records changed: {}; inspect yoke memory import <file> --dry-run with the same --map values; correct any reported project mapping, and preserve the archive plus state.db and its sidecars if record contents conflict; report unresolved identity conflicts with yoke --version rather than editing identities",
             report.conflicts.join("; ")
         );
     }
@@ -453,7 +453,7 @@ fn insert_identity(tx: &Transaction<'_>, identity: &str, kind: &str, id: i64) ->
         )
         .optional()?;
     if mapped.is_some_and(|mapped| mapped != id) {
-        bail!("conflicting imported identity mapping {identity}");
+        bail!("conflicting imported identity mapping {identity}; keep the archive and state.db with its sidecars, inspect yoke memory import <file> --dry-run with the same --map values, and report the identity conflict with yoke --version; do not edit identities");
     }
     tx.execute("INSERT INTO imported_identities(identity,kind,local_id) VALUES (?1,?2,?3) ON CONFLICT DO NOTHING",params![identity,kind,id])?;
     Ok(())

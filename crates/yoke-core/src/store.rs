@@ -195,7 +195,7 @@ impl Store {
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > MIGRATIONS.len() {
             bail!(
-                "state database schema {version} is newer than supported {}",
+                "state database schema {version} is newer than supported {}; update every Yoke executable used by your hooks to a version supporting schema {version}, then run yoke health; keep state.db and its sidecars together and do not edit the schema number",
                 MIGRATIONS.len()
             );
         }
@@ -241,7 +241,7 @@ impl Store {
                 )
             };
             if code != rusqlite::ffi::SQLITE_OK {
-                bail!("cannot preserve WAL sidecars for no-write readers (SQLite {code})");
+                bail!("cannot preserve WAL sidecars for no-write readers (SQLite {code}); keep state.db and its sidecars together, collect yoke --version and this diagnostic, and report the unsupported SQLite file control before retrying with a supported Yoke build");
             }
         }
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -249,7 +249,7 @@ impl Store {
             transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > MIGRATIONS.len() {
             bail!(
-                "state database schema {version} is newer than supported {}",
+                "state database schema {version} is newer than supported {}; update every Yoke executable used by your hooks to a version supporting schema {version}, then run yoke health; keep state.db and its sidecars together and do not edit the schema number",
                 MIGRATIONS.len()
             );
         }
@@ -266,7 +266,7 @@ impl Store {
             transaction.pragma_update(None, "user_version", index + 1)?;
         }
         if pending && foreign_key_violations(&transaction)? > before {
-            bail!("migration left foreign key violations; state database was not changed");
+            bail!("migration left foreign key violations; state database was not changed; keep state.db and its sidecars together, collect yoke --version and this diagnostic, and report the failed migration before retrying with a corrected Yoke build; do not edit schema numbers or foreign keys");
         }
         if pending {
             // Bounded statistics work only after schema changes, never on ordinary hooks.
@@ -584,7 +584,7 @@ fn database_path(path: &Path) -> Result<std::path::PathBuf> {
         .is_some_and(|name| name == crate::private::STATE_DIR)
         && !std::fs::symlink_metadata(parent)?.is_dir()
     {
-        bail!("Yoke state directory must not be a symbolic link");
+        bail!("Yoke state directory must not be a symbolic link; stop Yoke writers and preserve the linked state.db with its sidecars, then restore a real private ~/.yoke directory in your own terminal and run yoke health");
     }
     let path = parent.canonicalize()?.join(name);
     ensure_regular_file(&path)?;

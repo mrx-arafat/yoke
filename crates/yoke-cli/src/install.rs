@@ -378,7 +378,7 @@ fn settings(raw: Option<&str>) -> Result<Value> {
     if let Some(hooks) = value.get("hooks") {
         let hooks = hooks.as_object().context("hooks must be an object")?;
         for (event, entries) in hooks {
-            ensure!(entries.is_array(), "hooks.{event} must be an array");
+            ensure!(entries.is_array(), "hooks.{event} must be an array; back up Claude settings.json, correct that hooks entry to an array, then retry yoke install --agent claude");
         }
     }
     Ok(value)

@@ -344,7 +344,7 @@ fn contain<T>(work: impl FnOnce() -> Result<T>) -> Result<T> {
             .map(|text| (*text).to_owned())
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "unknown panic".into());
-        Err(anyhow::anyhow!("internal error: {message}"))
+        Err(anyhow::anyhow!("internal error: {message}; collect yoke --version and the redacted diagnostic and report the hook fault; a human can inspect yoke health in their own terminal"))
     })
 }
 
@@ -430,7 +430,7 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
     let cwd = match ev.cwd.as_deref() {
         Some(path) => {
             let path = PathBuf::from(path);
-            ensure!(path.is_absolute(), "hook cwd must be absolute");
+            ensure!(path.is_absolute(), "hook cwd must be absolute; repair the hook payload to send the project's absolute working directory; repair the hook registration with yoke install --agent {} in your own terminal", agent.as_str());
             match path.canonicalize() {
                 Ok(path) => path,
                 // The reported directory can vanish under a session (renamed, or a removed
@@ -481,17 +481,18 @@ fn evaluate(event: &str, agent: Agent, state: &mut HookState) -> Result<Option<V
         say!("yoke: project scope unavailable because the project path is not UTF-8; rename the project directory using UTF-8 names to enable project policy, plans and memory; trusted parent and global policy still apply");
     }
     state.cap = loaded.config.log.payload_cap;
-    let kind = EventKind::parse(event).with_context(|| format!("unknown hook event {event}"))?;
+    let kind = EventKind::parse(event).with_context(|| format!("unknown hook event {event}; repair the hook registration with yoke install --agent {} in your own terminal", agent.as_str()))?;
     state.row.event = kind.as_str().into();
     ensure!(
         agent.supports(kind),
-        "{} does not document the {event} event",
+        "{} does not document the {event} event; repair the hook registration with yoke install --agent {} in your own terminal",
+        agent.as_str(),
         agent.as_str()
     );
     if let Some(name) = &ev.event_name {
         ensure!(
             EventKind::parse(name) == Some(kind),
-            "payload event does not match requested event"
+            "payload event does not match requested event; repair the hook payload to send the registered event; repair the hook registration with yoke install --agent {} in your own terminal", agent.as_str()
         );
     }
     if kind.is_blocking() {

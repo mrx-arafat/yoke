@@ -140,11 +140,11 @@ pub fn render(name: &str, options: &PresetOptions) -> Result<String> {
                     && wrapper
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
-                "wrapper must be an executable basename"
+                "wrapper must be an executable basename; pass --wrapper with the installed program name, without a directory or shell syntax"
             );
             ensure!(
                 executable_on_path(wrapper),
-                "wrapper is not executable on PATH"
+                "wrapper is not executable on PATH; install the wrapper and add its directory to PATH before retrying yoke preset add token-saver"
             );
             let prefix = options
                 .command_prefix
@@ -158,11 +158,11 @@ pub fn render(name: &str, options: &PresetOptions) -> Result<String> {
                         && word
                             .bytes()
                             .all(|b| b.is_ascii_alphanumeric() || b"_./-".contains(&b))),
-                "command prefix must contain literal shell-safe words"
+                "command prefix must contain literal shell-safe words; pass --command-prefix with space-separated literal words, without quotes, expansions or shell operators"
             );
             ensure!(
                 prefix.split(' ').next() != Some(wrapper),
-                "wrapper cannot wrap itself"
+                "wrapper cannot wrap itself; choose a --command-prefix whose first word is the underlying command, not the --wrapper program"
             );
             warning = "# Permission warning: Codex rewrites answer allow and bypass its normal permission prompt.\n# Claude rewrites preserve normal permission evaluation.\n# Only the explicit prefix and simple arguments match; no shell chains or expansions.\n".into();
             for (suffix, tools, field) in [
@@ -216,7 +216,7 @@ pub fn add(path: &Path, name: &str, options: &PresetOptions) -> Result<AddOutcom
         .context("preset config is locked; ensure no other preset writer is running")?;
     ensure!(
         lock_file.metadata()?.is_file(),
-        "preset lock must be a regular file"
+        "preset lock must be a regular file; stop other preset writers, back up the lock entry, restore a regular lock file, then retry yoke preset add"
     );
     lock_file
         .try_lock()
@@ -259,7 +259,7 @@ fn read_config(path: &Path) -> Result<Vec<u8>> {
         Err(error) => return Err(error.into()),
         Ok(metadata) => ensure!(
             metadata.is_file() && !metadata.file_type().is_symlink(),
-            "config must be a regular file, not a symlink"
+            "config must be a regular file, not a symlink; back up the original entry and restore a regular yoke.toml or global config.toml before retrying yoke preset add"
         ),
     }
     use std::os::unix::fs::OpenOptionsExt;
@@ -268,9 +268,12 @@ fn read_config(path: &Path) -> Result<Vec<u8>> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
-    ensure!(file.metadata()?.is_file(), "config must be a regular file");
+    ensure!(file.metadata()?.is_file(), "config must be a regular file; back up the original entry and restore a regular policy file before retrying yoke preset add");
     file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= 1024 * 1024, "config exceeds 1 MiB");
+    ensure!(
+        bytes.len() <= 1024 * 1024,
+        "config exceeds 1 MiB; back up the original and shorten it before retrying yoke preset add"
+    );
     Ok(bytes)
 }
 

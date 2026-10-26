@@ -100,7 +100,7 @@ fn read_tail(path: &Path) -> Result<Option<String>> {
         Err(error) => return Err(error).context("read error.log"),
     };
     let metadata = file.metadata()?;
-    ensure!(metadata.is_file(), "error.log must be a regular file");
+    ensure!(metadata.is_file(), "error.log must be a regular file; stop Yoke writers, back up ~/.yoke/error.log and restore a private regular file before retrying yoke trial report");
     let size = metadata.len();
     let start = size.saturating_sub(ERROR_LOG_TAIL);
     file.seek(SeekFrom::Start(start))?;

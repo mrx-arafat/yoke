@@ -288,7 +288,7 @@ pub fn close(
         if state == closure.as_str() {
             return Ok(item);
         }
-        ensure!(state == "open", "feedback #{id} is already {state}");
+        ensure!(state == "open", "feedback #{id} is already {state}; inspect yoke plan status {slug} and select an open top-level feedback item if further resolution is needed");
         tx.execute(
             "UPDATE plan_feedback SET state=?1,resolved_by='human',resolved_at=?2,note=?3 WHERE id=?4 AND state='open'",
             params![closure.as_str(), ts, note, id],
@@ -341,7 +341,7 @@ pub fn validate(
     let plan = get(store, project, slug)?;
     ensure!(
         !matches!(plan.state.as_str(), "checking" | "done" | "cancelled"),
-        "only a plan that can still be approved can be validated"
+        "only a plan that can still be approved can be validated; inspect yoke plan status <slug>; wait for an active check to finish, or create a new draft with yoke plan new <new-slug> for completed or cancelled work"
     );
     let content = files::read(&plan)?;
     let known = anchors(&content)?;

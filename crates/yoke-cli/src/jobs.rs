@@ -196,7 +196,7 @@ fn checked_digest_job(job: &jobs::Job, roots: &[PathBuf]) -> jobs::Job {
             .map_or(serde_json::Value::Null, serde_json::Value::from),
         Err(error) => {
             crate::hook::diagnostic(&format!(
-                "yoke: job {} ignored transcript {path:?}: {error:#}",
+                "yoke: job {} ignored transcript {path:?}: {error:#}; continuing with recorded facts only; repair the agent hook's transcript metadata for the next session, then inspect yoke jobs --all; do not move private transcripts to bypass the allowed directories",
                 job.id
             ));
             serde_json::Value::Null

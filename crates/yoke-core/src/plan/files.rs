@@ -17,8 +17,8 @@ const MAX_ARTIFACT_BYTES: u64 = 10 * 1024 * 1024;
 
 pub(super) fn project(path: &Path) -> Result<PathBuf> {
     let root = path.canonicalize().context("resolving project root")?;
-    ensure!(root.is_dir(), "project root must be a directory");
-    ensure!(root.to_str().is_some(), "project root must be UTF-8");
+    ensure!(root.is_dir(), "project root must be a directory; change into the intended project directory and retry the plan command");
+    ensure!(root.to_str().is_some(), "project root must be UTF-8; rename its non-UTF-8 directory components before retrying the plan command");
     Ok(root)
 }
 
@@ -46,7 +46,7 @@ fn relative(path: &Path) -> bool {
 pub(super) fn new_path(root: &Path, directory: &str, slug: &str) -> Result<PathBuf> {
     ensure!(
         relative(Path::new(directory)),
-        "plans directory must be a relative path without traversal"
+        "plans directory must be a relative path without traversal; correct plans.dir in yoke.toml and run yoke trust in your own terminal before retrying"
     );
     let directory = root.join(directory);
     let ancestor = directory
@@ -55,13 +55,13 @@ pub(super) fn new_path(root: &Path, directory: &str, slug: &str) -> Result<PathB
         .context("plans directory has no existing ancestor")?;
     ensure!(
         ancestor.canonicalize()?.starts_with(root),
-        "plans directory escapes project"
+        "plans directory escapes project; restore a project-local plans.dir directory without escaping symlinks, then retry yoke plan new"
     );
     fs::create_dir_all(&directory)?;
     let directory = directory.canonicalize()?;
     ensure!(
         directory.starts_with(root),
-        "plans directory escapes project"
+        "plans directory escapes project; restore a project-local plans.dir directory without escaping symlinks, then retry yoke plan new"
     );
     Ok(directory.join(format!("{slug}.md")))
 }
@@ -71,7 +71,7 @@ fn resolved(plan: &PlanRecord) -> Result<PathBuf> {
     let path = Path::new(&plan.file)
         .canonicalize()
         .context("resolving plan file")?;
-    ensure!(path.starts_with(&root), "plan file escapes project");
+    ensure!(path.starts_with(&root), "plan file escapes project; restore the recorded plan file inside its project, then retry the plan command");
     Ok(path)
 }
 
@@ -113,7 +113,7 @@ pub(super) fn claim_check(plan: &PlanRecord) -> Result<Option<fs::File>> {
             && metadata.nlink() == 1
             && metadata.uid() == uid
             && metadata.mode() & 0o077 == 0,
-        "plan check lock must be a private, singly linked regular file owned by this user"
+        "plan check lock must be a private, singly linked regular file owned by this user; stop other plan checks, back up the lock entry in Git metadata, restore a regular file owned by you with mode 0600 and one link, then retry yoke plan check"
     );
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
@@ -133,7 +133,7 @@ pub(super) fn read(plan: &PlanRecord) -> Result<String> {
     let metadata = file.metadata()?;
     ensure!(
         metadata.is_file() && metadata.len() <= 1024 * 1024,
-        "plan must be a regular file of at most 1 MiB"
+        "plan must be a regular file of at most 1 MiB; back up the original entry and restore the plan's Markdown file within that limit, then have a human retry yoke plan approve <slug> in the project terminal"
     );
     let mut text = String::new();
     file.take(1024 * 1024 + 1)
@@ -147,6 +147,10 @@ pub(super) fn read(plan: &PlanRecord) -> Result<String> {
 }
 
 pub(super) fn parse(content: &str) -> Result<(String, PlanHeader)> {
+    parse_header(content).map_err(|error| anyhow::anyhow!("{error:#}; edit the plan file's +++ TOML header, then have a human run yoke plan approve <slug> in that project's terminal before retrying checks"))
+}
+
+fn parse_header(content: &str) -> Result<(String, PlanHeader)> {
     let rest = content
         .strip_prefix("+++\r\n")
         .or_else(|| content.strip_prefix("+++\n"))
@@ -240,7 +244,7 @@ pub(super) fn approval_header(
         }
         ensure!(
             relative(Path::new(name)),
-            "check input must stay inside the project"
+            "check input must stay inside the project; correct check.inputs in the plan header to project-relative files and have a human retry yoke plan approve <slug>"
         );
         let path = root.join(name);
         let parent = path
@@ -262,7 +266,7 @@ pub(super) fn approval_header(
             })?;
         ensure!(
             file.metadata()?.is_file(),
-            "check input {name} must be a regular file"
+            "check input {name} must be a regular file; restore a regular project-local file or correct check.inputs, then have a human retry yoke plan approve <slug>"
         );
         let mut bytes = Vec::new();
         file.take(10 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
@@ -295,7 +299,7 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     )?;
     ensure!(
         output.success && !output.timed_out && !output.stdout_truncated,
-        "git fingerprint command failed or exceeded its bound: {}",
+        "git fingerprint command failed or exceeded its bound; inspect git status --short, restore readable Git metadata and narrow the working changes before retrying the plan command: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(output.stdout)
@@ -365,7 +369,7 @@ pub fn content_fingerprint(project_path: &Path, base: &str) -> Result<Option<Str
     }
     ensure!(
         found.success && !found.timed_out,
-        "git could not resolve commit {base}"
+        "git could not resolve commit {base}; inspect git status --short and restore access to the recorded commit before retrying the plan command; if Git still fails, report this diagnostic with git --version and yoke --version"
     );
     let mut hash = Sha256::new();
     field(&mut hash, base.as_bytes());
@@ -521,7 +525,7 @@ fn nested_head(directory: &Path) -> Result<Vec<u8>> {
     }
     ensure!(
         output.success && !output.timed_out,
-        "git could not read the nested repository {}",
+        "git could not read the nested repository {}; restore readable Git metadata in that directory and retry the plan command; if Git still fails, report this diagnostic with git --version and yoke --version",
         directory.display()
     );
     Ok(output.stdout.trim_ascii_end().to_vec())
@@ -549,12 +553,12 @@ pub(super) fn artifacts(root: &Path, declared: &[String]) -> Result<Vec<(String,
                 .with_context(|| format!("missing declared artifact {artifact}"))?;
             ensure!(
                 path.starts_with(root) && image_extension(&path),
-                "artifact escapes project or is not an image"
+                "artifact escapes project or is not an image; regenerate the declared PNG, JPEG or WebP inside the project and rerun yoke plan check <slug> --agent <claude|codex>"
             );
             let metadata = fs::metadata(&path)?;
             ensure!(
                 metadata.is_file() && metadata.len() <= MAX_ARTIFACT_BYTES,
-                "artifact must be a regular image of at most 10 MiB"
+                "artifact must be a regular image of at most 10 MiB; regenerate a smaller project-local PNG, JPEG or WebP and rerun yoke plan check <slug> --agent <claude|codex>"
             );
             let hash = file_hash(&path)?;
             let path = path
@@ -580,7 +584,7 @@ fn file_hash(path: &Path) -> Result<String> {
     );
     ensure!(
         metadata.len() <= MAX_ARTIFACT_BYTES,
-        "artifact exceeds its size limit"
+        "artifact exceeds its size limit; regenerate the declared image under 10 MiB and rerun the check"
     );
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 16384];
@@ -593,7 +597,7 @@ fn file_hash(path: &Path) -> Result<String> {
         total += count as u64;
         ensure!(
             total <= MAX_ARTIFACT_BYTES,
-            "artifact grew beyond its size limit"
+            "artifact grew beyond its size limit; stop the image writer, regenerate it under 10 MiB and rerun the check"
         );
         hash.update(&buffer[..count]);
     }

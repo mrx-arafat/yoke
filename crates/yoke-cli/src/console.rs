@@ -269,7 +269,7 @@ fn serve(
                 request,
                 400,
                 "text/plain; charset=utf-8",
-                "Invalid request URL",
+                "Invalid request URL; reopen this page from the console navigation without modifying its query parameters",
             )
         }
     };
@@ -282,7 +282,7 @@ fn serve(
         return respond(request, 404, "text/plain; charset=utf-8", "Page not found");
     };
     if !authorize(console, request.method(), &headers) {
-        return respond(request, 403, "text/plain; charset=utf-8", "Forbidden");
+        return respond(request, 403, "text/plain; charset=utf-8", "Forbidden; run yoke console in your own terminal and use the current session's browser tab");
     }
     if request.method() == "POST" {
         if path != "/actions" {
@@ -295,7 +295,7 @@ fn serve(
         })();
         return match result {
             Ok(value)=>respond(request,200,"application/json",&value.to_string()),
-            Err(error)=>respond(request,409,"application/json",&serde_json::json!({"error":{"code":"action_failed","message":yoke_core::redact::redact(&error.to_string())}}).to_string()),
+            Err(error)=>respond(request,409,"application/json",&serde_json::json!({"error":{"code":"action_failed","message":yoke_core::redact::redact(&format!("{error}; refresh this view and retry using its current controls"))}}).to_string()),
         };
     }
     match path {
@@ -330,7 +330,7 @@ fn serve(
                 request,
                 404,
                 "text/plain",
-                &yoke_core::redact::redact(&error.to_string()),
+                &yoke_core::redact::redact(&format!("{error}; reopen the screenshot from Plans; if it is still unavailable, regenerate its project-local PNG, JPEG or WebP file under 10 MiB and rerun the matching yoke plan check <slug> --agent <claude|codex>, then refresh Plans")),
             ),
         },
         "/" | "/decisions" | "/projects" | "/sessions" | "/plans" | "/memory" | "/trust"

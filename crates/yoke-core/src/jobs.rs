@@ -62,7 +62,7 @@ fn enqueue_in(
         (1..=64).contains(&kind.len()) && (1..=512).contains(&dedupe_key.len()),
         "job kind and dedupe key must be nonempty and bounded"
     );
-    ensure!(payload.len() <= 65_536, "job payload exceeds 64 KiB");
+    ensure!(payload.len() <= 65_536, "job payload exceeds 64 KiB; repair the hook's oversized session/transcript metadata and start a new agent session, then inspect yoke jobs --all; recorded facts remain available and no job was queued");
     let active = connection
         .query_row(
             &format!("SELECT id FROM jobs WHERE dedupe_key=?1 AND state IN {ACTIVE}"),
@@ -216,7 +216,7 @@ fn owned_update(
     )?;
     if changed != 1 {
         bail!(
-            "job {} lease was lost; recovery may have handed it to another worker",
+            "job {} lease was lost; recovery may have handed it to another worker; inspect yoke jobs --all and wait for the current worker rather than starting duplicate work",
             job.id
         );
     }
@@ -227,11 +227,11 @@ fn owned_update(
 pub fn retry(store: &Store, id: i64, now: i64) -> Result<Job> {
     store.transaction(|tx| {
         let Some(job) = get_optional(tx, id)? else {
-            bail!("job {id} not found");
+            bail!("job {id} not found; run yoke jobs --all to choose an existing dead job ID before retrying");
         };
         ensure!(
             job.state == "dead",
-            "only dead jobs can be retried; job {id} is {}",
+            "only dead jobs can be retried; job {id} is {}; run yoke jobs --all to inspect its state and wait for active work to finish before retrying a dead job",
             job.state
         );
         let active = tx
@@ -242,7 +242,7 @@ pub fn retry(store: &Store, id: i64, now: i64) -> Result<Job> {
             )
             .optional()?;
         if let Some((other, state)) = active {
-            bail!("job {other} for the same work is already {state}");
+            bail!("job {other} for the same work is already {state}; run yoke jobs --all and wait for that work to finish instead of retrying a duplicate");
         }
         tx.execute(
             "UPDATE jobs SET state='queued',attempts=0,run_after=?2,updated_at=?2 WHERE id=?1",

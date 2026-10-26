@@ -446,7 +446,7 @@ fn read_regular_file(file: &Path) -> Result<Vec<u8>> {
         .with_context(|| format!("reading {}", file.display()))?;
     ensure!(
         metadata.is_file() && metadata.len() <= LIMIT,
-        "{} must be a regular file of at most 1 MiB",
+        "{} must be a regular file of at most 1 MiB; back up the original, restore a regular UTF-8 file within that limit, then retry yoke trust in your own terminal (yoke trust --global for global config)",
         file.display()
     );
     let mut bytes = Vec::new();
@@ -456,7 +456,7 @@ fn read_regular_file(file: &Path) -> Result<Vec<u8>> {
         .with_context(|| format!("reading {}", file.display()))?;
     ensure!(
         bytes.len() as u64 <= LIMIT,
-        "{} exceeds 1 MiB",
+        "{} exceeds 1 MiB; back up the original, shorten the file, then retry yoke trust in your own terminal (yoke trust --global for global config)",
         file.display()
     );
     Ok(bytes)

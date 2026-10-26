@@ -55,7 +55,8 @@ impl std::fmt::Display for HttpStatus {
                 self.code
             ),
             code => write!(f, "{what} failed: GitHub answered HTTP {code}"),
-        }
+        }?;
+        write!(f, "; retry yoke update --check after resolving the response; the installed executable has not been replaced")
     }
 }
 
@@ -65,32 +66,33 @@ impl std::error::Error for HttpStatus {}
 pub(super) fn split_status(what: &str, mut bytes: Vec<u8>, limit: usize) -> Result<Vec<u8>> {
     ensure!(
         bytes.len() >= STATUS_TRAILER,
-        "{what} failed: no HTTP status in the response"
+        "{what} failed: no HTTP status in the response; check connectivity and retry yoke update --check"
     );
     let body_len = bytes.len() - STATUS_TRAILER;
     let code = std::str::from_utf8(&bytes[body_len..])
         .ok()
         .and_then(|trailer| trailer.strip_prefix('\n'))
         .and_then(|digits| digits.parse::<u16>().ok())
-        .with_context(|| format!("{what} failed: no HTTP status in the response"))?;
+        .with_context(|| format!("{what} failed: no HTTP status in the response; check connectivity and retry yoke update --check"))?;
     if !(200..300).contains(&code) {
         return Err(HttpStatus::new(what, code).into());
     }
     bytes.truncate(body_len);
-    ensure!(bytes.len() <= limit, "{what} exceeds size limit");
+    ensure!(bytes.len() <= limit, "{what} exceeds size limit; keep the installed executable and retry yoke update --check after the release asset is corrected");
     Ok(bytes)
 }
 
 /// Why curl itself failed, in words about the user's situation rather than curl's numbers.
 fn exit_message(what: &str, status: std::process::ExitStatus) -> String {
-    match status.code() {
+    let reason = match status.code() {
         Some(6) => format!("{what} failed (curl exit 6): cannot resolve the GitHub host; check DNS and connectivity"),
         Some(7) => format!("{what} failed (curl exit 7): cannot connect to GitHub; check connectivity"),
         Some(28) => format!("{what} failed (curl exit 28): timed out; check connectivity"),
         Some(35 | 60) => format!("{what} failed (curl exit {}): the TLS connection to GitHub failed; check the system clock and certificates", status.code().unwrap_or_default()),
         Some(63) => format!("{what} exceeds size limit"),
         _ => format!("{what} failed ({status}); check connectivity"),
-    }
+    };
+    format!("{reason}; retry yoke update --check after resolving the cause; the installed executable has not been replaced")
 }
 
 /// Where curl is looked for before falling back to the `PATH` lookup, so a `curl` that a
@@ -208,17 +210,17 @@ pub(super) fn collect(
     });
     let start = Instant::now();
     let result = (|| {
-        let bytes = receiver
-            .recv_timeout(timeout)
-            .with_context(|| format!("{what} exceeded deadline"))??;
-        ensure!(bytes.len() <= limit, "{what} exceeds size limit");
+        let bytes = receiver.recv_timeout(timeout).with_context(|| {
+            format!("{what} exceeded deadline; check connectivity and retry yoke update --check")
+        })??;
+        ensure!(bytes.len() <= limit, "{what} exceeds size limit; keep the installed executable and retry yoke update --check after the release asset is corrected");
         loop {
             if let Some(status) = child.try_wait()? {
                 ensure!(status.success(), "{}", exit_message(what, status));
                 return Ok(bytes);
             }
             if start.elapsed() >= timeout {
-                bail!("{what} exceeded deadline");
+                bail!("{what} exceeded deadline; check connectivity and retry yoke update --check");
             }
             std::thread::sleep(Duration::from_millis(10));
         }

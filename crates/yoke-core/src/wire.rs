@@ -35,11 +35,11 @@ pub fn deny(agent: Agent, kind: EventKind, reason: &str) -> Option<Value> {
 
 /// Validate the narrower Codex rewrite contract before emitting any output.
 pub fn rewrite(agent: Agent, tool: Option<&str>, input: &Value) -> Result<Value> {
-    ensure!(input.is_object(), "rewritten tool input must be an object");
+    ensure!(input.is_object(), "rewritten tool input must be an object; correct the gate's rewrite_field, rewrite_pattern and rewrite_to in yoke.toml, then run yoke trust in your own terminal before retrying the tool");
     if agent == Agent::Codex && matches!(tool, Some("Bash" | "apply_patch")) {
         ensure!(
             input.get("command").and_then(Value::as_str).is_some(),
-            "Codex Bash/apply_patch rewrites require a string command"
+            "Codex Bash/apply_patch rewrites require a string command; correct the gate's rewrite_field to command and its rewrite_pattern/rewrite_to in yoke.toml, then run yoke trust in your own terminal before retrying the tool"
         );
     }
     let mut fields = json!({"hookEventName": "PreToolUse", "updatedInput": input});
@@ -84,7 +84,12 @@ mod tests {
             rewrite(Agent::Codex, Some("Bash"), &input).unwrap(),
             json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":input}})
         );
-        assert!(rewrite(Agent::Codex, Some("apply_patch"), &json!({"command":3})).is_err());
+        for input in [json!({"command":3}), json!(null)] {
+            let error = rewrite(Agent::Codex, Some("apply_patch"), &input)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("yoke trust"), "{error}");
+        }
         assert!(rewrite(Agent::Codex, Some("mcp__x__y"), &json!({"query":"a"})).is_ok());
     }
 }

@@ -39,7 +39,7 @@ impl Store {
             )
             .optional()?;
         if let Some(existing) = existing {
-            ensure!(existing == content, "archived policy hash mismatch");
+            ensure!(existing == content, "archived policy hash mismatch; keep state.db and its sidecars together, collect yoke --version and this diagnostic, and report the damaged archive; do not edit its hash or trust rows");
         } else {
             self.connection.execute(
                 "INSERT OR IGNORE INTO policy_versions(sha256,content) VALUES (?1,?2)",
@@ -61,7 +61,7 @@ impl Store {
             .optional()?;
         content
             .map(|content| {
-                ensure!(digest(&content) == hash, "archived policy hash mismatch");
+                ensure!(digest(&content) == hash, "archived policy hash mismatch; keep state.db and its sidecars together, collect yoke --version and this diagnostic, and report the damaged archive; do not edit its hash or trust rows");
                 Ok(serde_json::from_str(&content)?)
             })
             .transpose()
@@ -116,8 +116,17 @@ mod tests {
             "UPDATE policy_versions SET content='{}' WHERE sha256=?1",
             [&hash],
         )?;
-        assert!(store.policy_version(&hash).is_err());
-        assert!(store.record_policy_version(&loaded).is_err());
+        for error in [
+            store.policy_version(&hash).err().unwrap(),
+            store.record_policy_version(&loaded).err().unwrap(),
+        ] {
+            let message = error.to_string();
+            assert!(
+                message.contains("keep state.db and its sidecars"),
+                "{message}"
+            );
+            assert!(message.contains("yoke --version"), "{message}");
+        }
         Ok(())
     }
 

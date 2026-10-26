@@ -459,7 +459,7 @@ pub fn complete_task(
             .collect();
         ensure!(
             pending.is_empty(),
-            "task {id} depends on unfinished tasks: {}",
+            "task {id} depends on unfinished tasks: {}; inspect yoke plan status {slug} and complete those dependencies before retrying yoke plan task done {slug} {id}",
             pending.join(", ")
         );
         record(
@@ -504,7 +504,7 @@ pub fn accept_requirement(
         .find(|requirement| requirement.id == id)
         .with_context(|| format!("plan {slug} has no approved requirement {id:?}"))?;
     if !requirement.human {
-        bail!("requirement {id} is satisfied by its checks, not by human evidence");
+        bail!("requirement {id} is satisfied by its checks, not by human evidence; run yoke plan check {slug} --agent <claude|codex> and inspect yoke plan status {slug}");
     }
     let done = completions(store, plan.id, &header)?;
     if !done.contains_key(&("requirement".to_owned(), id.to_owned())) {

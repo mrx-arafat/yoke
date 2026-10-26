@@ -4,6 +4,24 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+fn invalid_statusline_names_settings_repair_and_preserves_the_value() {
+    for before in [
+        json!({"type":"prompt"}),
+        json!({"type":"command","command":""}),
+    ] {
+        let mut value = json!({"statusLine":before});
+        let original = value.clone();
+        let error = statusline::add(std::path::Path::new("/bin/yoke"), &mut value, None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("back up"), "{error}");
+        assert!(error.contains("--statusline-if-absent"), "{error}");
+        assert_eq!(value, original);
+    }
+}
+
+#[test]
 fn invalid_codex_hook_features_name_the_setting_to_repair() {
     for (raw, recovery) in [
         ("features = 1", "[features] table"),

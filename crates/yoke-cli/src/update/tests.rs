@@ -286,6 +286,7 @@ fn curl_results_become_specific_messages_without_leaking_curl_exit_codes() {
         assert!(message.starts_with("release lookup failed"), "{message}");
         assert!(message.contains(expected), "{message}");
         assert!(!message.contains("exit status"), "{message}");
+        assert!(message.contains("yoke update --check"), "{message}");
     }
     assert!(split(b"junk", 8).is_err());
     assert!(split(b"123456789\n200", 8)
@@ -299,6 +300,7 @@ fn curl_results_become_specific_messages_without_leaking_curl_exit_codes() {
             .unwrap_err()
             .to_string();
         assert!(message.contains(expected), "{message}");
+        assert!(message.contains("yoke update --check"), "{message}");
     }
 }
 

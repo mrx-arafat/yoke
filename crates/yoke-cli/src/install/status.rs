@@ -293,7 +293,7 @@ fn read_json(path: &Path) -> Result<Option<Value>> {
     file.take(MAX_SETTINGS_BYTES + 1).read_to_string(&mut raw)?;
     ensure!(
         raw.len() as u64 <= MAX_SETTINGS_BYTES,
-        "settings exceed 8 MiB"
+        "settings exceed 8 MiB; back up the agent settings file and reduce it below 8 MiB, then rerun yoke health"
     );
     Ok(Some(settings_json::parse(&raw)?))
 }

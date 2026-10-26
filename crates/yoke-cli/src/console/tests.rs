@@ -748,7 +748,7 @@ fn serve_rejects_foreign_hosts_traversal_and_unsafe_posts_and_sets_security_head
     assert_eq!(payload["error"]["code"], "action_failed");
     assert_eq!(
         payload["error"]["message"],
-        "Approval expired or already used; review the current header again."
+        "Approval expired or already used; review the current header again.; refresh this view and retry using its current controls"
     );
     // The action body cap applies before any parsing.
     let huge = format!(r#"{{"action":"{}"}}"#, "a".repeat(16400));
@@ -804,11 +804,21 @@ fn handler_mutations_require_csrf_and_artifact_queries_cannot_choose_files() {
     ];
     let response = live.exchange("POST", &format!("{base}actions"), &headers, body.as_bytes());
     assert!(response.starts_with("HTTP/1.1 403 "));
+    assert!(response.contains("yoke console"), "{response}");
     assert!(!memory::get(&live.store, note.id).unwrap().unwrap().pinned);
     headers.push(format!("X-Yoke-CSRF: {}", live.c.csrf));
     let response = live.exchange("POST", &format!("{base}actions"), &headers, body.as_bytes());
     assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
     assert!(memory::get(&live.store, note.id).unwrap().unwrap().pinned);
+
+    let response = live.exchange(
+        "POST",
+        &format!("{base}actions"),
+        &headers,
+        br#"{"action":"unknown"}"#,
+    );
+    assert!(response.starts_with("HTTP/1.1 409 "), "{response}");
+    assert!(response.contains("refresh this view"), "{response}");
 
     let created = plan::create(
         &live.store,
@@ -844,6 +854,10 @@ fn handler_mutations_require_csrf_and_artifact_queries_cannot_choose_files() {
             b"",
         );
         assert!(response.starts_with("HTTP/1.1 404 "), "{index}: {response}");
+        assert!(
+            response.contains("reopen the screenshot from Plans"),
+            "{response}"
+        );
         assert!(!response.contains("private image content") && !response.contains("<script>"));
     }
     let response = live.exchange(

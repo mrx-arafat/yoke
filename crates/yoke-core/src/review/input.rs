@@ -13,6 +13,10 @@ const INPUT_CAP: usize = 1024 * 1024;
 /// Diff tracked files against `base_ref` (the commit the plan started from) so work committed
 /// during the plan stays visible; plans without a recorded base fall back to `HEAD`.
 pub(super) fn collect(project: &Path, base_ref: Option<&str>) -> Result<String> {
+    collect_changes(project, base_ref).context("inspect git status --short in the project; restore unreadable or special files, and narrow the text review to UTF-8 changes within 1 MiB; have a human review binary changes separately, then retry yoke review <slug> --agent <claude|codex>; if its recorded base commit is missing, restore that commit from the project's history before retrying")
+}
+
+fn collect_changes(project: &Path, base_ref: Option<&str>) -> Result<String> {
     let base = base_ref.unwrap_or("HEAD");
     ensure!(
         base == "HEAD" || (!base.is_empty() && base.bytes().all(|byte| byte.is_ascii_hexdigit())),

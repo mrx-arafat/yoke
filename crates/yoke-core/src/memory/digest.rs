@@ -146,7 +146,7 @@ pub fn digest_with_command(
         )
         .with_context(|| {
             format!(
-                "digest batch {} failed after {} facts were digested",
+                "digest batch {} failed after {} facts were digested; inspect yoke jobs --all, restore the configured agent's availability and authentication, then retry yoke memory digest <session-id>; facts in the failed batch remain available",
                 report.batches + 1,
                 report.facts
             )
