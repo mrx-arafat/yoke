@@ -6,6 +6,10 @@ The archive and notice asset each also have a `.sha256` file.
 The archive is reproducible: entries carry no owner, group or file time, and the gzip header carries no time or name, so equal inputs give equal bytes.
 The draft release also holds `SHA256SUMS`, one list of every asset's checksum, and every asset has signed build provenance made by the `draft` job; see [docs/verifying-releases.md](../../docs/verifying-releases.md).
 The checksum format is one lowercase SHA-256 digest, two spaces, and the exact asset basename.
+The installer and updater verify the raw executable against exactly one entry in `SHA256SUMS` before replacement, keeping the existing executable on a missing, malformed or mismatched list.
+The list is limited to 64 KiB; provenance verification is a separate manual step.
+The installer refuses a candidate or staged executable that is missing, non-regular, non-executable or a symlink before running it, preserving the installed executable.
+These file checks do not eliminate races in mutable directories or establish that an executable is safe.
 Packaging rejects empty binaries and binaries larger than 64 MiB before creating the output directory, matching the updater's accepted executable size.
 
 The archive contains `yoke`, `LICENSE-MIT`, `LICENSE-APACHE`, and `THIRD_PARTY_LICENSES`.
@@ -17,7 +21,10 @@ Notices are generated from Cargo's resolved graph for the target, including buil
 The generator reproduces license files and nested NOTICE files from the downloaded crate sources, and refuses a dependency with no license text.
 It never edits generated artifacts by hand.
 The full `cargo deny check` (advisories, bans, licenses, sources) must pass in the `lint` job before any package is built, and a tag builds only a commit that is in `main` and passed `ci.yml` there.
-The toolchain is pinned in `release.yml` (`RUST_TOOLCHAIN`); raise it deliberately.
+The toolchain is pinned to `1.95.0` in `rust-toolchain.toml` and `release.yml` (`RUST_TOOLCHAIN`); raise both together deliberately.
+The repository toolchain override also applies to CI's ordinary Cargo commands, even when the runner's default toolchain is `stable`.
+`deny.toml` rejects vulnerabilities, unmaintained or unsound dependencies, yanked crates, wildcard requirements, unapproved licenses and unknown sources without advisory exceptions.
+Duplicate crate versions remain visible warnings because transitive dependencies can require incompatible APIs; do not hide them to get a clean log.
 Before a release exists, `install.sh` builds the commit `main` points to when it runs, and `installer.yml` passes `YOKE_COMMIT` so that CI builds the commit under test; no commit is hard-coded in the script.
 
 The workflow creates a draft release only after all four targets succeed.

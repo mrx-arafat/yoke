@@ -49,6 +49,8 @@ jobs:
     # installing cargo-deny builds hundreds of crates, and none of that belongs in a packaging job.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -63,6 +65,8 @@ jobs:
 
   package:
     needs: [gate, lint]
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -138,7 +142,8 @@ jobs:
       - name: List the checksum of every asset in SHA256SUMS
         working-directory: dist
         run: |
-          LC_ALL=C sha256sum -- * > ../SHA256SUMS
+          export LC_ALL=C
+          sha256sum -- * > ../SHA256SUMS
           mv ../SHA256SUMS SHA256SUMS
           cat SHA256SUMS
       - name: Attest build provenance for every asset

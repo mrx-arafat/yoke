@@ -332,7 +332,7 @@ These fixtures do not establish native execution on another platform, hosted upd
 `yoke update` reads GitHub's latest-release endpoint, which never returns drafts.
 On 2026-10-15 the repository still had no published release: `/releases/latest` returned HTTP 404.
 `yoke update --check` from the `ff20d07` dry-run executable in a temporary home exited 1 with `release check failed (exit status: 56); check connectivity and release availability`, where 56 is the status curl 8.7.1 on the host returns for that 404 over HTTP/2, so update acceptance is not yet possible.
-This is historical output, not evidence that changing HOME isolated that optimized executable.
+This is historical output, not current update acceptance or evidence of hook isolation; CLI commands honour `HOME`, while optimized hooks can use the account home.
 On 2026-10-16 `gh release list` still printed nothing.
 
 The first release cannot complete update acceptance, because replacing an executable needs an older release to update from.

@@ -13,6 +13,7 @@ use std::{
 };
 
 const HEADER_CAP: usize = 16 * 1024;
+const HEADER_COUNT_CAP: usize = 64;
 const BODY_CAP: usize = 64 * 1024;
 const RESPONSE_CAP: usize = 16 * 1024 * 1024;
 const STREAM_CAP: usize = 1024 * 1024;
@@ -42,42 +43,69 @@ impl Server {
         let stopped = Arc::new(AtomicBool::new(false));
         let stopping = stopped.clone();
         let active = Arc::new(AtomicUsize::new(0));
-        let acceptor = thread::Builder::new().name("yoke-http-accept".into()).spawn(move || {
-            while !stopping.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        // Accepted sockets must use timeout-governed blocking I/O on all platforms.
-                        if stream.set_nonblocking(false).is_err() {
-                            continue;
-                        }
-                        let Some(slot) = Slot::acquire(&active) else {
-                            let _ = stream.shutdown(Shutdown::Both);
-                            continue;
-                        };
-                        let sender = sender.clone();
-                        let deadline = Instant::now() + IO_TIME;
-                        // A permit covers parsing, queueing, handling and streaming.
-                        // Failed thread creation drops the closure and its permit.
-                        let _ = thread::Builder::new().name("yoke-http-read".into()).spawn(move || {
-                            let mut connection = Connection { stream, _slot: slot };
-                            match parse(&mut connection.stream, deadline) {
-                                Ok(parsed) => {
-                                    let _ = sender.try_send(Request { connection, parsed });
-                                }
-                                Err(error) => {
-                                    let status = if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) { 408 } else { 400 };
-                                    let message = format!("HTTP/1.1 {status} Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
-                                    let _ = write_until(&mut connection.stream, message.as_bytes(), Instant::now() + IO_TIME);
-                                }
+        let acceptor = thread::Builder::new()
+            .name("yoke-http-accept".into())
+            .spawn(move || {
+                while !stopping.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            // Accepted sockets must use timeout-governed blocking I/O on all platforms.
+                            if stream.set_nonblocking(false).is_err() {
+                                continue;
                             }
-                        });
+                            let Some(slot) = Slot::acquire(&active) else {
+                                let _ = stream.shutdown(Shutdown::Both);
+                                continue;
+                            };
+                            let sender = sender.clone();
+                            let deadline = Instant::now() + IO_TIME;
+                            // A permit covers parsing, queueing, handling and streaming.
+                            // Failed thread creation drops the closure and its permit.
+                            let _ = thread::Builder::new().name("yoke-http-read".into()).spawn(
+                                move || {
+                                    let mut connection = Connection {
+                                        stream,
+                                        _slot: slot,
+                                    };
+                                    match parse(&mut connection.stream, deadline) {
+                                        Ok(parsed) => {
+                                            let _ = sender.try_send(Request { connection, parsed });
+                                        }
+                                        Err(error) => {
+                                            let status = if matches!(
+                                                error.kind(),
+                                                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                                            ) {
+                                                408
+                                            } else {
+                                                400
+                                            };
+                                            if let Ok(message) = response_head(
+                                                status,
+                                                super::security_headers(
+                                                    "text/plain; charset=utf-8",
+                                                ),
+                                                Some(0),
+                                            ) {
+                                                let _ = write_until(
+                                                    &mut connection.stream,
+                                                    &message,
+                                                    Instant::now() + IO_TIME,
+                                                );
+                                            }
+                                        }
+                                    }
+                                },
+                            );
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::park_timeout(Duration::from_millis(10))
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
                     }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::park_timeout(Duration::from_millis(10)),
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
                 }
-            }
-        })?;
+            })?;
         Ok(Self {
             address,
             requests,
@@ -304,6 +332,9 @@ fn parse(stream: &mut TcpStream, deadline: Instant) -> io::Result<Parsed> {
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut length = 0usize;
     for line in lines {
+        if headers.len() >= HEADER_COUNT_CAP {
+            return Err(invalid("request exceeds 64 headers"));
+        }
         let (name, value) = line
             .split_once(':')
             .ok_or_else(|| invalid("invalid header"))?;
@@ -417,6 +448,10 @@ mod tests {
                 "a".repeat(HEADER_CAP)
             ),
             "GET / HTTP/1.1\r\nHost: localhost\r\n folded: bad\r\n\r\n".into(),
+            format!(
+                "GET / HTTP/1.1\r\nHost: localhost\r\n{}\r\n",
+                (0..64).map(|n| format!("X-{n}: v\r\n")).collect::<String>()
+            ),
         ] {
             let (mut client, mut server) = pair();
             client.write_all(raw.as_bytes()).unwrap();
@@ -541,6 +576,15 @@ mod tests {
             let mut response = String::new();
             client.read_to_string(&mut response).unwrap();
             assert!(response.starts_with("HTTP/1.1 400 "), "{raw:?}: {response}");
+            for name in [
+                "Content-Security-Policy:",
+                "X-Frame-Options: DENY",
+                "X-Content-Type-Options: nosniff",
+                "Referrer-Policy: no-referrer",
+                "Cache-Control: no-store",
+            ] {
+                assert!(response.contains(name), "missing {name}: {response}");
+            }
         }
         drop(server);
         assert!(

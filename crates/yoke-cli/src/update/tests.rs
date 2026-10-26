@@ -18,7 +18,7 @@ fn fixture() -> (Release, Vec<u8>) {
         prerelease: false,
         assets: [
             (name.clone(), NEW.len()),
-            (format!("{name}.sha256"), checksum.len()),
+            ("SHA256SUMS".into(), checksum.len()),
         ]
         .into_iter()
         .map(|(name, size)| Asset {
@@ -47,7 +47,7 @@ fn replaces_local_executable_only_after_checksum_validation() {
     let executable = old_executable(temp.path());
     let (release, checksum) = fixture();
     let mut fetch = |url: &str, _: usize| {
-        Ok(if url.ends_with(".sha256") {
+        Ok(if url.ends_with("/SHA256SUMS") {
             checksum.clone()
         } else {
             NEW.to_vec()
@@ -63,13 +63,32 @@ fn replaces_local_executable_only_after_checksum_validation() {
 }
 
 #[test]
+fn checksum_list_requires_one_exact_entry_and_rejects_malformed_records() {
+    let name = format!("yoke-{TARGET}");
+    let hash = format!("{:x}", Sha256::digest(NEW));
+    let record = format!("{hash}  {name}\n");
+    let list = format!("{hash}  other.tar.gz\n{record}{hash}  other.sha256\n");
+    assert_eq!(parse_checksum(list.as_bytes(), &name).unwrap(), hash);
+    for invalid in [
+        String::new(),
+        format!("{hash}  other\n"),
+        record.repeat(2),
+        format!("bad\n{record}"),
+        format!("{hash} *{name}\n"),
+        "x".repeat(CHECKSUM_LIMIT + 1),
+    ] {
+        assert!(parse_checksum(invalid.as_bytes(), &name).is_err());
+    }
+}
+
+#[test]
 fn download_and_checksum_failures_preserve_old_executable_and_leave_no_stage() {
     for failure in ["checksum", "download", "short", "filename", "unrunnable"] {
         let temp = tempfile::tempdir().unwrap();
         let executable = old_executable(temp.path());
         let (release, checksum) = fixture();
         let mut fetch = |url: &str, _: usize| {
-            if url.ends_with(".sha256") {
+            if url.ends_with("/SHA256SUMS") {
                 let mut bytes = checksum.clone();
                 if failure == "unrunnable" {
                     bytes =
@@ -106,13 +125,22 @@ fn download_and_checksum_failures_preserve_old_executable_and_leave_no_stage() {
 fn rejects_untrusted_metadata_before_downloading_assets() {
     let temp = tempfile::tempdir().unwrap();
     let executable = old_executable(temp.path());
-    for failure in ["tag", "url", "name", "size", "duplicate", "target"] {
+    for failure in [
+        "tag",
+        "url",
+        "name",
+        "size",
+        "duplicate",
+        "target",
+        "missing-checksum",
+    ] {
         let (mut release, _) = fixture();
         match failure {
             "tag" => release.tag_name = "../../escape".into(),
             "url" => release.assets[0].browser_download_url = "https://github.com/evil/yoke".into(),
             "name" => release.assets[0].name = "../yoke".into(),
             "size" => release.assets[0].size = BINARY_LIMIT + 1,
+            "missing-checksum" => release.assets.retain(|asset| asset.name != "SHA256SUMS"),
             "duplicate" => {
                 let (other, _) = fixture();
                 release

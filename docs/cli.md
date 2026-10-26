@@ -68,6 +68,9 @@ Other records, including memory, sessions, plans, usage and notifications, move 
 Global trust and files on disk are not moved.
 Restart sessions in the new directory, and review and trust the new policy yourself when needed; plan checks containing old absolute paths may need reapproval.
 `update` depends on a published release; the development implementation does not establish release availability.
+It downloads the executable with the same release's `SHA256SUMS`, verifies exactly one matching digest, then tests `--version` before replacing the installed executable.
+Missing, duplicate or malformed checksum entries and digest mismatches keep the installed executable unchanged; retry after the maintainer repairs the release, or install a manually verified release as described in [Verifying releases](verifying-releases.md).
+Build provenance verification is a separate manual step and does not require every updater user to install `gh`.
 `extensions` prints a one-line summary of counts, then drift, then the inventory: `shadowed` (same name at several scopes, with the documented winner), `stale` (a Yoke-managed hook or preset that differs from what this executable would install now) and `dangling` (a hook or MCP command whose program does not exist).
 Each inventory row gives the definition's agent, kind, name, scope, Yoke ownership, origin path and detail (for a hook or MCP server, the program or URL host).
 Symlinks that point outside the scanned roots, such as a skill manager's store, are counted in the summary; `--json` lists each target.

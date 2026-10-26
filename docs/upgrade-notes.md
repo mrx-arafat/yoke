@@ -1,11 +1,31 @@
 # Upgrade notes
 
+### Schema 17 records the policy behind each decision
+
+- Writable opens upgrade existing state through schema 17, adding historical policy archives and a policy hash on new decisions.
+  Older decisions keep an unknown policy version; Yoke does not reconstruct them from current trust.
+- Replace all hook binaries together: binaries supporting only schema 16 or earlier refuse a schema-17 database.
+  Keep a consistent backup of the database and its sidecars before upgrading if you may need to restore an older binary.
+  There is no supported downgrade command.
+- Historical configuration includes exact trusted source text and stays in the private state database after log retention removes old decisions.
+  Keep secrets out of policy text and protect database backups.
+
 ### Schema 16 adds quota warnings
 
 - Writable opens upgrade the notification kind constraint to allow `usage_limit`, preserving IDs and acknowledgements. Replace all hook binaries together: older writers refuse schema 16.
 - Existing quota JSON remains readable. New readings build bounded history; forecasts need recent same-reset evidence and never change gate decisions.
 - Codex hooks now import usage on prompts and periodically after tools, and show fresh quota reminders in the interactive CLI through `systemMessage`. Review hook definitions with `/hooks` if Codex requests it.
 - `usage.warn_percent` defaults to 85 and follows trusted configuration precedence. It applies in observe and enforce modes. `usage_partial` still refers only to incomplete transcript accounting.
+
+### Recover missing Codex usage dates
+
+Older Codex samples can have unknown times despite a saved import cursor.
+After updating the hook binary, later transcript imports replay available source events in chunks of at most 32 MiB and fill matching NULL times without deleting raw samples.
+Imports run on Stop, SessionEnd and PreCompact; Codex also imports on start and prompt hooks and at most once per minute after tools complete.
+UTC day summaries update in the same transaction, with no schema change.
+Recovery can require several imports for a long transcript and adds work while it is in progress.
+Missing or invalid source times, mismatched counters, tail-only imports and individual records larger than the replay bound remain unknown.
+Closed sessions are not automatically reopened or searched; their dates stay unknown until their transcript is imported again.
 
 ### Schema 15 keeps exact usage summaries
 
@@ -210,9 +230,11 @@ Let active plan checks finish before replacing the binary: this build uses stabl
 
 - What changed: a hook of a release build that finds `HOME` different from the home directory in the user database uses the account's home when that holds Yoke state, and says so once on stderr and in `~/.yoke/error.log`.
   A project settings file can set `HOME` for every hook it starts, which would otherwise point Yoke at an empty state with no trusted policy.
-  Debug builds and builds made with `--features honor-home-env` keep honouring `HOME`, and an unset or relative `HOME` is still an error in every build.
+  Normal CLI commands honour `HOME` in every build.
+  Hooks in debug builds and builds made with `--features honor-home-env` honour `HOME` instead of selecting the account home; an unset, empty or relative `HOME` is an error in every build.
 - Who is affected: anyone who deliberately starts an agent with another `HOME` against an optimized release binary, such as an isolated acceptance run.
-- What to do: build with `--features honor-home-env` for such runs (see [CONTRIBUTING](../CONTRIBUTING.md#testing-against-real-state)), or run the agent with its real `HOME`.
+- What to do: build with `--features honor-home-env` for isolated optimized hook tests (see [CONTRIBUTING](../CONTRIBUTING.md#testing-against-real-state)), or run the agent with its real `HOME`.
+  Shipped-archive acceptance runs optimized hooks without that feature, so use a disposable OS account or container.
 
 ### A completed plan reopens when its tree changes
 

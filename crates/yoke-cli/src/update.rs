@@ -18,7 +18,7 @@ const LATEST_URL: &str = "https://api.github.com/repos/mrx-arafat/yoke/releases/
 pub const LATEST_VERSION_KEY: &str = "update.latest_version";
 const METADATA_LIMIT: usize = 1024 * 1024;
 const BINARY_LIMIT: usize = 64 * 1024 * 1024;
-const CHECKSUM_LIMIT: usize = 256;
+const CHECKSUM_LIMIT: usize = 64 * 1024;
 
 #[derive(Deserialize)]
 struct Release {
@@ -75,7 +75,8 @@ pub fn run(check_only: bool, store: &Store) -> Result<()> {
         return Ok(());
     }
     let executable = std::env::current_exe().context("locating current executable")?;
-    install_release(&release, &executable, target()?, &mut transport::download)?;
+    install_release(&release, &executable, target()?, &mut transport::download)
+        .context("update refused; the installed executable was kept; retry with `yoke update` after the release maintainer fixes the download, or install a verified release manually (docs/verifying-releases.md)")?;
     // The rename is the commit point. Do not report a later bookkeeping failure
     // as an update failure after the executable has already been replaced.
     println!("updated_version: {}", release.tag_name);
@@ -216,7 +217,7 @@ fn install_release(
     );
     let name = format!("yoke-{target}");
     let binary = asset(release, &name, BINARY_LIMIT)?;
-    let checksum = asset(release, &format!("{name}.sha256"), CHECKSUM_LIMIT)?;
+    let checksum = asset(release, "SHA256SUMS", CHECKSUM_LIMIT)?;
     let checksum_bytes = fetch(&checksum.browser_download_url, CHECKSUM_LIMIT)?;
     ensure!(
         checksum_bytes.len() == checksum.size,
@@ -235,16 +236,26 @@ fn install_release(
 fn parse_checksum(bytes: &[u8], name: &str) -> Result<String> {
     ensure!(bytes.len() <= CHECKSUM_LIMIT, "checksum exceeds size limit");
     let text = std::str::from_utf8(bytes).context("checksum is not UTF-8")?;
-    let fields: Vec<_> = text.split_whitespace().collect();
-    ensure!(
-        fields.len() == 2 && fields[1] == name,
-        "invalid checksum filename or record"
-    );
-    ensure!(
-        fields[0].len() == 64 && fields[0].bytes().all(|b| b.is_ascii_hexdigit()),
-        "invalid sha256"
-    );
-    Ok(fields[0].to_ascii_lowercase())
+    let mut digest = None;
+    for line in text.lines() {
+        let (hash, filename) = line.split_once("  ").context(
+            "malformed SHA256SUMS record; expected a digest, two spaces and an asset name",
+        )?;
+        ensure!(
+            hash.len() == 64
+                && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                && !filename.is_empty()
+                && filename
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
+            "malformed SHA256SUMS record"
+        );
+        if filename == name {
+            ensure!(digest.is_none(), "duplicate SHA256SUMS entry for {name}");
+            digest = Some(hash.to_ascii_lowercase());
+        }
+    }
+    digest.with_context(|| format!("SHA256SUMS is missing an entry for {name}"))
 }
 
 fn replace(executable: &Path, bytes: &[u8]) -> Result<()> {

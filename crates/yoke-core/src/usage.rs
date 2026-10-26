@@ -482,6 +482,9 @@ fn ingest_bounded(
             limit,
             cursor.as_ref(),
         )?;
+        if agent == "codex" && !repair_codex_timestamps(store, &session, transcript, limit)? {
+            continue;
+        }
         if snapshot.base.as_ref() == Some(&snapshot.next) && snapshot.quota.is_none() {
             // Nothing was appended since the last import.
             return summaries(store, Some(&project), Some(&session));
@@ -518,6 +521,18 @@ fn read_snapshot_from(
     limit: u64,
     resume: Option<&Cursor>,
 ) -> Result<Snapshot> {
+    read_snapshot(clock, agent, session, transcript, limit, resume, false)
+}
+
+fn read_snapshot(
+    clock: &rusqlite::Connection,
+    agent: &str,
+    session: &str,
+    transcript: &Path,
+    limit: u64,
+    resume: Option<&Cursor>,
+    prefix: bool,
+) -> Result<Snapshot> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -536,10 +551,19 @@ fn read_snapshot_from(
     // Past the bound only the newest bytes are read, from the first line that starts inside
     // them; `take` stops at the size seen now, so a growing file is caught by the commit check.
     let size = metadata.len();
-    let start = from.max(size.saturating_sub(limit));
+    let start = if prefix {
+        from
+    } else {
+        from.max(size.saturating_sub(limit))
+    };
+    let end = if prefix {
+        size.min(from.saturating_add(limit))
+    } else {
+        size
+    };
     let seek_to = if start > from { start - 1 } else { from };
     file.seek(SeekFrom::Start(seek_to))?;
-    let mut reader = BufReader::new(file.take(size - seek_to));
+    let mut reader = BufReader::new(file.take(end - seek_to));
     let mut pos = seek_to;
     let mut bytes = Vec::new();
     let mut skipped = 0;
@@ -556,6 +580,11 @@ fn read_snapshot_from(
         bytes.clear();
         let read = reader.read_until(b'\n', &mut bytes)?;
         if read == 0 {
+            break;
+        }
+        // A recovery chunk must not treat a cut JSON record as an event, even when the
+        // prefix happens to be valid JSON. The next chunk retries the entire line.
+        if prefix && end < size && !bytes.ends_with(b"\n") {
             break;
         }
         if bytes.iter().all(u8::is_ascii_whitespace) {
@@ -712,6 +741,64 @@ fn read_snapshot_from(
             state,
         },
         base,
+    })
+}
+
+/// Old importers stored no event time. Their incremental cursor can already be at EOF,
+/// so replay separately without replacing raw rows or moving the accounting cursor.
+fn repair_codex_timestamps(
+    store: &Store,
+    session: &str,
+    transcript: &Path,
+    limit: u64,
+) -> Result<bool> {
+    let db = store.connection();
+    let undated: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM usage_samples WHERE agent='codex' AND session_id=?1 AND ts IS NULL)",
+        [session], |row| row.get(0),
+    )?;
+    if !undated {
+        return Ok(true);
+    }
+    // Tail-only imports number their deltas from the tail. Those ordinals cannot safely
+    // identify an event counted from the start, even if its token counts happen to match.
+    let partial: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM kv WHERE key=?1)",
+        [partial_key("codex", session)],
+        |row| row.get(0),
+    )?;
+    if partial {
+        return Ok(true);
+    }
+    let key = format!("usage.timestamps.codex.{session}");
+    let before = load_cursor(db, &key)?;
+    let snapshot = read_snapshot(
+        db,
+        "codex",
+        session,
+        transcript,
+        limit,
+        before.as_ref(),
+        true,
+    )?;
+    if snapshot.base.as_ref() == Some(&snapshot.next) {
+        return Ok(true);
+    }
+    store.transaction(|tx| {
+        if std::fs::symlink_metadata(transcript).map(|meta| fingerprint(&meta)).ok() != Some(snapshot.observed)
+            || load_cursor(tx, &key)? != before {
+            return Ok(false);
+        }
+        let mut update = tx.prepare_cached("UPDATE usage_samples SET ts=unixepoch(?8) WHERE agent='codex' AND session_id=?1 AND record_key=?2 AND model=?3 AND input_tokens=?4 AND output_tokens=?5 AND cache_read_tokens=?6 AND cache_write_tokens=?7 AND ts IS NULL AND unixepoch(?8) IS NOT NULL")?;
+        for (record, sample) in &snapshot.samples {
+            // An ordinal alone is insufficient after a rewrite or an older counter-reset
+            // algorithm. Leave ambiguous records undated rather than assigning a wrong day.
+            if sample.ts.is_some() {
+                update.execute(params![session, record, sample.model, sample.counts[0], sample.counts[1], sample.counts[2], sample.counts[3], sample.ts])?;
+            }
+        }
+        put_kv(tx, &key, &serde_json::to_string(&snapshot.next)?)?;
+        Ok(true)
     })
 }
 
@@ -1240,6 +1327,129 @@ mod tests {
         let replaced = ingest(&store, "claude", "s", "/project", &path).unwrap();
         assert_eq!(replaced.len(), 1);
         assert_eq!(replaced[0].input_tokens, 5);
+    }
+
+    #[test]
+    fn codex_legacy_timestamps_repair_day_totals_without_replacing_raw_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        // Actual rollout shape: timestamp belongs to the outer event, not payload.info.
+        let event = |n| json!({"timestamp":"2026-10-17T17:27:36.947Z","ordinal":n,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":n,"output_tokens":n}}}});
+        let mut transcript = (1..=3331)
+            .map(|n| format!("{}\n", event(n)))
+            .collect::<String>();
+        std::fs::write(&path, &transcript).unwrap();
+        ingest(&store, "codex", "legacy", "/project", &path).unwrap();
+        let db = store.connection();
+        // Emulate samples predating migration 012, with an already-current import cursor.
+        db.execute("UPDATE usage_samples SET ts=NULL WHERE rowid<=1702", [])
+            .unwrap();
+        db.execute_batch("CREATE TRIGGER preserve_raw BEFORE DELETE ON usage_samples BEGIN SELECT RAISE(ABORT,'raw rows must survive timestamp repair'); END;").unwrap();
+        let raw_before: i64 = db
+            .query_row("SELECT sum(rowid) FROM usage_samples", [], |r| r.get(0))
+            .unwrap();
+        let days = || {
+            db.query_row::<i64, _, _>(
+                "SELECT coalesce(sum(samples),0) FROM usage_day_totals",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(days(), 1629);
+        let repair_start = std::time::Instant::now();
+        ingest(&store, "codex", "legacy", "/project", &path).unwrap();
+        let repair_ms = repair_start.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(days(), 3331);
+        assert_eq!(
+            db.query_row::<i64, _, _>(
+                "SELECT count(*) FROM usage_samples WHERE ts=unixepoch('2026-10-17T17:27:36.947Z')",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            3331
+        );
+        assert_eq!(
+            db.query_row::<i64, _, _>("SELECT sum(rowid) FROM usage_samples", [], |r| r.get(0))
+                .unwrap(),
+            raw_before
+        );
+        // New appended samples also retain their source event time.
+        transcript.push_str(&format!("{}\n", event(3332)));
+        std::fs::write(&path, transcript).unwrap();
+        ingest(&store, "codex", "legacy", "/project", &path).unwrap();
+        assert_eq!(days(), 3332);
+        let bytes: i64 = db
+            .query_row(
+                "SELECT page_count*page_size FROM pragma_page_count(),pragma_page_size()",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(bytes < 50_000_000);
+        eprintln!(
+            "timestamp fixture: raw=3332 day_samples={} database_bytes={bytes} repair_ms={repair_ms:.3}",
+            days()
+        );
+    }
+
+    #[test]
+    fn codex_legacy_timestamps_resume_bounded_replay_and_leave_unverifiable_rows_undated() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let events = (1..=4).map(|n| {
+            let time = if n == 3 { "not-a-time" } else { "2026-10-17T17:27:36.947Z" };
+            format!("{}\n", json!({"timestamp":time,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":n,"output_tokens":n}}}}))
+        }).collect::<Vec<_>>();
+        std::fs::write(&path, events.concat()).unwrap();
+        ingest(&store, "codex", "bounded", "/project", &path).unwrap();
+        let db = store.connection();
+        db.execute(
+            "UPDATE usage_samples SET ts=NULL WHERE session_id='bounded'",
+            [],
+        )
+        .unwrap();
+        // Different accounting means the source ordinal does not prove this row's time.
+        db.execute(
+            "UPDATE usage_samples SET input_tokens=99 WHERE record_key='total-4'",
+            [],
+        )
+        .unwrap();
+        let limit = events.iter().map(String::len).max().unwrap() as u64;
+        for _ in 0..4 {
+            ingest_bounded(&store, "codex", "bounded", "/project", &path, limit).unwrap();
+        }
+        assert_eq!(
+            db.query_row::<i64, _, _>(
+                "SELECT count(*) FROM usage_samples WHERE ts IS NOT NULL",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            load_cursor(db, "usage.timestamps.codex.bounded")
+                .unwrap()
+                .unwrap()
+                .offset,
+            events.concat().len() as u64
+        );
+        assert_eq!(
+            db.query_row::<i64, _, _>("SELECT count(*) FROM usage_samples", [], |r| r.get(0))
+                .unwrap(),
+            4
+        );
+        // Remaining unknown rows do not cause a full replay on each unchanged import.
+        let checkpoint = load_cursor(db, "usage.timestamps.codex.bounded").unwrap();
+        ingest_bounded(&store, "codex", "bounded", "/project", &path, limit).unwrap();
+        assert_eq!(
+            load_cursor(db, "usage.timestamps.codex.bounded").unwrap(),
+            checkpoint
+        );
     }
 
     #[test]

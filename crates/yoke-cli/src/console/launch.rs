@@ -88,6 +88,13 @@ pub(super) fn respond(console: &Console, launch: &mut Launch, request: Request) 
     if request.header("host") != Some(console.host.as_str()) {
         return wrong_address(&console.host, request);
     }
+    if !super::same_site_request(console, |name| super::header(&request, name)) {
+        return refusal(
+            request,
+            "Foreign website refused",
+            "<h1>Open the printed link in your own browser</h1><p>A different website cannot sign you in. This link has not been used up.</p><p>Open the printed link directly from your terminal or paste it into the address bar.</p>",
+        );
+    }
     if !launch.redeem(code) {
         return expired(request);
     }
@@ -293,6 +300,44 @@ mod tests {
         let mut response = String::new();
         client.read_to_string(&mut response).unwrap();
         response
+    }
+
+    #[test]
+    fn cross_site_launch_requests_do_not_set_a_cookie_or_spend_the_code() {
+        use std::io::Write;
+        let server = super::super::http::Server::bind_loopback().unwrap();
+        let host = server.local_addr().unwrap().to_string();
+        let c = Console {
+            host: host.clone(),
+            ..console()
+        };
+        let mut launch = Launch::new().unwrap();
+        let target = launch.url(&c).replacen(&format!("http://{host}"), "", 1);
+        for extra in [
+            "Origin: https://evil.example",
+            "Origin: null",
+            "Sec-Fetch-Site: cross-site",
+            "Sec-Fetch-Site: same-site",
+            "Origin: https://evil.example\r\nSec-Fetch-Site: same-origin",
+        ] {
+            let mut client = std::net::TcpStream::connect(&host).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            client
+                .write_all(
+                    format!("GET {target} HTTP/1.1\r\nHost: {host}\r\n{extra}\r\n\r\n").as_bytes(),
+                )
+                .unwrap();
+            respond(&c, &mut launch, server.recv().unwrap()).unwrap();
+            let response = read(client);
+            assert!(response.starts_with("HTTP/1.1 403 "), "{extra}: {response}");
+            assert!(!response.contains("Set-Cookie"), "{response}");
+            assert!(response.contains("Open the printed link"), "{response}");
+        }
+        let (request, client) = get(&server, &host, &target, "");
+        respond(&c, &mut launch, request).unwrap();
+        assert!(read(client).starts_with("HTTP/1.1 303 "));
     }
 
     #[test]

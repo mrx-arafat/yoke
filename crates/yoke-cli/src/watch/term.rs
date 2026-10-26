@@ -70,10 +70,11 @@ impl Raw {
                 libc::signal(signal, on_signal as extern "C" fn(libc::c_int) as usize);
             }
         }
+        let raw = Self;
         let mut stdout = std::io::stdout();
         stdout.write_all(ENTER.as_bytes())?;
         stdout.flush()?;
-        Ok(Self)
+        Ok(raw)
     }
 
     /// Bytes typed within `timeout`, empty when none; a signal ends the wait early.
@@ -124,4 +125,92 @@ pub(super) fn paint(lines: &[String]) -> std::io::Result<()> {
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(frame.as_bytes())?;
     stdout.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn raw_modes_restore_after_output_error() {
+        const CHILD: &str = "YOKE_TEST_RAW_OUTPUT_FAILURE";
+        if std::env::var_os(CHILD).is_none() {
+            // Descriptor and signal changes stay in a single-test child, never the test runner
+            // or the person's terminal. The child creates its own disposable PTY.
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "watch::term::tests::raw_modes_restore_after_output_error",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: openpty writes two owned descriptors to the live locals; null termios and
+        // winsize pointers request platform defaults. Only this isolated child changes fds.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let (_master, slave) =
+            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        let saved_stdout = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        assert!(saved_stdout >= 0);
+        let saved_stdout = unsafe { OwnedFd::from_raw_fd(saved_stdout) };
+        let (output, reader) = UnixStream::pair().unwrap();
+        drop(reader);
+        assert_eq!(
+            unsafe { libc::dup2(slave.as_raw_fd(), libc::STDIN_FILENO) },
+            libc::STDIN_FILENO
+        );
+        assert_eq!(
+            unsafe { libc::dup2(output.as_raw_fd(), libc::STDOUT_FILENO) },
+            libc::STDOUT_FILENO
+        );
+        let settings = || {
+            let mut value: libc::termios = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut value) },
+                0
+            );
+            value
+        };
+        let before = settings();
+        let result = Raw::enter();
+        let after = settings();
+        assert_eq!(
+            unsafe { libc::dup2(saved_stdout.as_raw_fd(), libc::STDOUT_FILENO) },
+            libc::STDOUT_FILENO
+        );
+        assert!(
+            result.is_err(),
+            "a closed output peer must refuse the screen write"
+        );
+        // macOS may set PENDIN while applying termios; compare the modes we changed.
+        let local = libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN;
+        let input = libc::IXON | libc::ICRNL;
+        assert_eq!(after.c_lflag & local, before.c_lflag & local);
+        assert_eq!(after.c_iflag & input, before.c_iflag & input);
+        assert_eq!(after.c_cc, before.c_cc);
+    }
 }

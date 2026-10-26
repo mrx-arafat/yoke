@@ -154,7 +154,8 @@ Build the debug executable from the intended commit with `cargo build --locked -
 Then run the following from the repository root in your own terminal, with SQLite installed.
 It copies the live database using SQLite's backup operation and lets the new console migrate only that temporary copy.
 It does not replace the installed hook executable.
-A debug build honours the isolated `HOME`; an optimized build ignores it unless it was built with `--features honor-home-env`, so do not substitute `target/release/yoke` here.
+CLI commands, including the console, honour the isolated `HOME` in debug and optimized builds.
+Optimized hooks (`yoke run-hook`) can use the account home instead; isolated hook rehearsals need a debug build or `--features honor-home-env`.
 
 ```sh
 set -eu

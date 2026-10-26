@@ -197,7 +197,12 @@ fn decisions_show_safe_previews_and_reasons_before_expanding() {
         ),
         (
             "codex",
-            serde_json::json!({"command": "界".repeat(240)}),
+            serde_json::json!({"cmd": "echo '<unsafe>'"}),
+            "echo &#39;&lt;unsafe&gt;&#39;",
+        ),
+        (
+            "codex",
+            serde_json::json!({"cmd": "界".repeat(240)}),
             &format!("{}…", "界".repeat(180)),
         ),
         (
@@ -611,6 +616,19 @@ fn serve_rejects_foreign_hosts_traversal_and_unsafe_posts_and_sets_security_head
         secure(&response);
     }
     // Path handling: no route is file-backed, so traversal in any spelling is an unknown page.
+    for extra in [
+        vec![cookie.clone(), "Origin: https://evil.example".into()],
+        vec![cookie.clone(), "Origin: null".into()],
+        vec![cookie.clone(), "Sec-Fetch-Site: cross-site".into()],
+        vec![cookie.clone(), "Sec-Fetch-Site: same-site".into()],
+    ] {
+        let response = live.exchange("GET", &format!("{base}decisions"), &extra, b"");
+        assert!(
+            response.starts_with("HTTP/1.1 403 "),
+            "{extra:?}: {response}"
+        );
+        secure(&response);
+    }
     for target in [
         format!("{base}../assets/console.css"),
         format!("{base}%2e%2e/%2e%2e/etc/passwd"),
@@ -761,6 +779,83 @@ fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+#[test]
+fn handler_mutations_require_csrf_and_artifact_queries_cannot_choose_files() {
+    use yoke_core::{memory, plan};
+    let temp = tempfile::tempdir().unwrap();
+    let mut live = Live::new(temp.path());
+    let base = launch::base(&live.c);
+    let cookie = format!("Cookie: yoke_{}={}", live.port(), live.c.token);
+    let note = memory::remember(
+        &live.store,
+        &live.c.project.to_string_lossy(),
+        "local note",
+        false,
+        1,
+    )
+    .unwrap();
+    let body = serde_json::json!({"action":"pin","id":note.id,"value":true}).to_string();
+    let mut headers = vec![
+        cookie,
+        format!("Origin: http://{}", live.host),
+        "Content-Type: application/json".into(),
+    ];
+    let response = live.exchange("POST", &format!("{base}actions"), &headers, body.as_bytes());
+    assert!(response.starts_with("HTTP/1.1 403 "));
+    assert!(!memory::get(&live.store, note.id).unwrap().unwrap().pinned);
+    headers.push(format!("X-Yoke-CSRF: {}", live.c.csrf));
+    let response = live.exchange("POST", &format!("{base}actions"), &headers, body.as_bytes());
+    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+    assert!(memory::get(&live.store, note.id).unwrap().unwrap().pinned);
+
+    let created = plan::create(
+        &live.store,
+        &live.c.project,
+        ".yoke/plans",
+        "images",
+        "Images",
+    )
+    .unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("private.png");
+    std::fs::write(&secret, b"private image content").unwrap();
+    let link = live.c.project.join("linked.png");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    let fake = live.c.project.join("fake.png");
+    std::fs::write(&fake, b"<script>not an image</script>").unwrap();
+    let artifacts = serde_json::json!([
+        secret.to_str().unwrap(),
+        link.to_str().unwrap(),
+        fake.to_str().unwrap()
+    ]);
+    let connection = rusqlite::Connection::open(&live.c.database).unwrap();
+    connection.execute(
+        "INSERT INTO check_runs(plan_id,ts,name,command,output_tail,fingerprint,blocking,ms,result,artifacts) VALUES(?1,1,'image','true','','test',1,1,'pass',?2)",
+        rusqlite::params![created.id, artifacts.to_string()],
+    ).unwrap();
+    let check = connection.last_insert_rowid();
+    for index in ["0", "1", "2", "3", "-1", "184467440737095516160"] {
+        let response = live.exchange(
+            "GET",
+            &format!("{base}artifact?slug=images&check={check}&index={index}"),
+            &headers[..1],
+            b"",
+        );
+        assert!(response.starts_with("HTTP/1.1 404 "), "{index}: {response}");
+        assert!(!response.contains("private image content") && !response.contains("<script>"));
+    }
+    let response = live.exchange(
+        "GET",
+        &format!(
+            "{base}artifact?slug=../images&check={check}&index=0&path={}",
+            render::encode(secret.to_str().unwrap())
+        ),
+        &headers[..1],
+        b"",
+    );
+    assert!(response.starts_with("HTTP/1.1 404 "), "{response}");
 }
 
 #[test]

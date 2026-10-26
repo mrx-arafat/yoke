@@ -9,6 +9,9 @@ Run it from a clone of `mrx-arafat/yoke` on `main`, as a maintainer who can push
 You need the GitHub CLI (`gh`) signed in, `uv`, `cargo`, `cargo-deny`, and `shasum` (on Linux, `sha256sum`).
 Every step names what a passing result looks like.
 Stop at the first step that does not pass.
+The repository's `rust-toolchain.toml` and release workflow both pin Rust `1.95.0`; update them together when changing compilers.
+`cargo deny check` must pass with the checked-in `deny.toml`, including advisory, yanked-crate, license, source and wildcard checks.
+Duplicate transitive crate versions are visible warnings, not automatically ignored or forced to an incompatible version.
 
 ## How a release works
 
@@ -40,6 +43,9 @@ Each target produces six assets:
 
 A manual run of `release.yml` builds and uploads the same files as Actions artifacts and creates no release, because the job that creates the release runs only for a tag.
 A tag run builds again and then creates a draft release named `Yoke <tag>` with all 25 assets: the 24 per-target files and `SHA256SUMS`, which lists the checksum of each of them.
+Both the installer and updater require `SHA256SUMS` with exactly one matching executable entry before installing a release download.
+Keep it below 64 KiB and publish it together with the executables; a missing or invalid list refuses installation while preserving the previous executable.
+Provenance verification remains a manual acceptance step as described in [Verifying releases](verifying-releases.md), including on machines with `gh` installed.
 The job that does this runs in the `release` environment, attests every asset with GitHub build provenance, and is the only job with permission to sign or publish.
 In the repository settings, give the `release` environment required reviewers and protect `v*` tags, so that nobody can sign or publish alone; GitHub creates an unprotected `release` environment on its first use otherwise.
 [Verifying releases](verifying-releases.md) says how a user checks the result and what that check does not prove.

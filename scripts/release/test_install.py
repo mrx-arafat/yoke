@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -124,6 +125,10 @@ https://api.github.com/repos/mrx-arafat/yoke/*)
     last="$YOKE_TEST_MIRROR/api/${last#https://api.github.com/repos/mrx-arafat/yoke/}"
     set -- "$@" --proto '=http,https' ;;
 esac
+case $last in
+"$YOKE_TEST_MIRROR"/*) ;;
+*) echo "test refused non-mirror request: $last" >&2; exit 1 ;;
+esac
 exec "$YOKE_TEST_REAL_CURL" "$@" "$last"
 """
 # Answers `git ls-remote` with $YOKE_TEST_GIT_SHA, the way a reachable GitHub would, or fails when
@@ -193,9 +198,11 @@ class InstallScriptTests(unittest.TestCase):
         self.url = f"http://127.0.0.1:{server.server_address[1]}"
 
     def install(self, digest: str, **extra: str) -> subprocess.CompletedProcess[str]:
-        (self.mirror / f"{self.name}.sha256").write_text(f"{digest}  {self.name}\n")
+        manifest = extra.pop("YOKE_TEST_MANIFEST", f"{digest}  {self.name}\n")
+        if manifest != "missing":
+            (self.mirror / "SHA256SUMS").write_text(manifest)
         env = {
-            "PATH": os.environ["PATH"],
+            **self.shimmed(),
             "HOME": str(self.home),
             "TMPDIR": str(self.scratch),
             "YOKE_DOWNLOAD_URL": self.url,
@@ -365,7 +372,7 @@ class InstallScriptTests(unittest.TestCase):
         downloads = [
             line
             for line in (self.home / "curl.log").read_text().splitlines()
-            if self.name in line
+            if self.name in line or "SHA256SUMS" in line
         ]
         self.assertEqual(len(downloads), 2, downloads)
         for line in downloads:
@@ -398,8 +405,109 @@ class InstallScriptTests(unittest.TestCase):
                 self.assertIn("YOKE_INSTALL_DIR", result.stderr)
                 self.assertFalse((self.home / name).exists())
 
+    def test_install_binary_refuses_invalid_candidates_and_stages_before_execution(
+        self,
+    ) -> None:
+        source = (ROOT / "install.sh").read_text()
+        function = source.split("install_binary() {", 1)[1].split("\n}", 1)[0]
+        executable = self.home / "executable"
+        executable.write_bytes(RECORDING_YOKE)
+        executable.chmod(0o755)
+        script = (
+            """set -eu
+candidate=$1; bin=$2; dir=$3; staged=
+test -n "$HOME" && test "$HOME" != "$4" && test -d "$HOME"
+trap 'if [ -n "$staged" ]; then rm -f "$staged"; fi' EXIT
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+check_state() { :; }
+chmod() {
+    command chmod "$@"
+    if [ "$YOKE_TEST_STAGE_LINK" = 1 ]; then
+        rm -f "$2"
+        ln -s "$candidate" "$2"
+    fi
+}
+install_binary() {"""
+            + function
+            + "\n}\ninstall_binary\n"
+        )
+        for kind in (
+            "missing",
+            "directory",
+            "fifo",
+            "non-executable",
+            "symlink",
+            "staged-link",
+            "valid",
+        ):
+            with self.subTest(kind=kind):
+                case = self.home / kind
+                case.mkdir()
+                candidate = case / "candidate"
+                log = case / "executed.log"
+                directory = case / "bin"
+                directory.mkdir()
+                installed = directory / "yoke"
+                installed.write_bytes(b"previous release")
+                if kind == "directory":
+                    candidate.mkdir()
+                elif kind == "fifo":
+                    os.mkfifo(candidate)
+                elif kind == "symlink":
+                    candidate.symlink_to(executable)
+                elif kind != "missing":
+                    candidate.write_bytes(RECORDING_YOKE)
+                    candidate.chmod(0o644 if kind == "non-executable" else 0o755)
+                env = {
+                    **os.environ,
+                    "HOME": str(self.home),
+                    "YOKE_TEST_LOG": str(log),
+                    "YOKE_TEST_STAGE_LINK": "1" if kind == "staged-link" else "0",
+                }
+                env.pop("CLAUDE_CONFIG_DIR", None)
+                env.pop("CODEX_HOME", None)
+                process = subprocess.Popen(
+                    [
+                        "sh",
+                        "-c",
+                        script,
+                        "install-binary-test",
+                        str(candidate),
+                        str(installed),
+                        str(directory),
+                        os.environ["HOME"],
+                    ],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                try:
+                    _, stderr = process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
+                    self.fail(
+                        f"{kind}: installer blocked instead of refusing the candidate"
+                    )
+                if kind == "valid":
+                    self.assertEqual(process.returncode, 0, stderr)
+                    self.assertEqual(installed.read_bytes(), RECORDING_YOKE)
+                    self.assertEqual(log.read_text().splitlines(), ["--version"])
+                else:
+                    self.assertNotEqual(process.returncode, 0, stderr)
+                    self.assertIn("regular executable file", stderr)
+                    self.assertEqual(installed.read_bytes(), b"previous release")
+                    self.assertFalse(log.exists(), "invalid executable was run")
+                self.assertEqual(list(directory.iterdir()), [installed])
+
     def test_installs_release_with_valid_checksum(self) -> None:
-        result = self.install(hashlib.sha256(FAKE_YOKE).hexdigest())
+        digest = hashlib.sha256(FAKE_YOKE).hexdigest()
+        result = self.install(
+            digest,
+            YOKE_TEST_MANIFEST=f"{digest}  unrelated.tar.gz\n{digest}  {self.name}\n{digest}  unrelated.sha256\n",
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         installed = self.bin / "yoke"
@@ -422,6 +530,31 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(list(self.bin.iterdir()), [existing])
         self.assertEqual(existing.read_bytes(), b"previous release")
         self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_refuses_missing_duplicate_or_malformed_manifest_without_replacement(
+        self,
+    ) -> None:
+        digest = hashlib.sha256(FAKE_YOKE).hexdigest()
+        entry = f"{digest}  {self.name}\n"
+        self.bin.mkdir()
+        existing = self.bin / "yoke"
+        existing.write_bytes(b"previous release")
+        for manifest in (
+            "missing",
+            "",
+            f"{digest}  other\n",
+            entry * 2,
+            "bad\n" + entry,
+            "x" * 65537,
+        ):
+            with self.subTest(manifest=manifest[:80]):
+                (self.mirror / "SHA256SUMS").unlink(missing_ok=True)
+                result = self.install(digest, YOKE_TEST_MANIFEST=manifest)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("SHA256SUMS", result.stderr)
+                self.assertIn("YOKE_VERSION", result.stderr)
+                self.assertEqual(existing.read_bytes(), b"previous release")
+                self.assertEqual(list(self.scratch.iterdir()), [])
 
     def test_yes_never_trusts_a_policy_without_a_terminal(self) -> None:
         log = self.home / "yoke-calls.log"
@@ -499,7 +632,7 @@ class InstallScriptTests(unittest.TestCase):
         log = self.home / "yoke-calls.log"
         (self.mirror / self.name).write_bytes(STATUSLINE_YOKE)
         digest = hashlib.sha256(STATUSLINE_YOKE).hexdigest()
-        (self.mirror / f"{self.name}.sha256").write_text(f"{digest}  {self.name}\n")
+        (self.mirror / "SHA256SUMS").write_text(f"{digest}  {self.name}\n")
         env = {
             "PATH": os.environ["PATH"],
             "HOME": str(self.home),

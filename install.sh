@@ -18,7 +18,7 @@
 #   YOKE_INSTALL_DIR      absolute install directory
 #                         (default: /usr/local/bin for root, else $HOME/.local/bin)
 #   YOKE_VERSION          release tag to install, for example v0.1.0 (default: latest)
-#   YOKE_DOWNLOAD_URL     https:// base URL serving yoke-<target> and yoke-<target>.sha256
+#   YOKE_DOWNLOAD_URL     https:// base URL serving yoke-<target> and SHA256SUMS
 #                         (plain http only for localhost, 127.0.0.1 or [::1])
 #   YOKE_FROM_SOURCE=1    build from source with Cargo instead of downloading
 #   YOKE_COMMIT           full 40-character commit to build from source, for example
@@ -211,16 +211,33 @@ download_release() {
         base=https://github.com/mrx-arafat/yoke/releases/latest/download
     fi
     say "downloading $base/$name"
-    for file in "$name.sha256" "$name"; do
+    # Fetch the executable first: only its absence may fall back to a source build.
+    # A release executable without its checksum list must never be installed.
+    for file in "$name" SHA256SUMS; do
         status=0
         fetch "$base/$file" "$tmp/$file" || status=$?
         case $status in
             0) ;;
-            2) return 2 ;;
-            *) die "could not download $base/$file" ;;
+            2)
+                if [ "$file" = "$name" ]; then return 2; fi
+                die "release is missing SHA256SUMS; nothing was changed; retry after the maintainer repairs the release, or set YOKE_VERSION to a verified release tag"
+                ;;
+            *) die "could not download $base/$file; nothing was changed; check connectivity and rerun the installer" ;;
         esac
     done
-    verify
+    [ "$(wc -c < "$tmp/SHA256SUMS")" -le 65536 ] || die "SHA256SUMS exceeds 64 KiB; refusing to install; use a verified release tag with YOKE_VERSION"
+    # Parse as data, never as shell code or a list of filesystem paths.
+    awk -v name="$name" '
+        {
+            hash = substr($0, 1, 64)
+            file = substr($0, 67)
+            if (length(hash) != 64 || hash ~ /[^0-9a-fA-F]/ || substr($0, 65, 2) != "  " || file == "" || file ~ /[^a-zA-Z0-9_.-]/) bad = 1
+            if (file == name) { count++; record = $0 }
+        }
+        END { if (bad || count != 1) exit 1; print record }
+    ' "$tmp/SHA256SUMS" > "$tmp/$name.sha256" || die "SHA256SUMS has a malformed, missing or duplicate entry for $name; nothing was changed; use a verified release tag with YOKE_VERSION"
+    (verify) || die "release verification failed; nothing was changed; retry after the maintainer repairs the release, or use a verified release tag with YOKE_VERSION"
+    chmod 755 "$tmp/$name" || die "cannot make the verified download executable; nothing was changed; rerun with YOKE_FROM_SOURCE=1 to build it"
     candidate=$tmp/$name
 }
 
@@ -398,9 +415,15 @@ check_state() {
 # Replace $bin atomically from $candidate: live agent hooks may execute it at any moment.
 install_binary() {
     if [ -d "$bin" ]; then die "$bin is a directory"; fi
+    if [ ! -f "$candidate" ] || [ ! -x "$candidate" ] || [ -L "$candidate" ]; then
+        die "the new executable must be a regular executable file, not a link; rerun with YOKE_FROM_SOURCE=1 to build it"
+    fi
     staged=$(mktemp "$dir/.yoke.XXXXXX") || die "cannot create a file in $dir"
     cp "$candidate" "$staged" || die "cannot write $staged"
     chmod 755 "$staged"
+    if [ ! -f "$staged" ] || [ ! -x "$staged" ] || [ -L "$staged" ]; then
+        die "the staged executable is not a regular executable file; leave the current Yoke installed and rerun this installer"
+    fi
     if ! "$staged" --version >/dev/null 2>&1; then
         die "the new executable does not run on this system; rerun with YOKE_FROM_SOURCE=1 to build it"
     fi

@@ -175,18 +175,22 @@ fn constant_eq(left: &str, right: &str) -> bool {
             == 0
 }
 
+/// Apply to bootstrap and authenticated reads as well as actions: a foreign website must
+/// never spend a launch code or use an ambient cookie, even without Fetch Metadata.
+fn same_site_request(console: &Console, header: impl Fn(&str) -> Option<String>) -> bool {
+    header("host").as_deref() == Some(console.host.as_str())
+        && header("origin").is_none_or(|value| value == format!("http://{}", console.host))
+        && header("sec-fetch-site").is_none_or(|value| value == "same-origin" || value == "none")
+}
+
 /// Only the HttpOnly session cookie authenticates; URLs and headers never carry the secret.
 fn authorize(console: &Console, method: &str, headers: &BTreeMap<String, String>) -> bool {
     let supplied = headers
         .get("cookie")
         .and_then(|value| launch::session(console, value))
         .unwrap_or("");
-    if !constant_eq(supplied, &console.token) || headers.get("host") != Some(&console.host) {
-        return false;
-    }
-    if headers
-        .get("sec-fetch-site")
-        .is_some_and(|v| v != "same-origin" && v != "none")
+    if !constant_eq(supplied, &console.token)
+        || !same_site_request(console, |name| headers.get(name).cloned())
     {
         return false;
     }

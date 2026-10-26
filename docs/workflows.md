@@ -471,7 +471,8 @@ An interpreter given one of those paths, or code that names one, is treated as w
 A hook is skipped only when `YOKE_OFF` equals the random per-install token in `~/.yoke/off-token` (mode 0600), which only `yoke pause` prints and the guard keeps agents from reading, or while a pause set by `yoke pause --for` lasts (at most 24 hours).
 `YOKE_OFF=1`, any other value, and a `YOKE_OFF` set by a settings file are ignored; every honoured or refused skip and every pause is written to `~/.yoke/error.log`.
 A settings file's `env` block reaches every hook, so a hook of a release build also ignores a `HOME` that differs from the home directory in the user database when that home holds Yoke state, and says so once on stderr and in `error.log`.
-Debug builds and builds made with `--features honor-home-env` honour `HOME` so tests and isolated optimized runs can use their own; the shipped binary and the installer never enable it (see [CONTRIBUTING](../CONTRIBUTING.md#testing-against-real-state)).
+Debug hooks and hooks built with `--features honor-home-env` honour `HOME` so tests and isolated optimized hook runs can use their own; CLI commands honour `HOME` in every build.
+The shipped binary and the installer never enable that feature (see [CONTRIBUTING](../CONTRIBUTING.md#testing-against-real-state)).
 An unset or relative `HOME` is an error in every build.
 `yoke health` and the statusline report a Claude settings file that sets `env.YOKE_OFF` or `env.HOME`, `disableAllHooks` in any settings layer Yoke can read, an active pause, and a session that is open but has recorded no hook decision for 20 minutes.
 Limits: this is a reading of command words, not a sandbox.
@@ -483,6 +484,14 @@ The console is human-only for the same reason: it can approve, resume, and ackno
 Its printed link carries a one-time code, and the session secret lives only in an `HttpOnly`, `SameSite=Strict` cookie, so it never appears in a URL, browser history, process arguments, or terminal output.
 Browsers send a cookie to every port on the same host, so the console serves every page under a random path that changes each run and limits its cookie to that path.
 Other local servers you visit in the same browser, such as an agent's dev server, therefore never receive the cookie, and the console does not need a browser profile of its own.
+The console accepts only its exact `127.0.0.1:port` Host and rejects a foreign Origin or cross-site Fetch Metadata on launch links, reads and actions.
+Open a launch link directly from your terminal or paste it into the address bar; a link reached from a different website is refused without spending its code.
+Every action also requires the session cookie, the exact Origin, an independent per-launch CSRF token in a header, and a JSON content type.
+The session lasts until the console process stops; restarting it invalidates the old cookie and all pending confirmations.
+Responses, including malformed-request refusals, disable caching, referrers and framing, and use a Content Security Policy without `unsafe-inline`.
+Requests are bounded to 64 headers, 16 KiB of headers and 64 KiB of body, with a smaller 16 KiB action limit and an absolute three-second socket read/write deadline.
+At most 16 connections and four authenticated event streams are retained; streams expire within one minute and reconnect.
+Static routes never map request paths to disk, and screenshot routes accept only indexed project evidence with regular-file, size, image-type and integrity checks.
 A same-user agent can still read your browser profile's files, including that cookie; this is an accepted risk.
 
 The background digest, which runs outside the agent's sandbox, reads a transcript only from the job's project or an agent's transcript directory, as a resolved `.jsonl` regular file, and only its last 32 KiB.

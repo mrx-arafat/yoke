@@ -12,13 +12,15 @@ use yoke_core::store::{DecisionFilter, Store};
 fn input_preview(payload: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
     let input = value.get("tool_input")?;
-    ["command", "file_path", "path"].iter().find_map(|key| {
-        input
-            .get(key)?
-            .as_str()
-            .filter(|s| !s.trim().is_empty())
-            .map(render::excerpt)
-    })
+    ["command", "cmd", "file_path", "path"]
+        .iter()
+        .find_map(|key| {
+            input
+                .get(key)?
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .map(render::excerpt)
+        })
 }
 
 pub(super) fn decisions(

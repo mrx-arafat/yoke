@@ -54,9 +54,11 @@ They differ for an executable you built yourself, which is expected.
 
 ## What `install.sh` and `yoke update` check themselves
 
-Both download `yoke-<target>` and `yoke-<target>.sha256` from the same release and refuse a mismatch.
+Both download `yoke-<target>` and the release's `SHA256SUMS`, require exactly one entry for that executable, and refuse a missing list, missing entry, duplicate entry, malformed list or digest mismatch before replacing anything.
+The list is limited to 64 KiB.
 `yoke update` also accepts only the asset URLs that GitHub's release metadata names, only over HTTPS, only a newer version, and runs the downloaded executable once with `--version` before it replaces the installed one.
 Neither checks the build provenance, because that needs a verifier that is not built in.
+Provenance verification is an explicit manual step even when `gh` is installed, so having an unauthenticated or outdated `gh` cannot silently change the updater's security guarantees or block updates on machines without it.
 If you want that guarantee, verify the file as above before you run the installer's output or `yoke update`, or install by hand from a verified download.
 
 ## The installer script itself

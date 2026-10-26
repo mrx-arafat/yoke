@@ -49,7 +49,8 @@ The non-terminal watch printed one snapshot and exited; usage, project-scoped lo
 These single CLI timings do not establish hook latency percentiles or a large-database performance target.
 
 The installed revision still repeats the Codex review warning after a no-op install (G-11), and partial transcript accounting remains visible (j4-3).
-The test also found unsafe release-acceptance isolation guidance: changing HOME alone does not isolate a shipped optimized executable (release-2, corrected in `9df0602`).
+The test also found unsafe release-acceptance isolation guidance: changing HOME alone does not isolate hooks (`yoke run-hook`) in a shipped optimized executable when the account home holds Yoke state (release-2, corrected in `9df0602`).
+CLI commands honour `HOME` in both debug and optimized builds.
 Use a disposable operating-system account or container for shipped artifacts; debug and `honor-home-env` builds establish source rehearsal only.
 
 ## Field test 2026-10-16
@@ -264,9 +265,10 @@ CI and the installer matrix passed for `0afac36`: [CI run 39051349406](https://g
 
 ### A process finding
 
-Two runs wrote into a maintainer's real state database although they were meant to use an isolated one: a test that removed `HOME` fell back to the account's home directory, and optimized builds ignored an injected `HOME`.
+Two runs wrote into a maintainer's real state database although they were meant to use an isolated one: a test that removed `HOME` fell back to the account's home directory, and optimized hooks ignored an injected `HOME`.
 One of them migrated the real database.
-The fix is `proc-1` in the ledger: an unset or relative `HOME` is an error in every build, only debug builds and builds with `--features honor-home-env` honour `HOME`, and `CONTRIBUTING.md` says how to run an optimized build under an isolated home.
+The fix is `proc-1` in the ledger: an unset or relative `HOME` is an error in every build, hooks always honour `HOME` only in debug builds or builds with `--features honor-home-env`, and `CONTRIBUTING.md` describes isolated optimized hook runs.
+CLI commands honour `HOME` in both debug and optimized builds.
 
 ## Scale
 
@@ -322,7 +324,7 @@ The three new indexes add about 0.1 to 0.2 ms (about 3 percent) to each recorded
 The hourly cleanup used to run inside the SessionStart hook.
 The hook now only queues it as a background job, and a worker deletes in short batches with a 110 ms pause between them so that waiting hooks get the write lock.
 Measured on a 289 MB fixture with 52 thousand decisions and 21 thousand facts past the boundary.
-The optimized build cannot be pointed at an isolated home, so these runs used unoptimized builds; read the ratios, not the digits.
+The shipped optimized hook can use the account home despite an injected `HOME`, so these runs used unoptimized builds; read the ratios, not the digits.
 
 | | SessionStart that has the cleanup due | While the backlog drains |
 | --- | --- | --- |
@@ -412,7 +414,7 @@ Several findings share a cause, such as the log scope (j1-2 and j3-memory-14), t
 | S-3 | P3 | Scale | the first runs after an upgrade needed 124 notification syncs to read 500 thousand old decisions | fixed in 6a98f22, a2b3428 (bounded hooks queue one durable drain; windows skip deleted ids; focused queue/gap tests passed and an exact-count 20,000-row job drained in 261 ms; 700 MB performance remains unverified) | `crates/yoke-core/src/notifications.rs` |
 | SEC-21 | P3 | Hooks | a hook killed with SIGKILL leaves a running gate command behind | declined (see the failure-mode decisions below, D5) | `crates/yoke-core/src/review/process.rs` |
 | after-fix-2 | note | Usage | `yoke usage` showed only a weekly Codex window | declined: not a defect, Codex reported only a 7-day window on that plan | none |
-| release-2 | P1 | Acceptance | install and update rehearsal instructions treated a temporary HOME as isolation for a shipped optimized executable, which can reach real state | fixed in 9df0602 (disposable account or container required; current acceptance summaries mark a safe rerun pending; account and container execution remain unrun) | `docs/release-acceptance.md` |
+| release-2 | P1 | Acceptance | archive acceptance runs hooks, which can use real account state despite a temporary HOME in shipped optimized builds; CLI install, update and health honour HOME | fixed in 9df0602 (disposable account or container required for archive acceptance; current acceptance summaries mark a safe rerun pending; account and container execution remain unrun) | `docs/release-acceptance.md` |
 | j4-3 | P1 | Usage | a transcript over 32 MiB made a whole session's usage disappear, with only an anonymous error-log line | fixed in 6a98f22 (incremental accounting retained; per-session `usage_partial` notifications and the `yoke usage` recovery action verified; skipped older bytes still under-report as documented) | `crates/yoke-core/src/usage.rs`, `crates/yoke-core/src/notifications.rs`, `crates/yoke-cli/src/notifications.rs` |
 | j3-memory-1 | P1 | Memory | `recall --explain` said session start injects notes, but observe mode injects nothing | fixed in ca1cb8f | `crates/yoke-cli/src/memory.rs` |
 | j3-memory-2 | P1 | Memory | `forget`, `memory pin` and `share` took a global id and acted on other projects | fixed in ca1cb8f | `crates/yoke-core/src/memory.rs` |
@@ -476,7 +478,7 @@ Several findings share a cause, such as the log scope (j1-2 and j3-memory-14), t
 | G-3 | P2 | Layouts | `yoke init` in a repository subdirectory created a second project | fixed in 6947257 (it writes the project root's file and says where) | `crates/yoke-cli/src/commands.rs` |
 | S-1 | P2 | Scale | `yoke trial report` took 1.9 to 3.6 s on 500 thousand decisions, and `yoke health` and filtered `yoke log` queries scanned the whole table | fixed in 6947257 (migration 013 and tighter queries: health 3 ms, trial report 0.4 s, log filters 4 ms) | `crates/yoke-core/src/store/013-scale-indexes.sql`, `crates/yoke-core/src/trial.rs` |
 | S-2 | P2 | Scale | the hourly retention pass ran inside the SessionStart hook and cost 270 to 440 ms while a backlog existed | fixed in 6947257 (a background job deletes in short batches; the hook only queues it) | `crates/yoke-cli/src/retention.rs` |
-| proc-1 | P2 | Tests | a test run with an unset `HOME`, and optimized builds run under an isolated `HOME`, wrote rows into a maintainer's real state database, once migrating it | fixed in 6947257, 0afac36, a2b3428 (CI now runs in a disposable home with offline update transport; an unset or relative `HOME` is an error in every build, only debug builds and `--features honor-home-env` honour `HOME`, and `CONTRIBUTING.md` says so; the leftover rows in that database are removed only with the maintainer's go-ahead) | `crates/yoke-cli/src/bypass.rs`, `CONTRIBUTING.md` |
+| proc-1 | P2 | Tests | a test run with an unset `HOME`, and optimized hooks run under an isolated `HOME`, wrote rows into a maintainer's real state database, once migrating it | fixed in 6947257, 0afac36, a2b3428 (CI uses a disposable home with offline update transport; an unset or relative `HOME` is an error in every build; hooks always honour `HOME` only in debug or `--features honor-home-env` builds, while CLI commands honour it in every build; leftover rows require the maintainer's go-ahead for removal) | `crates/yoke-cli/src/bypass.rs`, `CONTRIBUTING.md` |
 | j1-14 | P3 | Guidance | `health: attention` is the normal state of a fresh install and is never explained | fixed in 6947257 (`yoke health` prints a `meaning` line under the status) | `crates/yoke-cli/src/health.rs` |
 | j3-memory-14 | P3 | CLI output | `yoke log` is not project-scoped and shows other projects' tool payloads (same cause as j1-2) | fixed in 6947257 (same cause as j1-2) | `crates/yoke-cli/src/log_cmd.rs` |
 | j8-5 | P3 | Storage | read-only commands fail with SQLite error 14 when `state.db` has no `-wal` and `-shm` files | fixed in 6947257 (a typed error names the missing files and `yoke log --limit 1`, and the read-only open no longer leaves a zero-byte `-wal`) | `crates/yoke-core/src/store.rs` |

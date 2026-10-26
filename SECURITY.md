@@ -48,6 +48,12 @@ The following are security issues we want reported:
 
 ## Out of scope
 
+The local console binds only to IPv4 loopback and requires the exact numeric Host and port.
+Launch redemption and authenticated reads reject foreign Origin and cross-site Fetch Metadata, while every action additionally requires the HttpOnly SameSite=Strict session cookie, exact Origin, independent CSRF header and JSON content type.
+Launch codes work once within five minutes; session secrets remain valid only for the running console process and never appear in URLs.
+Console responses prohibit framing, caching and referrer disclosure, use `nosniff` and a strict Content Security Policy, and escape state rendered as HTML.
+The HTTP transport bounds header count, bytes, connection count and absolute I/O time; static paths are allow-listed, and screenshot files must pass project containment, file-type, size and evidence-integrity checks.
+
 The following are documented, accepted limits rather than vulnerabilities.
 Read [docs/workflows.md](docs/workflows.md), section **Security model and limits**, for the full statement.
 

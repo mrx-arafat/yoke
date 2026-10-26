@@ -14,7 +14,12 @@ Migration 012 adds a nullable `usage_samples.ts` (Unix seconds, UTC) and an inde
 Import keeps a line's timestamp only when it has the exact RFC 3339 shape with `Z` or a `+HH:MM` offset (`crates/yoke-core/src/usage.rs:165`), and SQLite `unixepoch()` converts it on insert.
 Bare numbers are rejected because SQLite date functions read them as Julian day numbers (https://sqlite.org/lang_datefunc.html).
 A Claude message streamed in several copies keeps the time of its final copy; a Codex delta takes the time of the `token_count` event that produced it.
-Rows imported before migration 012 keep no time until their session's transcript is imported again on a later Stop, SessionEnd or PreCompact; sessions that already ended stay "time unknown".
+Rows imported before migration 012 can have no time even when an incremental import cursor has already reached the end of their transcript.
+On a later Codex import, a separate bounded replay fills only NULL times whose source ordinal, model and token counts match, using the outer `token_count` event's timestamp.
+The replay has its own checkpoint, so recovery continues across imports without replacing raw rows or replaying the entire file on each hook.
+Existing summary update triggers move recovered samples into their UTC day buckets; no schema migration or guessed import time is needed.
+Missing or invalid event times, accounting mismatches, and tail-only imports whose ordinals cannot be verified stay "time unknown".
+Sessions whose transcripts are no longer imported remain unchanged.
 
 ## Decision: time zone semantics
 
