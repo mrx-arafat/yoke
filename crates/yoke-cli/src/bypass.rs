@@ -407,19 +407,18 @@ fn parse_duration(text: &str) -> Result<i64> {
     let amount: i64 = digits
         .parse()
         .with_context(|| format!("{text:?} is not a duration; use for example 30m, 2h or 90s"))?;
-    let seconds = amount
-        * match unit {
-            "s" => 1,
-            "m" => 60,
-            "h" => 3600,
-            _ => bail!("{text:?} needs a unit: s, m or h (for example 30m)"),
-        };
-    ensure!(seconds > 0, "a pause must last at least one second");
+    let scale = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        _ => bail!("{text:?} needs a unit: s, m or h (for example 30m)"),
+    };
+    ensure!(amount > 0, "a pause must last at least one second");
     ensure!(
-        seconds <= MAX_PAUSE_SECS,
+        amount <= MAX_PAUSE_SECS / scale,
         "a pause can last at most 24h; pause again when it ends"
     );
-    Ok(seconds)
+    Ok(amount * scale)
 }
 
 /// `yoke pause`: show the bypass token, or pause every hook for a limited time. Human-only.
@@ -576,6 +575,38 @@ mod tests {
         assert_eq!(parse_duration("30m").unwrap(), 1800);
         for bad in ["", "30", "0m", "25h", "m", "-5m", "5d"] {
             assert!(parse_duration(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn duration_parser_rejects_overflow_without_panicking_and_preserves_bounds() {
+        for text in ["24h", "1440m", "86400s"] {
+            assert_eq!(parse_duration(text).unwrap(), 86400, "{text}");
+        }
+        for (text, expected) in [
+            (
+                "5124095576030432h",
+                "a pause can last at most 24h; pause again when it ends",
+            ),
+            (
+                "9223372036854775807m",
+                "a pause can last at most 24h; pause again when it ends",
+            ),
+            (
+                "25h",
+                "a pause can last at most 24h; pause again when it ends",
+            ),
+            ("0m", "a pause must last at least one second"),
+            (
+                "-9223372036854775808h",
+                "a pause must last at least one second",
+            ),
+            ("5d", "\"5d\" needs a unit: s, m or h (for example 30m)"),
+            ("", "\"\" is not a duration; use for example 30m, 2h or 90s"),
+        ] {
+            let result = std::panic::catch_unwind(|| parse_duration(text))
+                .expect("duration parsing must reject invalid input without panicking");
+            assert_eq!(result.unwrap_err().to_string(), expected, "{text}");
         }
     }
 

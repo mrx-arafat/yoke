@@ -2,6 +2,23 @@
 
 [Documentation index](README.md) · [Release acceptance](release-acceptance.md)
 
+## Owner checklist before tagging
+
+The read-only preflight on 2026-10-26 at `cbf396c`, for `v0.1.0`, reports three passed checks, four failed checks and no skipped checks.
+The four failures below are the current owner actions, not permission for an agent to commit, dispatch workflows or publish.
+Complete the reviewed release changes and push the final commit before dispatching workflows; all workflow evidence must name that same commit.
+
+| Gate and owner | Why it exists | Action that satisfies it | How to check |
+| --- | --- | --- | --- |
+| Clean tree - orchestrator | Uncommitted changes are absent from the tagged source and cannot be covered by its CI evidence. | After each worker hands off reviewed changes, stage only the intended paths and run `git commit -s` as in [step 2](#step-2-prepare-the-release-commit). | Preflight prints `[PASS] 2. clean tree`; untracked `.codegraph/` and `.lavish/` are the only ignored paths. |
+| Dated changelog - release owner | Release notes must identify a planned release date and match their source record. | Set `status` in `docs/changes/0.1.0.json` to the planned ISO release date, then run `uv run --no-project python scripts/changelog.py`; include both files in the reviewed release commit. | `uv run --no-project python scripts/changelog.py --check` prints `changelog is current`, and preflight prints `[PASS] 4. changelog` with the recorded date. |
+| CI and Installer green for the final commit - orchestrator | CI validates the code; Installer validates fresh installs, including root, non-root and terminal paths. | After CI passes, run `gh workflow run installer.yml --ref main`; Installer's path filter means a documentation or dependency-policy commit may otherwise have no run. | Preflight prints `[PASS] 5. CI green for HEAD` only when the latest CI and Installer runs for HEAD both succeeded. |
+| Release workflow evidence - release owner | Native builds on all four targets must pass before the commit is tagged. | Run `gh workflow run release.yml --ref main`; this rehearsal creates Actions artifacts and no release. | Wait with `gh run watch <release-run-id> --exit-status`, then require `[PASS] 6. release workflow evidence` and verify the artifacts as in [step 3](#step-3-rehearse-on-all-four-targets). |
+
+Recheck with `uv run --no-project python scripts/release/preflight.py --tag v0.1.0`, using the version selected in [Choose the tag](#choose-the-tag) for a later release.
+Do not tag until all seven machine checks pass without skips, including pushed HEAD, matching version and unused tag.
+The compliance, name checks, platform acceptance, trials and human console gates in [step 1](#step-1-confirm-the-gates) remain separate; a passing preflight does not complete them.
+
 This runbook is the one path from a release candidate to a published release.
 [Release acceptance](release-acceptance.md) holds the gate status and the recorded evidence.
 This page holds the commands.
