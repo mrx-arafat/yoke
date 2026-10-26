@@ -125,7 +125,8 @@ It exists to find defects before the real trials.
 cargo test -p yoke-cli --test soak -- --ignored --nocapture --test-threads=1
 ```
 
-Set `YOKE_SOAK_BIN` to another yoke build, such as a release build in a temporary target directory, for latency numbers, and `YOKE_SOAK_OUT` to a directory to receive each scenario's results as JSON.
+Set `YOKE_SOAK_BIN` to another debug build, or an optimized build made with `--features honor-home-env` in a temporary target directory, for latency numbers, and `YOKE_SOAK_OUT` to a directory to receive each scenario's results as JSON.
+The soak runs hooks under disposable HOME directories; an ordinary optimized hook can use the account's real Yoke state instead, so never point it at an installed or shipped binary on an account with real state.
 Results: [synthetic-2026-10-14](trials/synthetic-2026-10-14.md).
 
 The soak payloads follow the agents' published hook input contracts:

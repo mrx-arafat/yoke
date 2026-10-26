@@ -44,7 +44,8 @@ yoke uninstall --agent claude,codex --dry-run
 yoke uninstall --agent claude,codex
 ```
 
-The real run prints `changes: 3` and the three files it changed.
+The real run prints `changes: <count>` and each file it changed.
+The count depends on the installed integrations; a repeated uninstall can print `changes: 0`.
 The dry run prints the same list plus only the changed Yoke hooks, feature flags and statusline ownership, and changes nothing.
 It omits neighboring settings and hides statusline commands, because those may hold credentials.
 

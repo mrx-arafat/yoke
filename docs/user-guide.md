@@ -331,7 +331,9 @@ A session where more was skipped shows `counted X MiB of Y MiB` in its coverage 
 ## 8. Memory
 
 Yoke memory is a small searchable notebook for each project.
-Notes belong to the project you are in, and `yoke recall` prints the project it searched.
+From your own terminal, notes belong to the project you are in, and `yoke recall` prints the project it searched.
+An agent's memory commands use its hook-recorded session project even after the tool changes directory.
+Without a unique recorded session and matching process ancestry, they refuse; start a new agent session in the project or run the command in your own terminal.
 Recognizable secrets are redacted before a note is stored: token prefixes, private key blocks, bearer headers, passwords inside URLs, and the value in `key=value` or `--key value` for names such as `password` and `api_key`.
 A secret with no recognizable name or prefix is not masked, so do not save one.
 
@@ -383,6 +385,7 @@ yoke memory import ./yoke-memory.json --map '/absolute/source/project=/absolute/
 
 The archive is plaintext, so protect it.
 Without `--all`, the export covers the current project, and it refuses to replace an existing file unless you add `--overwrite`.
+Run all-project exports in your own terminal; agents cannot use `--all`, and an agent's import preview must map every destination to its recorded session project.
 An import needs one `--map SOURCE=DESTINATION` per project in the archive, with absolute paths, including `SOURCE=SOURCE` to restore in place; the error lists the lines it needs.
 A dry run lists the memories it would add and exits 1 when it finds conflicts.
 Imported notes come in unpinned unless you add `--keep-pins`, and the real import refuses to run from an agent.

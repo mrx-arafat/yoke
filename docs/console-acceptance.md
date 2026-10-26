@@ -32,13 +32,14 @@ The run sheet below describes the intended fixtures after those repairs; it reco
 
 ## Step 1: generate fixtures
 
-Run this from the repository root in any terminal:
+Run this from the repository root in your own terminal, outside an agent tool process:
 
 ```sh
 sh scripts/acceptance/make-fixtures.sh
 ```
 
 It creates a fresh review home with `mktemp -d`, sets `HOME` to it, and seeds only through supported commands and documented hook payloads.
+The generator creates a pinned memory with `yoke remember --pinned`, which refuses agent tool processes even though the later interactive trust and plan approvals are in the finisher.
 The launch project `acme-api` sits under a path of about 220 characters so every page that prints a path exercises overflow handling.
 A second project `beta-cli` exists for the Projects page and the project pickers.
 Eight sessions are recorded, three for Claude Code and three for Codex in the launch project, one of each in the second project.

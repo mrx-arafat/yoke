@@ -112,7 +112,8 @@ See [retaining check diagnostics](configuration.md#retain-check-diagnostics) for
 | `yoke watch` | Read-only live view of the current project in a terminal: decisions per agent today and in its newest session, quota, the newest events with a filter, plans, unread notifications, pending jobs, hook state and the next step `yoke health` gives; `q` or Ctrl-C quits. Without a terminal it prints one snapshot and exits 0 (see [workflows](workflows.md#live-terminal-view)) |
 | `yoke trial report [--since <date>] [--until <date>] [--agent claude\|codex] [--limit <n>] [--before <id>] [--json]` | Read-only release-trial evidence: activity, working days and outcomes per agent and mode, flagged decisions, recovery incidents and acceptance status |
 
-`yoke log` lists the decisions of the project that contains the working directory, the same project every other command uses, and its first line says which (`project: "<path>"`, or `project: all`).
+`yoke log` lists the decisions of the project that contains the working directory, and its first line says which (`project: "<path>"`, or `project: all`).
+Memory commands use that directory for a person, but an agent's memory commands use its hook-recorded session project even after the tool changes directory.
 `--all` lists every project instead, and `--project` takes any path inside another project and matches the project that contains it; a path that is not a directory matches as written.
 `--all` and `--project` cannot be combined.
 `--session` searches every project unless `--project` is also given, because a session id names one session.

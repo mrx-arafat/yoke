@@ -43,7 +43,7 @@ If you already run a Yoke binary built from source, read the full [upgrade notes
 The key steps and warnings:
 
 1. Replace every Yoke executable that runs hooks at the same time, including any `target/release/yoke` that installed hooks point at.
-   The first writable open by the new binary migrates the state database from schema 6 to 12, and an older binary then refuses it on every hook event.
+   The first writable open by the new binary upgrades an older state database to schema 17, and a binary that does not support that schema then refuses it on every hook event.
 2. After replacing, rerun `yoke install --agent claude,codex` with the same `CLAUDE_CONFIG_DIR` and `CODEX_HOME` you start the agents with, then run `yoke health`.
 3. Codex runs new hooks only after you approve them with `/hooks` inside Codex.
 4. Do not trust a configuration that uses the new `[review.models]` or `[memory.digest_models]` keys until every hook binary is replaced.

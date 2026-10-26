@@ -170,7 +170,7 @@ Check commands receive the event, gate, tool, input, session, working directory 
 With that policy trusted, a force push is denied in the agent's own response format:
 
 ```console
-$ echo '{"tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}' \
+$ echo '{"session_id":"s1","tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}' \
     | yoke run-hook --agent claude pre_tool_use
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Force push is blocked by Yoke. Push without --force."}}
 
