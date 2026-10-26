@@ -31,7 +31,8 @@ The nearest trusted project configuration wins discovery, and a nearer file that
 
 If the gate is present, compare its event and matchers with an actual recorded payload.
 `match_tool` matches the whole tool name, while `match_contains` and `match_pattern` inspect searchable payload text.
-The starter's `Bash` matcher does not match every Codex shell tool name.
+The current starter matches `Bash`, `exec_command`, `shell_command` and `shell`; older policies may still match only `Bash`.
+Use the tool name in your recorded payload when updating a matcher, then review and trust the changed policy in your own terminal.
 For agent integration, inspect `yoke install --agent claude,codex --dry-run` and review newly installed Codex hooks using `/hooks`.
 
 ## Failures are logged but actions continue
@@ -246,12 +247,17 @@ An older Codex sample with an unknown time also triggers a separate bounded repl
 This replay resumes its own checkpoint, fills only matching NULL times and updates day totals without deleting raw rows.
 Recovery adds work until the available source is replayed; missing or invalid timestamps, mismatched accounting, tail-only imports and records over 32 MiB stay unknown.
 An ended session is not repaired until its transcript is imported again.
-Yoke reads a transcript again from its start when the file was truncated, replaced or rewritten, which is why a replaced transcript replaces the stored usage.
+Yoke reads a transcript again from its start when the file was truncated, replaced or rewritten, replacing only that transcript's stored usage.
+Codex can send a parent session ID with a subagent's rollout, including a nested subagent.
+When that rollout explicitly identifies the same parent, Yoke counts its attributed response records under the parent session, with a separate checkpoint for each child.
+Copied parent history and mirrored cumulative token counts are not counted again, and replacing one rollout preserves the others.
+An unrelated session, inconsistent response counters, or a child format without attributed response records is refused with a diagnostic; keep the rollout and report the error rather than rewriting IDs or resetting state.
+This accounting never changes the parent's project or policy anchor.
 A single read of more than 32 MiB does not fail: only its newest 32 MiB is counted, the usage in the skipped part is not, and `yoke usage` marks the session in its coverage column (for example `counted 31.8 MiB of 64.7 MiB`) and adds a note.
 That happens for a first import of a transcript larger than 32 MiB, and when more than 32 MiB was appended between two imports; usage counted earlier stays.
 Each partly counted session also raises one `usage_partial` notification.
 Acknowledging it does not change the totals, and repeated imports do not reopen it while the same condition holds.
-A full import after a transcript replacement resolves it.
+A full import after a transcript replacement resolves that transcript's missing coverage; a parent stays marked incomplete while another child rollout is still partly counted.
 Keep the original transcript: incremental imports add new usage but cannot recover the bytes already skipped.
 Quota resets more than the advertised window plus five minutes after the observation are ignored.
 An invalid stored quota record is replaced when the agent next reports valid limits; no manual deletion is needed.

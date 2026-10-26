@@ -171,8 +171,9 @@ yoke recall 'formatting' --json
 Use the returned ID with `yoke memory pin <id>`, `yoke memory pin <id> --unpin`, or `yoke forget <id>`.
 A pinned note is injected at every session start, so only a person may pin: `yoke remember --pinned` and `yoke memory pin` refuse to run from an agent's tool process and tell it to save the note without `--pinned`.
 Unpinning is always allowed.
-Recall is scoped to the current project: the directory you run it in, or the git root when it is inside a repository.
-Inside a directory without git, a subdirectory is a separate project, and `yoke recall` prints the `project:` path it searched.
+From your own terminal, recall uses the directory you run it in, or the Git root when it is inside a repository.
+For a person outside a Git repository, a subdirectory is a separate project; `yoke recall` prints the `project:` path it searched.
+An agent's memory commands use its hook-recorded session project even after the tool changes directory, and refuse when that session and the tool's process ancestry do not identify a unique project.
 `yoke forget`, `yoke share` and `yoke memory pin` take the same project-scoped IDs: an ID from another project fails with `memory <id> not found in this project` and changes nothing.
 A query matches any of its words, including plural and verb forms of English words, and the best matches come first.
 Without a query, recall lists pinned entries first, then the newest.
@@ -324,7 +325,7 @@ The 15 ms target applies to Yoke's own rendering, excluding the optional wrapper
 Usage amounts are API token-price estimates based on supported transcript fields and a compiled pricing table, not subscription invoices.
 Unsupported models or missing billing dimensions display unknown cost, and a total that includes them shows the priced part plus the unknown samples.
 An import resumes a transcript at the byte where the previous import of that session stopped, so a Stop reads only what was appended.
-Concurrent imports of one session never count the same lines twice, and a replaced or truncated transcript replaces the stored usage on its next import.
+Concurrent imports of one session never count the same lines twice, and a replaced or truncated transcript replaces only its own stored usage on its next import.
 The Usage page filters by inclusive date range and groups by day or month in the UTC offset shown on the page.
 
 ## Live terminal view
@@ -424,19 +425,25 @@ Codex also offers built-in footer items via `/statusline`; it does not offer Cla
 Without a recorded reading, the report says so and names what produces it; it never shows a guessed figure.
 
 Yoke remembers, per session, how far it has read (a byte offset, the file's identity and a fingerprint of its first and last 4 KiB), so a Stop on a long session reads only the lines added since the previous import.
-If the transcript was truncated, replaced or rewritten, that memory no longer fits and the import reads it again from the start, replacing the session's stored usage.
+If the transcript was truncated, replaced or rewritten, that memory no longer fits and the import reads it again from the start, replacing only that transcript's stored usage.
+Codex child rollouts that explicitly name the logical parent session contribute their attributed response usage to that parent's totals, including nested subagents whose immediate parent is another child.
+Each child has its own checkpoint, repeated responses count once, and copied ancestor history and mirrored cumulative records are excluded.
+Parent, child and sibling rollout replacements preserve each other's usage, and accounting never changes the parent's policy anchor.
+Unrelated identities and child formats without attributed response records remain errors; keep the rollout and report the diagnostic rather than changing session IDs.
 
 A single read counts at most the newest 32 MiB.
 That is a first import of a transcript larger than 32 MiB, or more than 32 MiB appended between two imports.
 The usage in the skipped part is not counted: Claude messages and Codex counts before the cut are skipped, and the first Codex count after the cut only sets the baseline, so skipped usage is never dated to it.
 Usage counted by earlier imports stays.
 Such a session is marked `counted X MiB of Y MiB` in `yoke usage` and in its `partial` field with `--json`, and a note gives how many sessions are affected, because their totals under-report.
-The marker clears when a later import of that session reads the whole transcript from the start.
+The marker clears when every affected rollout has later been read completely from the start.
 Each such session also raises a `usage_partial` notification with a recovery action to read its coverage.
 
 ### Bounded performance checks
 
 After building the debug CLI, run `uv run --no-project python scripts/benchmark_hooks.py --ci` for a small regression check.
+The benchmark starts one guarded shell before sampling and launches a fresh Yoke process for each invocation.
+Each sample includes process startup and input/output capture, with an isolated HOME check before execution.
 It fails if a hook's full process p99 exceeds 250 ms, verifies each hook wrote its decision, and checks seeded usage totals.
 Use `--json --samples 30` for full per-event p50, p95 and p99 output with the default larger seed.
 The script also runs the notification-drain job synchronously and checks its counts.

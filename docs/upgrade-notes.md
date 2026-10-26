@@ -1,5 +1,15 @@
 # Upgrade notes
 
+### Codex child-rollout usage stays with its parent session
+
+Codex subagent rollouts with explicit matching logical session identity and attributed response records now contribute to that parent session's usage totals, including nested subagents.
+Copied parent history and mirrored cumulative counters are excluded, repeated responses count once, and each rollout has an independent checkpoint and replacement scope.
+The parent's policy anchor, normal Codex accounting, existing usage rows and database schema are unchanged.
+Replace all hook executables together to use the fix; older binaries can erase child samples when they replace parent usage.
+Later imports can recover retained child records within the existing bounded read, and incomplete coverage remains visible.
+Historical closed rollouts are not automatically searched or reopened.
+Keep rollouts that report unrelated identities, conflicting counters or missing attributed response records and report the diagnostic; do not rewrite IDs or reset state.
+
 ### Schema 17 records the policy behind each decision
 
 - Writable opens upgrade existing state through schema 17, adding historical policy archives and a policy hash on new decisions.

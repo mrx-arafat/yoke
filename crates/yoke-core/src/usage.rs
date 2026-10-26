@@ -17,6 +17,8 @@ use crate::{
     store::Store,
 };
 
+mod child;
+
 /// The most transcript bytes one import counts: the newest ones.
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_ATTEMPTS: usize = 3;
@@ -308,6 +310,8 @@ fn cursor_key(agent: &str, session: &str) -> String {
 /// What reading a transcript carries from one line to the next.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ParseState {
+    #[serde(default)]
+    child_usage_seen: bool,
     /// Codex: the cumulative counters of the last count.
     previous: [i64; 4],
     /// Codex: false while the older part is skipped and no count has set `previous` yet.
@@ -321,6 +325,7 @@ struct ParseState {
 impl ParseState {
     fn new() -> Self {
         Self {
+            child_usage_seen: false,
             previous: [0; 4],
             baselined: true,
             model: "unknown".to_owned(),
@@ -376,13 +381,14 @@ fn load_cursor(connection: &rusqlite::Connection, key: &str) -> Result<Option<Cu
 
 fn has_samples(connection: &rusqlite::Connection, agent: &str, session: &str) -> Result<bool> {
     Ok(connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM usage_samples WHERE agent=?1 AND session_id=?2)",
+        "SELECT EXISTS(SELECT 1 FROM usage_samples WHERE agent=?1 AND session_id=?2 AND (agent<>'codex' OR record_key NOT GLOB 'child-*'))",
         params![agent, session],
         |row| row.get(0),
     )?)
 }
 
 struct Snapshot {
+    child: Option<child::Stream>,
     observed: Fingerprint,
     /// The transcript's size when it was opened.
     size: u64,
@@ -427,6 +433,12 @@ struct Message {
 #[serde(default)]
 struct Payload {
     id: Value,
+    session_id: Value,
+    thread_id: Value,
+    parent_thread_id: Value,
+    source: Value,
+    response_id: Value,
+    usage: Value,
     model: Value,
     #[serde(rename = "type")]
     kind: Value,
@@ -465,6 +477,7 @@ fn ingest_bounded(
         "unsupported transcript agent"
     );
     let notification_project = project;
+    let requested_session = session;
     let session = identifier(session)?;
     let project = identifier(project)?;
     let cursor_key = cursor_key(agent, &session);
@@ -477,12 +490,15 @@ fn ingest_bounded(
         let snapshot = read_snapshot_from(
             store.connection(),
             agent,
-            &session,
+            requested_session,
             transcript,
             limit,
             cursor.as_ref(),
         )?;
-        if agent == "codex" && !repair_codex_timestamps(store, &session, transcript, limit)? {
+        if agent == "codex"
+            && snapshot.child.is_none()
+            && !repair_codex_timestamps(store, &session, transcript, limit)?
+        {
             continue;
         }
         if snapshot.base.as_ref() == Some(&snapshot.next) && snapshot.quota.is_none() {
@@ -541,6 +557,22 @@ fn read_snapshot(
     let metadata = file.metadata()?;
     ensure!(metadata.is_file(), "transcript must be a regular file");
     let observed = fingerprint(&metadata);
+    // Validate the physical stream before seeking into a bounded tail, on this same fd.
+    let (child, header_bytes) = if agent == "codex" {
+        child::identify(&mut file, session, limit)?
+    } else {
+        (None, 0)
+    };
+    let child_cursor = if let Some(stream) = &child {
+        stream.cursor(clock, &identifier(session)?)?
+    } else {
+        None
+    };
+    let resume = if child.is_some() {
+        child_cursor.as_ref()
+    } else {
+        resume
+    };
     let base = resume
         .filter(|cursor| cursor.resumes(&mut file, &metadata))
         .cloned();
@@ -554,10 +586,10 @@ fn read_snapshot(
     let start = if prefix {
         from
     } else {
-        from.max(size.saturating_sub(limit))
+        from.max(size.saturating_sub(limit.saturating_sub(header_bytes)))
     };
     let end = if prefix {
-        size.min(from.saturating_add(limit))
+        size.min(from.saturating_add(limit.saturating_sub(header_bytes)))
     } else {
         size
     };
@@ -576,6 +608,7 @@ fn read_snapshot(
     }
     let mut samples = BTreeMap::<String, Sample>::new();
     let mut quota: Option<Quota> = None;
+    let mut child_cumulative = false;
     loop {
         bytes.clear();
         let read = reader.read_until(b'\n', &mut bytes)?;
@@ -605,8 +638,9 @@ fn read_snapshot(
                 continue;
             }
             if let Some(found) = row.session_id.as_str() {
+                identifier(found)?;
                 ensure!(
-                    identifier(found)? == session,
+                    found == session,
                     "transcript session does not match requested session"
                 );
             }
@@ -632,10 +666,34 @@ fn read_snapshot(
             );
         } else {
             let payload = row.payload.unwrap_or_default();
+            if let Some(stream) = &child {
+                if row.kind == "turn_context" {
+                    state.model = identifier(payload.model.as_str().unwrap_or("unknown"))?;
+                }
+                if row.kind == "token_usage_record" {
+                    if let Some((key, sample)) =
+                        stream.sample(&payload, &row.timestamp, &state.model)?
+                    {
+                        if let Some(before) = samples.get(&key) {
+                            ensure!(before.counts == sample.counts,
+                                "conflicting Codex response usage; keep the rollout and report the response ID");
+                        }
+                        samples.insert(key, sample);
+                        state.child_usage_seen = true;
+                    }
+                }
+                child_cumulative |= row.kind == "event_msg"
+                    && payload.kind == "token_count"
+                    && !payload.info["total_token_usage"].is_null();
+                if row.kind != "event_msg" || payload.kind != "token_count" {
+                    continue;
+                }
+            }
             if row.kind == "session_meta" {
                 if let Some(found) = payload.id.as_str() {
+                    identifier(found)?;
                     ensure!(
-                        identifier(found)? == session,
+                        found == session,
                         "transcript session does not match requested session"
                     );
                 }
@@ -648,7 +706,7 @@ fn read_snapshot(
             }
             // Read before the counters are skipped: a repeated or counter-less event still
             // carries the account's current limits.
-            if !payload.rate_limits.is_null() {
+            if !payload.rate_limits.is_null() && (child.is_none() || state.child_usage_seen) {
                 if let Some(ts) = timestamp(&row.timestamp) {
                     let observed_at: Option<i64> = clock
                         .prepare_cached("SELECT unixepoch(?1)")?
@@ -662,6 +720,10 @@ fn read_snapshot(
                         }
                     }
                 }
+            }
+            // Child counters mirror explicit records; keep quota, never count both.
+            if child.is_some() {
+                continue;
             }
             let usage = &payload.info["total_token_usage"];
             if usage.is_null() {
@@ -722,8 +784,11 @@ fn read_snapshot(
             );
         }
     }
+    ensure!(!child_cumulative || state.child_usage_seen,
+        "Codex child usage lacks attributed response records; keep the rollout and report incomplete usage, without rewriting session IDs");
     let mut file = reader.into_inner().into_inner();
     Ok(Snapshot {
+        child,
         observed,
         size,
         samples,
@@ -820,7 +885,8 @@ fn commit_snapshot(
         if current.ok() != Some(snapshot.observed) {
             return Ok(false);
         }
-        let cursor_key = cursor_key(agent, session);
+        let cursor_key = snapshot.child.as_ref().map_or_else(
+            || cursor_key(agent, session), |stream| stream.cursor_key.clone());
         match &snapshot.base {
             // Another import moved the cursor after this one read it, so this one is stale.
             Some(base) if load_cursor(tx, &cursor_key)?.as_ref() != Some(base) => {
@@ -833,10 +899,17 @@ fn commit_snapshot(
             }
             // Replace only this explicitly imported session, retaining other sessions.
             None => {
-                tx.execute("DELETE FROM usage_samples WHERE agent=?1 AND session_id=?2", params![agent, session])?;
+                if let Some(stream) = &snapshot.child {
+                    tx.execute("DELETE FROM usage_samples WHERE agent=?1 AND session_id=?2 AND record_key GLOB ?3", params![agent, session, stream.pattern()])?;
+                } else {
+                    tx.execute("DELETE FROM usage_samples WHERE agent=?1 AND session_id=?2 AND (agent<>'codex' OR record_key NOT GLOB 'child-*')", params![agent, session])?;
+                }
             }
         }
         for (key, sample) in &snapshot.samples {
+            if snapshot.child.is_some() {
+                child::check_existing(tx, session, key, sample)?;
+            }
             tx.execute("INSERT INTO usage_samples(agent,session_id,project,record_key,model,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_nano_usd,ts) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,unixepoch(?11))
                 ON CONFLICT(agent,session_id,record_key) DO UPDATE SET project=excluded.project,model=excluded.model,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens,cost_nano_usd=excluded.cost_nano_usd,ts=excluded.ts",
                 params![agent, session, project, key, sample.model, sample.counts[0], sample.counts[1], sample.counts[2], sample.counts[3], sample.cost, sample.ts])?;
@@ -847,21 +920,7 @@ fn commit_snapshot(
         // A read from the start clears an earlier partial marker, as when a transcript is
         // replaced. A resumed read keeps it, adds what it skipped and follows the file's size.
         let key = partial_key(agent, session);
-        let marker = match &snapshot.base {
-            None => snapshot.partial.clone(),
-            Some(_) => {
-                let before: Option<PartialImport> = tx
-                    .query_row("SELECT value FROM kv WHERE key=?1", [&key], |row| row.get::<_, String>(0))
-                    .optional()?
-                    .and_then(|value| serde_json::from_str(&value).ok());
-                let known = || snapshot.partial.iter().chain(before.iter());
-                known().next().map(|first| PartialImport {
-                    transcript_bytes: snapshot.size,
-                    skipped_bytes: known().map(|p| p.skipped_bytes).sum(),
-                    limit_bytes: first.limit_bytes,
-                })
-            }
-        };
+        let marker = child::coverage(tx, agent, session, snapshot)?;
         match &marker {
             Some(marker) => put_kv(tx, &key, &serde_json::to_string(marker)?)?,
             None => {
