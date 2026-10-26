@@ -10,10 +10,40 @@ It produces findings about the experience, such as wrong guidance, silent failur
 This page records what was tested, how Yoke behaves in real use, the second-wave audit and failure-mode passes, every finding with its status, and how to repeat the test.
 It is a record of observations, not a release acceptance claim.
 
+## Wave 4 verification 2026-10-26
+
+The pushed checkpoint is `eaa04cd`: W3-9 child accounting and the remaining W4-1 documentation hunks are in `b65fc68`, W4-5 pause bounds and release-owner guidance are in `7f43128`, and W4-2 recovery messages are in `eaa04cd`.
+The other seven W4-1 documents landed in `437b361`; the maintained benchmark correction is `31326f7`.
+The orchestrator recorded a combined local gate of 50/50 before this handoff.
+The hosted CI and Installer results below name earlier commits; they do not establish hosted acceptance of this checkpoint.
+The last recorded installed macOS hook is from `dca970c`, with the real database migrated to schema 17 after a copy rehearsal; these later source commits are not claimed deployed.
+
+W3-9 attributes explicitly linked child and nested-child records to the logical parent while preserving policy anchors, independent stream cursors and replacement scopes.
+Copied history, mirrored cumulative counters and repeated response IDs do not add usage; unrelated logical sessions remain refused.
+The owner recorded 19 usage unit tests, one integration scenario and debug executable acceptance with independently checked totals of 88 input, 13 output and 22 cached tokens.
+Unsupported child formats without explicit attribution remain refused; Linux execution, optimized 700 MB timing and live nested-agent acceptance are unverified for this change.
+Upgrade all hook executables together: older writers can erase child samples on parent replay even though this change adds no schema migration.
+
+W4-1 reconciled all 1,226 legacy command occurrences into its 1,356-occurrence audit snapshot: 513 execution references and 843 explicit source, prerequisite, safety or non-command dispositions, with zero unclassified.
+Seven documentation mismatch classes were corrected; six focused contracts changed from 0/6 to 6/6, an additional anchored-cwd wording check passed, and the owner recorded a 44-file documentation check and final formatting checks.
+The old 349 figure counted unique file-line references, not executed argv occurrences: exact prior argv coverage was 410/1,226, leaving 816 without that evidence, rather than 877.
+The command-contract audit is complete at its assigned boundary, which permits documented source-only exceptions; human, external-system and release workflows are not thereby accepted.
+
+W4-2 context-reviewed 318 of the 328 carried error-macro sites, correcting 77 directly and supplying recovery at shared callers for 85.
+Together with W3's 66 reviews, 384/394 baseline sites have contextual review; ten usage contexts remain explicitly with cx9, independently of the accounting implementation.
+The recorded focused evidence is 126 passing tests, five debug CLI probes with expected error exits and recovery hints, clippy with warnings denied, workspace/owned formatting and documentation checks.
+Console evidence covers handler behavior, not browser interaction; this does not establish exhaustive non-macro IO fault injection.
+
+W4-5 revalidated 49 historical explicit panic-operation classifications across 16 files: 48 invariants hold and one operation was retired.
+The final CX7 inventory has zero proposed entries, and all 37 earlier proposal rows were reviewed without establishing another current user-input panic.
+A separately reported duration multiplication overflow was outside that inventory; bounds now precede multiplication, with parser-only RED/GREEN evidence preserving the documented 24-hour limit.
+The historical extractor does not enumerate unchecked binary arithmetic, so these reviews do not prove the whole program panic-free.
+The release-owner checklist records the four failed preflight gates at `cbf396c`; it does not satisfy them or the separate human/release gates.
+
 ## Round 2 and wave 3 verification 2026-10-26
 
 The wave commit is `15f613f`, following `20b8801` (canonical macOS health fixture), `d7ee984` (gate-reason redaction, quota locking and recovery messages) and `2e8a549` (HOME wording and command examples).
-The current checkpoint is `dca970c`, which restores the license allowance required by the merged dependency graph.
+The wave-3 checkpoint is `dca970c`, which restores the license allowance required by the merged dependency graph.
 Round 2 is the 25-commit range `5e86630..091ffde`; it adds policy-version archives, schema 17, quota history/headroom, aligned CLI tables, JSON output consistency and clearer decision previews.
 The orchestrator's combined local gate passed 47/47 checks in the default temporary layout and `TMPDIR=/tmp` before pushing the wave.
 [Installer run 40275283119](https://github.com/mrx-arafat/yoke/actions/runs/40275283119) passed all 11 jobs at `15f613f`.
@@ -46,7 +76,7 @@ This live evidence is for `091ffde`, not the later integrated wave or a publishe
 
 The field test also confirmed missing Codex child-rollout usage: hooks carry a parent session ID while related child transcript metadata has its own ID, and the importer rejects it before accounting commits.
 Earlier parent samples survive, but three inspected child identities had no samples; copied parent history prevents a trustworthy missing-token total.
-W3-9 remains open: accounting needs independent stream identity and deduplication without weakening unrelated-transcript rejection or changing policy anchors.
+W3-9 fixes that source defect in `b65fc68` with independent stream accounting and deduplication; the earlier Linux observation is not a live acceptance of the new implementation.
 
 ### Corrected 700 MB timing evidence
 
@@ -58,7 +88,8 @@ Both runs and the first-run misses are retained; this is not one uninterrupted g
 Old/current paired repeats did not establish a p50 regression above the 1 ms investigation threshold, and no product-code fix was needed.
 The measurement covers macOS steady state without transcripts, gates, active plans, migration or maintenance backlog at `20b8801`; the later integrated wave and Linux were not optimized-benchmarked by that evidence.
 All owned benchmark state, targets and binaries were removed, with zero fixture-project leaks into real state.
-The maintained benchmark still needs its measurement-boundary correction; do not compare its fresh-shell digits directly with this acceptance boundary.
+The maintained benchmark's measurement boundary is corrected in `31326f7`: one persistent guard launches each fresh Yoke child directly.
+This harness correction does not extend the optimized `20b8801` measurements to the later integrated source.
 
 ## Implementation verification 2026-10-18
 
@@ -408,14 +439,15 @@ Commits `6a98f22` and `a2b3428` add durable notification catch-up and exact usag
 ## Findings ledger
 
 One row per finding, retaining its original severity and source location.
-It holds 162 rows: the previous 154 findings, four round-2 audit findings, one current child-usage finding, two explicitly incomplete exhaustive audits and the current hosted license-policy regression.
-Of the 162, 152 are fixed, 5 are partly fixed, 3 are open and 2 are declined.
-The five partly fixed rows are SEC-8, SEC-10, SEC-23, SEC-28 and C13; release acceptance remains separate from implementation status.
+It holds 163 rows: the previous 154 findings, four round-2 audit findings, one child-usage finding, two exhaustive-audit findings, the hosted license-policy regression and the pause-duration overflow.
+Of the 163, 155 are fixed, 6 are partly fixed, none are open and 2 are declined.
+The six partly fixed rows are SEC-8, SEC-10, SEC-23, SEC-28, C13 and W3-7-errors; release acceptance remains separate from implementation status.
 Status is `fixed in <short sha>`, `partly fixed in <short sha>` with what remains in brackets, `open` or `declined`.
 The first wave is carried by `250dd84`, `ca1cb8f` and `746cef9`.
 The second wave is carried by `6947257` (code), `a42a20e` (release and installer paths) and `0afac36` (documentation only).
 The October 18 implementation wave is carried by `6a98f22`, `a2b3428` and `9df0602`.
 The round-2/wave-3 code is `15f613f`, following `20b8801`, `d7ee984` and `2e8a549`; `dca970c` corrects the merged license policy.
+The later commits are `31326f7` (benchmark boundary), `437b361` and `b65fc68` (command audit), `b65fc68` (child accounting), `7f43128` (pause bounds/release checklist) and `eaa04cd` (recovery messages).
 The ID prefix says where a row came from:
 
 | Prefix | Source |
@@ -427,13 +459,15 @@ The ID prefix says where a row came from:
 | `G-1` to `G-11` | the project layout pass (there is no `G-9`) |
 | `S-1` to `S-5` | the large-database pass |
 | `proc-`, `out-`, `anchor-`, `health-`, `release-` | found while fixing and testing the second wave |
-| `W3-4-`, `W3-5`, `W3-7-` | round-2 audit, current Linux accounting finding and incomplete exhaustive audits |
+| `W3-4-`, `W3-5`, `W3-7-` | round-2 audit, Linux accounting finding and exhaustive-audit coverage findings |
 | `W3-CI` | hosted check of the committed wave against the current dependency graph |
+| `W4-5` | pause-duration overflow found during the contextual error audit |
 
 The audit and layout reports gave their own severities.
-The severities of `C1` to `C17`, `S-1` to `S-5`, `proc-1`, `anchor-1` and `release-1` were assigned when this ledger was written, from the effect each report describes.
+The severities of `C1` to `C17`, `S-1` to `S-5`, `proc-1`, `anchor-1`, `release-1` and `W4-5` were assigned when this ledger was written, from the effect each report describes.
 Several findings share a cause, such as the log scope (j1-2 and j3-memory-14), the notification link (j1-7 and j4-5) and the project policy that followed the agent's directory (SEC-1, SEC-4 and G-1).
-The two W3-7 coverage gaps are recorded as P3 follow-up work; they do not establish that every unreviewed command or message is defective.
+The two W3-7 coverage findings retain P3 severity; the command-contract audit is completed with explicit source-only dispositions, while ten error contexts remain unreviewed.
+An unexecuted workflow or unreviewed message is not itself evidence of a product defect.
 
 | ID | Severity | Area | Summary | Status | Where |
 | --- | --- | --- | --- | --- | --- |
@@ -442,9 +476,10 @@ The two W3-7 coverage gaps are recorded as P3 follow-up work; they do not establ
 | W3-4-F02 | P2 | Upgrade | schema 17 lacked its older-writer refusal, backup and private policy-archive warning | fixed in 15f613f | `docs/upgrade-notes.md` |
 | W3-4-F03 | P3 | Console | collapsed Codex decisions omitted the existing tool_input.cmd field | fixed in 15f613f (known-field preview restored; escaped and Unicode regression passed) | `crates/yoke-cli/src/console/pages.rs` |
 | W3-4-F04 | P3 | Tests | aligned log rows lost semantic tool, gate, event, session and project assertions | fixed in d7ee984 (complete normalized rows and a failing missing-TOOL mutation restore the behavior contract) | `crates/yoke-cli/tests/cli_output.rs` |
-| W3-5 | P2 | Usage | Codex parent hook IDs reject related child rollouts before usage accounting, leaving child work uncounted | open (W3-9 needs stream-specific accounting and copied-history deduplication while preserving unrelated-ID rejection and policy anchors) | `crates/yoke-core/src/usage.rs`, `crates/yoke-cli/src/hook.rs` |
-| W3-7-docs | P3 | Audit coverage | exhaustive documentation-command verification is incomplete | open (76 argv cover 349 of 1,226 extracted occurrences; 877 were not executed; 58 help paths passed; shell programs and human/prerequisite paths remain unverified) | `README.md`, `MANUAL.md`, `docs/*.md` |
-| W3-7-errors | P3 | Audit coverage | exhaustive actionable-error review is incomplete | open (66 of 394 macro sites context-reviewed, 328 lexical-only; context, Display and external error chains add further scope) | `crates/yoke-cli/src`, `crates/yoke-core/src` |
+| W3-5 | P2 | Usage | Codex parent hook IDs reject related child rollouts before usage accounting, leaving child work uncounted | fixed in b65fc68 (W3-9: independent stream identity/replacement, explicit child/nested attribution and copied-history deduplication; 19 unit tests, one integration scenario and exact debug CLI totals; unrelated-ID refusal and policy anchors preserved; Linux/live/optimized acceptance remains separate) | `crates/yoke-core/src/usage.rs`, `crates/yoke-core/src/usage/child.rs` |
+| W3-7-docs | P3 | Audit coverage | documentation-command verification lacked complete occurrence dispositions | fixed in 437b361, b65fc68 (W4-1: all 1,226 legacy rows reconciled; 1,356-occurrence audit snapshot has 513 execution references and 843 explicit other dispositions, zero unclassified; prior exact argv coverage corrected to 410/1,226; source-only/human/release acceptance remains separate) | `README.md`, `MANUAL.md`, `docs/*.md` |
+| W3-7-errors | P3 | Audit coverage | exhaustive actionable-error review is incomplete | partly fixed in eaa04cd (W4-2: 318 eligible remaining sites reviewed, 77 direct and 85 caller-boundary corrections; 384/394 baseline contexts reviewed in total, ten usage contexts still excluded; non-macro error chains add further scope) | `crates/yoke-cli/src`, `crates/yoke-core/src` |
+| W4-5 | P2 | CLI | a huge human pause duration could overflow before the 24-hour bound, panicking in debug or wrapping when overflow checks were disabled | fixed in 7f43128 (validate positive amount and unit-adjusted cap before multiplication; parser-only RED/GREEN preserves 24h/1440m/86400s boundaries; human pause was not executed) | `crates/yoke-cli/src/bypass.rs` |
 | S-6 | P2 | Usage | Codex usage samples with NULL timestamps are excluded from per-day totals, despite contributing to session totals | fixed in 15f613f (bounded source replay fills matching NULL dates without deleting samples; exact schema-17 recovery verified; closed/unrecoverable records can remain unknown) | `crates/yoke-core/src/usage.rs`, `crates/yoke-core/src/store/015-usage-summaries.sql` |
 | SEC-7 | P2 | Security | `yoke run-hook` accepts forged events from an agent shell and writes decisions, facts and the Stop counter | fixed in 6a98f22, 9df0602 (guard denies agent run-hook commands; records OS parent PID/name/start identity rather than trusting submitted provenance; same-user provenance is not cryptographic authentication) | `crates/yoke-cli/src/hook.rs`, `crates/yoke-core/src/guard.rs` |
 | SEC-12 | P2 | Review | the author of a diff can imitate the review delimiter and spoof the independent verdict | fixed in 6a98f22, 9df0602 (independent review uses unpredictable framing and JSON encoding for diff data; delimiter injection regression covered) | `crates/yoke-core/src/review.rs` |
@@ -627,23 +662,20 @@ No P1 is open.
 
 ### Release blockers, in priority order
 
-1. Complete Codex child-rollout accounting without losing parent/sibling usage, double-counting copied history or weakening transcript and policy-session identity (W3-5, W3-9).
-2. Validate the final source after that fix, including installed-binary and optimized evidence where needed; the current CI is green at `dca970c`, Installer passed at `15f613f` and scale evidence is scoped to `20b8801`.
-3. Finish the exhaustive command and error audits (W3-7-docs, W3-7-errors), preserving their measured partial coverage and prioritizing frequently encountered recovery gaps.
+1. Validate the final integrated source with hosted, installed-binary and optimized evidence where needed; local integration is recorded as 50/50, hosted CI is green at `dca970c`, Installer passed at `15f613f` and optimized scale evidence is scoped to `20b8801`.
+2. Review the ten remaining usage error contexts (W3-7-errors) and retain explicit source-only dispositions for the completed command audit (W3-7-docs).
+3. Resolve the remaining partial policy/security and ownership decisions without treating audit or implementation completion as live acceptance.
 4. Coordinate any further installed-binary upgrade, then exercise remaining live cases: continuous-process cwd changes, pause tokens, settings reload, plan Stop holds and quota-present statuslines.
 5. Complete safe shipped-artifact/four-platform release rehearsal, repository protections, provenance/compliance review, human console acceptance and observe-day/enforce-week trials.
 
 The implementation packages and their follow-ons are committed; that does not establish release acceptance.
-S-6, the four confirmed round-2 regressions and the hosted license gate are fixed; the child-usage defect and two exhaustive audits remain open.
-
-### P2, open
-
-- W3-5: related Codex child rollouts fail the parent-hook session check, so child usage can be omitted.
-  W3-9 must keep independent accounting cursors, deduplicate inherited history and preserve both unrelated-ID refusal and the trusted policy anchor.
-  Do not rewrite transcript IDs or reset the database as a workaround.
+S-6, the four confirmed round-2 regressions, the hosted license gate, child accounting, command-contract coverage and pause-duration overflow are fixed at their recorded boundaries.
+Ten usage error contexts remain outstanding; the error audit stays partly fixed.
 
 ### Partly fixed, with what remains
 
+- W3-7-errors: ten usage contexts were excluded from W4-2 and still need contextual review; the child-accounting implementation alone does not close them.
+  The other 384 baseline sites have contextual reviews; full non-macro IO fault injection remains outside that audit evidence.
 - SEC-8: agent memory scope and injection caps/reserved budgets are implemented; trusted-only injection and memory authorship remain unimplemented.
   Pins that an agent made before the fix cannot be told apart, so the [upgrade notes](upgrade-notes.md) ask people to review their pins.
 - SEC-10: automated SHA256SUMS verification is implemented; provenance remains a documented manual step, detached signing is absent and published-release attestation/environment/gate acceptance remains pending.
@@ -678,11 +710,12 @@ These rest on tests, isolated debug builds, reading code or documentation, not o
 ### Free-model work
 
 - CX7 replaced the earlier panic summary with a 94-file, 2,543-site classified snapshot and fixed watch terminal cleanup.
-  The administrator reviewed the cleanup defect and selected invariants; the historical inventory is not a current whole-program safety proof after round 2.
-- W3-7-docs stays open: 76 literal argv covered 349 of 1,226 extracted occurrences; 877 were not executed, and 58 help paths passed.
-  Template, shell-expansion, prerequisite, human-only and historical examples are not established by that argv inventory.
-- W3-7-errors stays open: 66 of 394 macro sites were reviewed in context and 328 remain lexical-only; other error chains add further scope.
-  Installer/reviewer recovery fixes are committed and focused-tested, which does not complete the exhaustive audit.
+  W4-5 revalidated 49 explicit panic-operation sites across 16 files: 48 safety arguments hold and one operation is retired; zero final CX7 proposals and all 37 earlier proposal rows were checked.
+  The separately fixed duration overflow in `7f43128` was outside that sample and the extractor's categories; unchecked binary arithmetic was not inventoried, so this is not a whole-program panic proof.
+- W3-7-docs is fixed in `437b361` and `b65fc68`: its 1,356-occurrence snapshot has 513 execution references and 843 explicit other dispositions, with every legacy row reconciled and no unclassified entry.
+  The historical exact argv denominator is 410/1,226 rather than 349/1,226; human, prerequisite, external-system and release workflows retain their explicit source-only limits.
+- W3-7-errors is partly fixed in `eaa04cd`: W4-2 added 318 contextual reviews, bringing the baseline total to 384/394, with ten usage sites still excluded.
+  Its 126 passing focused tests and five direct debug probes prove selected behavior classes, not every refusal or non-macro IO failure.
 
 ### Declined after the failure-mode tests
 

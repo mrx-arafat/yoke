@@ -1,76 +1,91 @@
 # Development handoff
 
-Recorded 2026-10-26 at pushed commit `dca970c`, after round 2, wave 3 and the merged license-policy correction reached `main`.
+Recorded 2026-10-26 at pushed commit `eaa04cd`, after child accounting, the command audit, pause bounds and recovery-message changes reached `main`.
 This is the starting point for the next development session, not a release acceptance claim.
 Track remaining acceptance in [issue #22](https://github.com/mrx-arafat/yoke/issues/22) and the [audit tracker #23](https://github.com/mrx-arafat/yoke/issues/23).
 
 ## State of main
 
-`main` is at `dca970c`, following wave commit `15f613f`, `20b8801`, `d7ee984` and `2e8a549`.
-The orchestrator's combined local gate passed 47/47 checks in the default temporary layout and `TMPDIR=/tmp`.
+`main` is at `eaa04cd`, following `b65fc68` (child accounting), `7f43128` (pause bounds/release checklist), `437b361` (documentation audit) and `31326f7` (benchmark boundary).
+The orchestrator recorded 50/50 combined local checks for this handoff; the earlier wave's 47/47 default-layout and `TMPDIR=/tmp` gate remains historical evidence.
+Hosted CI and Installer results below cover their named earlier commits, not this final checkpoint.
 [Installer run 40275283119](https://github.com/mrx-arafat/yoke/actions/runs/40275283119) passed all 11 jobs.
 [CI run 40275283127](https://github.com/mrx-arafat/yoke/actions/runs/40275283127) passed both Linux/macOS test jobs, formatting, clippy and docs/scripts, but its deny job failed: the current graph needs foldhash 0.2.0's Zlib license, removed from the older policy as unused.
 The explicit Zlib allowance is restored in `dca970c`, with the unused BSD-2-Clause allowance removed.
 [CI run 40275918992](https://github.com/mrx-arafat/yoke/actions/runs/40275918992) passed all six jobs, including deny and both Linux/macOS test jobs; W3-CI is fixed with hosted evidence.
 The earlier macOS stale-policy test failure is repaired in `20b8801`; older FIFO/statusline CI failures are historical, not the current pending-work list.
 Source supports schema 17, and the Linux field-test installation was upgraded to `091ffde`, schema 17, before the later wave was merged.
+The last recorded macOS hook deployment is `dca970c`, with real schema-17 migration after a copy rehearsal; the newer source commits are not claimed installed.
 No published binary release or final-wave live acceptance is established by this checkpoint.
 Upgrade all hook executables together and preserve a consistent database/sidecar backup; older writers refuse schema 17 and there is no supported downgrade command.
+The child-accounting change adds no migration, but older writers can erase child samples when replacing parent usage, so compatible schema numbers alone do not make mixed binaries safe.
 
 The current delivery commits are:
 
-- `20b8801`: compare canonical paths in the macOS health fixture.
-- `d7ee984`: redact gate failure reasons before truncation, restore log-row assertions, harden quota locking and improve recovery messages.
-- `2e8a549`: distinguish CLI and hook HOME behavior and correct command examples.
-- `15f613f`: integrate console origin checks, SHA256SUMS updater/installer verification, bounded Codex timestamp recovery, release/toolchain policy, schema-17 notes and Codex command previews.
-- `dca970c`: allow the current graph's Zlib dependency and remove its unused BSD-2-Clause allowance.
+- `31326f7`: time fresh Yoke children through a persistent guard in the maintained benchmark.
+- `437b361` and `b65fc68`: complete the command-contract audit and correct seven documentation mismatch classes.
+- `b65fc68`: count explicitly linked Codex child/nested streams once under the parent, preserving independent replacement scopes and policy anchors.
+- `7f43128`: reject oversized pause amounts before multiplication and add the release-owner checklist.
+- `eaa04cd`: add safe recovery guidance to policy, plan, memory, hook, installer, console, review, state and updater refusals.
 
-Round 2 is `5e86630..091ffde`; earlier delivery and field results remain in [field testing](field-testing.md).
+Round 2 is `5e86630..091ffde`; wave 3 culminated in `15f613f` and the license-policy fix `dca970c`.
+Earlier delivery and field results remain in [field testing](field-testing.md).
 
 ## What is done
 
 - **Trust and failures.** Session/project anchors, trusted-policy gate cwd, self-protection, human-only mutations and fail-safe hook behavior remain in place.
   The new gate-diagnostic fix sanitizes before truncating, preserving supported credential labels until redaction; the original persisted-secret reproduction and controls pass.
 - **Usage and state.** Source supports schema 17, exact usage summaries, quota history/headroom and historical policy versions on new decisions.
-  Bounded replay recovers matching legacy Codex dates without deleting samples; child-rollout accounting remains a separate open defect.
+  Bounded replay recovers matching legacy Codex dates without deleting samples; explicitly attributed child/nested streams now count under the parent without copied-history duplication or anchor changes.
+  Unsupported legacy child formats remain refused instead of guessed.
 - **CLI and observer.** Aligned tables and JSON consistency, concrete installer/reviewer recovery guidance, Codex command previews and watch cleanup are implemented.
   The console applies exact Host/Origin and request limits before launch redemption and authenticated reads, retaining action CSRF checks.
 - **Installer and release tooling.** Downloads require exactly one matching SHA256SUMS entry before execution/replacement; invalid files preserve the old executable.
   Rust is pinned consistently for repository CI and release builds, dependency policy is explicit, and provenance remains a manual check.
-- **Earlier findings.** The original journey fixes remain in the [field record](field-testing.md); this update adds four repaired round-2 audit findings and retains incomplete acceptance and audit coverage separately.
+  The release runbook now groups exact owner actions for the four failed preflight gates; those gates and human acceptance remain unsatisfied by documentation alone.
+- **Audits and panic correction.** Every documentation-command occurrence has execution evidence or an explicit disposition, and 384/394 baseline error contexts have been reviewed.
+  Pause durations are bounded before unit multiplication; the historical panic inventory omitted unchecked binary arithmetic and is not a whole-program safety proof.
 
 ## What is verified
 
 This is implementation evidence, kept apart from release acceptance.
 
-- **Combined gate.** The orchestrator recorded 47/47 local checks before pushing; Installer passed all 11 jobs at `15f613f`, and all six hosted CI jobs passed at `dca970c` after correcting the license policy.
+- **Combined gate.** The orchestrator recorded 50/50 local checks for the new checkpoint; Installer passed all 11 jobs at `15f613f`, and all six hosted CI jobs passed at `dca970c` after correcting the license policy.
+  New hosted results are required for `eaa04cd`; the earlier green runs do not accept later changes.
 - **Focused behavior.** Independent console 28/28, updater 11/11, three loopback installer tests and the raw-output PTY regression pass.
   Later preview and installer pre-execution changes have their own RED/GREEN evidence; the gate-reason and log-row fixes pass both-layout focused targets and the original runtime reproduction.
+  W4-2 recorded 126 passing focused tests and five expected-error CLI probes; W4-1 recorded six RED-to-GREEN documentation contracts plus an anchored-cwd wording check.
+  W4-5's parser-only overflow regression passed after a confirmed multiplication-panic RED, with valid upper bounds retained and no human pause executed.
 - **Usage recovery.** A real debug Stop hook on schema 17 restored 1,702 dates, preserved all 3,331 raw samples and matched independently derived day/CLI totals.
   This does not claim that closed or unrecoverable real history has been repaired.
+  W3-9 recorded 19 usage unit tests, one integration scenario and debug CLI totals of 88 input, 13 output and 22 cached tokens, with unrelated-transcript refusal and the parent anchor preserved.
 - **Linux field journeys.** At `091ffde`, live migration 14-to-17 passed, both real agents retained the original anchor after same-session resume from another cwd, watch filter/refresh/quit passed in a PTY and six real-callback statusline cases fit their widths.
   Continuous-process cwd changes and quota-present callbacks remain untested.
 - **Corrected scale timing.** On a 704.5 MB fixture at optimized `20b8801`, each of 32 event/agent/mode cases has a latest p50 below 10 ms and p99 below 50 ms: ranges 5.646-8.267 ms and 7.060-19.639 ms.
   The first corrected matrix passed 29/32 and the three misses passed focused repeats; it was not one uninterrupted green run.
   The earlier all-case failure timed a new guard shell per sample and is superseded; Linux, transcripts, gates, backlogs and optimized timing of the later integrated wave remain outside this evidence.
+  The maintained harness uses the persistent direct-launch boundary in `31326f7`; that correction is separate from new optimized measurements.
 
-See the [current wave record](field-testing.md#round-2-and-wave-3-verification-2026-10-26) and [remaining live gaps](field-testing.md#not-verified-live).
+See the [current wave record](field-testing.md#wave-4-verification-2026-10-26) and [remaining live gaps](field-testing.md#not-verified-live).
 No human browser/console acceptance, published four-platform release, provenance verification or sustained-trial acceptance is claimed.
 
 ## What is open
 
-- **Accounting and audits.** The 162-row ledger has 152 fixed, 5 partly fixed, 3 open and 2 declined.
-  Child-rollout accounting remains open; the separate license-policy regression is fixed with green hosted CI.
-  Timestamp recovery S-6 is fixed in source; child-rollout accounting is tracked as W3-5/W3-9.
-  Both exhaustive W3-7 audits stay open: 349 of 1,226 command occurrences executed via 76 argv, 877 unexecuted; 66 of 394 error sites reviewed in context, 328 lexical-only.
-  The 58 help paths passed, but that does not prove shell examples or human/prerequisite workflows.
+- **Audit remainder.** The 163-row ledger has 155 fixed, 6 partly fixed, none open and 2 declined; this describes findings, not release readiness.
+  Child accounting is fixed in `b65fc68`, and the command-contract audit is fixed in `437b361` and `b65fc68`.
+  W4-1 reconciled all 1,226 legacy rows: its 1,356-occurrence audit snapshot has 513 execution references and 843 explicit source/prerequisite/safety/non-command dispositions, zero unclassified.
+  Prior exact argv coverage was 410/1,226, not 349/1,226; the former 877 remainder mixed file-line and occurrence denominators.
+  W3-7-errors is partly fixed in `eaa04cd`: 384/394 baseline contexts reviewed, with ten usage contexts still excluded; accounting implementation alone does not review those messages.
+  Source-only command dispositions do not establish human, external-system or release acceptance, and non-macro IO error chains retain further scope.
 - **Partial policy/security work.** SEC-8, SEC-10, SEC-23, SEC-28 and C13 retain their exact limits in [open items](field-testing.md#open-items).
   SEC-16 documentation is reconciled; SEC-23 candidate/stage checks are implemented but do not close replacement races or mutable-directory trust.
 - **Decisions.** The owner questions are under [Decisions and checks that need a person](field-testing.md#decisions-and-checks-that-need-a-person): the worktree memory identity, the linked-worktree trust rule, injection of notes by default, managed-settings install and the statusline priority.
 - **Release gates.** The [gate status table](release-acceptance.md#gate-status) was last checked at `e2745ce` on 2026-10-16, and `release.yml` has changed since, so recheck it before relying on it.
+  The [owner checklist](releasing.md#owner-checklist-before-tagging) records the later `cbf396c` preflight snapshot: 3 passed, 4 failed, zero skipped; rerun it for the final release commit.
   The release workflow has not run on all four targets, no release is published, and the compliance ticks, trademark search, observe-day and enforce-week trials, console acceptance and part of the install acceptance need a person.
 - **Installed hooks.** A machine that already runs older hooks needs the coordinated upgrade below.
-- **Audit scope.** New reports replace the earlier missing summaries, but the exhaustive audits remain incomplete and the historical panic inventory is not a proof of the current whole program; see [free-model work](field-testing.md#free-model-work).
+- **Audit scope.** W4-5 checked 49 historical explicit panic-operation sites, with 48 invariants holding and one retired; it also reviewed every earlier proposal row.
+  The separately fixed duration overflow was outside that inventory, so neither this sample nor the historical categories prove the current whole program panic-free; see [free-model work](field-testing.md#free-model-work).
 
 ## Human-only steps
 
@@ -93,13 +108,12 @@ An agent cannot complete these and must not bypass their guards; record the exac
 
 ## Next work, in order
 
-1. **Repair child usage and validate its final source.**
-   Current hosted CI is green at `dca970c`; retain that result separately from acceptance of subsequent accounting changes.
-   Complete W3-9's regression and independent parent/child stream accounting without changing policy anchors, losing sibling samples or double-counting copied history.
-   Reimport must be idempotent and unrelated transcripts must still be refused.
-   Record focused, hosted, live and optimized evidence for the final integrated binary where needed, without rerunning unrelated successful checks.
-2. **Finish the partial audits and policy decisions.**
-   Continue W3-7 from its occurrence/site coverage ledgers; inventory and help success are not exhaustive command or error acceptance.
+1. **Validate the final integrated source.**
+   Child accounting and its focused executable acceptance are committed; obtain hosted, live and optimized evidence for the intended final revision where needed.
+   Keep green hosted CI at `dca970c` separate from the newer 50/50 local gate and avoid rerunning unrelated successful checks.
+   Preserve independent parent/child replacement, idempotent reimport, unrelated-ID refusal and policy anchors during any follow-up.
+2. **Finish the remaining error contexts and policy decisions.**
+   Review the ten excluded usage contexts from W3-7-errors; the command audit is complete with explicit source-only dispositions, not universal runtime acceptance.
    SEC-8 still lacks trusted-only injection and memory authorship; SEC-10/SEC-28 retain manual provenance, signing, repository protection and maintainer automation decisions.
    Keep SEC-23 replacement-race limits and C13's zero-byte-state fallback explicit.
 3. **Coordinate further upgrades and remaining live journeys.**
@@ -162,7 +176,8 @@ Stop the console with Ctrl-C after review.
   Normal CLI commands honour `HOME` in every build; use `CONTRIBUTING.md` for isolated hook tests and a disposable account/container for shipped-hook acceptance.
 - Transcript import counts at most the newest 32 MiB of a first read or of one append; a larger session shows as partly counted in `yoke usage`, and the usage in the skipped part is not counted.
   A Codex cumulative counter restart starts a new accounting segment, and a restart that lands exactly on the previous total is indistinguishable from no progress.
-  Bounded timestamp replay repairs matching imported NULL dates rather than reconstructing all skipped usage; parent-hook/child-rollout accounting remains open.
+  Bounded timestamp replay repairs matching imported NULL dates rather than reconstructing all skipped usage.
+  Child streams require explicit attribution; inherited history and mirrored cumulative counters do not count, and legacy un-attributed formats remain refused.
 - A session silent for 30 minutes with pending facts is digested at the next session start in its project; a live session that silent is digested early, without its transcript.
 - Ambiguous legacy notification ownership cannot always be recovered; hidden history must not be silently reassigned.
 - Migration 013 can hold the write lock for seconds on a large history; migration 015 builds exact summaries once during upgrade.
@@ -176,4 +191,4 @@ Stop the console with Ctrl-C after review.
 - Native Linux acceptance remains incomplete for the failure-mode/layout cases, full ext4 disk and non-UTF-8 project names.
   Automated Linux PTY watch interaction and hosted Linux/macOS tests pass at their recorded revisions; complete six-job CI is green at `dca970c`.
 
-Next work starts with child-rollout accounting and the pushed hosted checks, then continues the two exhaustive audits and remaining human/release acceptance.
+Next work starts with acceptance of the integrated revision and the ten remaining usage error contexts, then continues partial policy work and human/release acceptance.
