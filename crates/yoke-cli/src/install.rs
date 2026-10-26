@@ -249,10 +249,10 @@ fn read_receipt(options: &InstallOptions, agent: Agent) -> Result<Option<Receipt
         return Ok(None);
     };
     let mut receipt: Receipt =
-        serde_json::from_str(&raw).context("invalid installation ownership receipt")?;
+        serde_json::from_str(&raw).context("invalid installation ownership receipt; keep the receipt and agent settings unchanged, restore a known-good receipt backup or report this error before retrying")?;
     ensure!(
         matches!(receipt.version, 1 | 2) && receipt.agent == agent,
-        "unsupported installation receipt"
+        "unsupported installation receipt; use the Yoke version that created this receipt, or restore a known-good receipt backup before retrying"
     );
     ensure!(
         receipt.hooks.path == hook_path(options, agent),
@@ -270,14 +270,14 @@ fn read_receipt(options: &InstallOptions, agent: Agent) -> Result<Option<Receipt
         );
     }
     if let Some(owned) = &receipt.statusline {
-        ensure!(agent == Agent::Claude, "invalid statusline receipt agent");
+        ensure!(agent == Agent::Claude, "invalid statusline receipt agent; keep the agent settings unchanged and restore a known-good receipt backup or report this error");
         ensure!(
             statusline::build(
                 &receipt.executable,
                 owned.before.clone(),
                 owned.after["command"].as_str().map(statusline::style_of),
             )? == *owned,
-            "invalid owned statusline in installation receipt"
+            "invalid owned statusline in installation receipt; keep the agent settings unchanged and restore a known-good receipt backup or report this error"
         );
     }
     let mut events = HashSet::new();
@@ -286,24 +286,24 @@ fn read_receipt(options: &InstallOptions, agent: Agent) -> Result<Option<Receipt
             COMMON_EVENTS.contains(&owned.event.as_str())
                 || (agent == Agent::Claude
                     && matches!(owned.event.as_str(), "Notification" | "PostToolUseFailure")),
-            "invalid owned event in installation receipt"
+            "invalid owned event in installation receipt; keep the agent settings unchanged and restore a known-good receipt backup or report this error"
         );
         ensure!(
             events.insert(&owned.event),
-            "duplicate owned event in installation receipt"
+            "duplicate owned event in installation receipt; keep the agent settings unchanged and restore a known-good receipt backup or report this error"
         );
         let group = hook_group(&receipt.executable, agent, &owned.event)?;
         let previous = unlabeled_group(&group);
         ensure!(
             owned.group == group || (owned.group == previous && owned.previous_group.is_none()),
-            "invalid owned command in installation receipt"
+            "invalid owned command in installation receipt; keep the agent settings unchanged and restore a known-good receipt backup or report this error"
         );
         ensure!(
             owned
                 .previous_group
                 .as_ref()
                 .is_none_or(|old| *old == previous && owned.group == group),
-            "invalid previous owned command in installation receipt"
+            "invalid previous owned command in installation receipt; keep the agent settings unchanged and restore a known-good receipt backup or report this error"
         );
     }
     receipt::hydrate(&mut receipt, &options.state_dir)?;
@@ -345,10 +345,10 @@ fn label_receipt(receipt: &mut Receipt) -> Result<bool> {
         }
         let groups = baseline["hooks"][&owned.event]
             .as_array_mut()
-            .context("missing owned hook in installation receipt")?;
+            .context("missing owned hook in installation receipt; keep the agent settings unchanged and restore a known-good receipt backup or report this error")?;
         ensure!(
             !groups.contains(&labeled),
-            "ambiguous owned hook in installation receipt"
+            "ambiguous owned hook in installation receipt; keep the agent settings unchanged and restore a known-good receipt backup or report this error"
         );
         let matches: Vec<_> = groups
             .iter_mut()
@@ -356,7 +356,7 @@ fn label_receipt(receipt: &mut Receipt) -> Result<bool> {
             .collect();
         ensure!(
             matches.len() == 1,
-            "ambiguous owned hook in installation receipt"
+            "ambiguous owned hook in installation receipt; keep the agent settings unchanged and restore a known-good receipt backup or report this error"
         );
         *matches.into_iter().next().unwrap() = labeled.clone();
         owned.previous_group = Some(owned.group.clone());
@@ -535,7 +535,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
                             });
                             ensure!(
                                 count == 1,
-                                "owned {} hook changed; uninstall before reinstalling",
+                                "owned {} hook changed; restore its recorded entry, then run yoke uninstall and yoke install in your own terminal",
                                 owned.event
                             );
                             let groups = groups.unwrap();
@@ -573,7 +573,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
                     if value.get("statusLine") != Some(&owned.after) {
                         ensure!(
                             value.get("statusLine") == owned.before.as_ref(),
-                            "owned statusline changed; uninstall before reinstalling"
+                            "owned statusline changed; restore its recorded entry, then run yoke uninstall and yoke install in your own terminal"
                         );
                         // The receipt is durable before settings are replaced.
                         // Recover an interrupted addition without nesting wrappers.
@@ -740,7 +740,7 @@ fn remove_hooks(receipt: &Receipt, current: Option<String>) -> Result<FileChange
                     .collect();
                 ensure!(
                     matches.len() <= 1,
-                    "ambiguous duplicated owned {} hook; leaving settings untouched",
+                    "ambiguous duplicated owned {} hook; leaving settings untouched; compare the settings with the installation receipt and restore its single recorded hook before retrying in your own terminal",
                     owned.event
                 );
                 if let Some(index) = matches.first() {
@@ -813,7 +813,7 @@ fn remove_handler(groups: &mut [Value], owned: &OwnedHook, original: &Value) -> 
                     .collect();
                 ensure!(
                     indices.len() == 1,
-                    "owned {} handler changed or duplicated; leaving settings untouched",
+                    "owned {} handler changed or duplicated; leaving settings untouched; restore its single recorded handler from the installation receipt before retrying in your own terminal",
                     owned.event
                 );
                 candidates.push((index, indices[0]));
@@ -822,7 +822,7 @@ fn remove_handler(groups: &mut [Value], owned: &OwnedHook, original: &Value) -> 
     }
     ensure!(
         candidates.len() <= 1,
-        "ambiguous owned {} handler; leaving settings untouched",
+        "ambiguous owned {} handler; leaving settings untouched; restore its single recorded handler from the installation receipt before retrying in your own terminal",
         owned.event
     );
     if let Some((group, handler)) = candidates.first() {

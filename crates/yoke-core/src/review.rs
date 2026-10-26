@@ -32,7 +32,7 @@ impl Reviewer {
             ("claude", _) | ("auto", "codex") => Ok(Self::Claude),
             ("codex", _) | ("auto", "claude") => Ok(Self::Codex),
             ("auto", _) => bail!("automatic review needs a known claude/codex building agent"),
-            _ => bail!("unknown reviewer: {configured}"),
+            _ => bail!("unknown reviewer: {configured}; set review.reviewer to auto, claude or codex in yoke.toml, then run yoke trust in your own terminal"),
         }
     }
 
@@ -202,21 +202,21 @@ fn review_diff(
     command.current_dir(project).env("YOKE_OFF", "1");
     prompt::notice(command, "diff", prompt.len());
     let output = execute_bounded(command, prompt.as_bytes(), timeout, RESPONSE_CAP)
-        .context("execute reviewer")?;
+        .context("execute reviewer; check that the selected agent is installed and signed in, then rerun yoke review with the same arguments")?;
     ensure!(!String::from_utf8_lossy(&output.stdout).contains(&boundary), "reviewer echoed the private data boundary; rerun review and inspect the diff for instructions");
     Ok(report_output(output))
 }
 
 fn report_output(output: ProcessOutput) -> ReviewReport {
     let parsed = if output.timed_out {
-        Err(anyhow::anyhow!("reviewer timed out"))
+        Err(anyhow::anyhow!("reviewer timed out; check the selected agent's service and sign-in, then rerun yoke review with the same arguments"))
     } else if !output.success {
         Err(anyhow::anyhow!(
-            "reviewer failed (exit {:?})",
+            "reviewer failed (exit {:?}); inspect the recorded reviewer output, correct its reported agent or model error, then rerun yoke review with the same arguments",
             output.exit_code
         ))
     } else if output.stdout_truncated {
-        Err(anyhow::anyhow!("reviewer response exceeded 256 KiB"))
+        Err(anyhow::anyhow!("reviewer response exceeded 256 KiB; split the changes into smaller reviews, then rerun yoke review"))
     } else {
         parse_findings(&output.stdout)
     };
@@ -249,27 +249,30 @@ fn report_output(output: ProcessOutput) -> ReviewReport {
 pub fn parse_findings(bytes: &[u8]) -> Result<Vec<Finding>> {
     ensure!(
         bytes.len() <= RESPONSE_CAP,
-        "reviewer response exceeded 256 KiB"
+        "reviewer response exceeded 256 KiB; split the changes into smaller reviews, then rerun yoke review"
     );
     let findings: Vec<Finding> =
-        serde_json::from_slice(bytes).context("malformed reviewer findings JSON")?;
-    ensure!(findings.len() <= 1000, "too many review findings");
+        serde_json::from_slice(bytes).context("malformed reviewer findings JSON; rerun yoke review with the same arguments; if it persists, check the selected agent's output for the required findings schema")?;
+    ensure!(
+        findings.len() <= 1000,
+        "too many review findings; split the changes into smaller reviews, then rerun yoke review"
+    );
     for finding in &findings {
         ensure!(
             !finding.file.trim().is_empty() && !finding.file.contains('\0'),
-            "finding needs a file"
+            "finding needs a file; rerun yoke review to obtain findings with nonempty repository-relative file paths"
         );
         ensure!(
             !Path::new(&finding.file).is_absolute()
                 && !Path::new(&finding.file)
                     .components()
                     .any(|c| matches!(c, Component::ParentDir)),
-            "finding file must stay inside the project"
+            "finding file must stay inside the project; rerun yoke review to obtain repository-relative paths without parent traversal"
         );
-        ensure!(finding.line > 0, "finding line must be positive");
+        ensure!(finding.line > 0, "finding line must be positive; rerun yoke review to obtain findings with line numbers starting at 1");
         ensure!(
             !finding.summary.trim().is_empty(),
-            "finding needs a summary"
+            "finding needs a summary; rerun yoke review to obtain findings with nonempty explanations"
         );
     }
     Ok(findings)

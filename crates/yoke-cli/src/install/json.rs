@@ -23,10 +23,11 @@ fn skip_space(raw: &str, position: &mut usize) {
 
 fn value_end(raw: &str, start: usize) -> Result<usize> {
     let mut stream = serde_json::Deserializer::from_str(&raw[start..]).into_iter::<Value>();
-    stream
-        .next()
-        .transpose()?
-        .ok_or_else(|| anyhow::anyhow!("missing JSON value"))?;
+    stream.next().transpose()?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "missing JSON value; correct the agent settings JSON in your own terminal, then retry"
+        )
+    })?;
     Ok(start + stream.byte_offset())
 }
 
@@ -44,7 +45,7 @@ fn entries(raw: &str) -> Result<Vec<Entry>> {
         let key = if object {
             let end = value_end(raw, position)?;
             let key: String = serde_json::from_str(&raw[position..end])?;
-            ensure!(keys.insert(key.clone()), "duplicate JSON key: {key}");
+            ensure!(keys.insert(key.clone()), "duplicate JSON key: {key}; merge the duplicate settings into one key in your own terminal, then retry");
             position = end;
             skip_space(raw, &mut position);
             position += 1; // colon, already checked by serde_json
@@ -71,7 +72,7 @@ fn entries(raw: &str) -> Result<Vec<Entry>> {
 
 pub(super) fn parse(raw: &str) -> Result<Value> {
     let parsed: Value = serde_json::from_str(raw)?;
-    ensure!(parsed.is_object(), "hook settings must be a JSON object");
+    ensure!(parsed.is_object(), "hook settings must be a JSON object; replace the top-level value with an object in the agent settings file, then retry");
     entries(raw.trim())?;
     Ok(parsed)
 }
@@ -163,7 +164,7 @@ pub(super) fn render(raw: &str, after: &Value) -> Result<String> {
         &raw[prefix + trimmed.len()..]
     );
     if serde_json::from_str::<Value>(&result)? != *after {
-        bail!("JSON edit did not produce the intended settings");
+        bail!("JSON edit did not produce the intended settings; keep the original settings and report this error with a redacted copy of their JSON structure");
     }
     Ok(result)
 }

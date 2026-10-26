@@ -6,20 +6,22 @@ use toml_edit::{value, DocumentMut, Item, Table};
 use super::{files, FileChange};
 
 fn parse(raw: &str) -> Result<DocumentMut> {
-    let doc: DocumentMut = raw.parse().context("parsing Codex config.toml")?;
+    let doc: DocumentMut = raw.parse().context(
+        "parsing Codex config.toml; correct its TOML syntax in your own terminal, then retry",
+    )?;
     if let Some(features) = doc.get("features") {
         let table = features
             .as_table_like()
-            .context("Codex features must be a table")?;
+            .context("Codex features must be a table; replace the features value with a [features] table in Codex config.toml, then retry")?;
         for key in ["hooks", "codex_hooks"] {
             if let Some(flag) = table.get(key) {
-                ensure!(flag.as_bool().is_some(), "features.{key} must be boolean");
+                ensure!(flag.as_bool().is_some(), "features.{key} must be boolean; set it to true or false in Codex config.toml, then retry");
             }
         }
         if let (Some(current), Some(alias)) = (table.get("hooks"), table.get("codex_hooks")) {
             ensure!(
                 current.as_bool() == alias.as_bool(),
-                "conflicting hooks and codex_hooks feature flags; resolve before installing"
+                "conflicting hooks and codex_hooks feature flags; set features.hooks and features.codex_hooks to the same boolean in Codex config.toml before installing"
             );
         }
     }
@@ -30,13 +32,13 @@ pub(super) fn check_enabled(raw: &str) -> Result<()> {
     let doc = parse(raw)?;
     ensure!(
         doc.get("allow_managed_hooks_only").and_then(Item::as_bool) != Some(true),
-        "Codex allows managed hooks only"
+        "Codex allows managed hooks only; ask your administrator to allow local hooks before installing Yoke for Codex"
     );
     if let Some(table) = doc.get("features").and_then(Item::as_table_like) {
         for key in ["hooks", "codex_hooks"] {
             ensure!(
                 table.get(key).and_then(Item::as_bool) != Some(false),
-                "Codex hooks disabled after install; uninstall before reinstalling"
+                "Codex hooks disabled after install; in your own terminal run yoke uninstall --agent codex, then yoke install --agent codex"
             );
         }
     }
@@ -48,7 +50,7 @@ pub(super) fn prepare(path: &Path) -> Result<Option<FileChange>> {
     let mut doc = parse(before.as_deref().unwrap_or(""))?;
     ensure!(
         doc.get("allow_managed_hooks_only").and_then(Item::as_bool) != Some(true),
-        "Codex allows managed hooks only"
+        "Codex allows managed hooks only; ask your administrator to allow local hooks before installing Yoke for Codex"
     );
     if !doc.contains_key("features") {
         doc["features"] = Item::Table(Table::new());

@@ -142,7 +142,7 @@ pub fn require_human(action: &str) -> Result<()> {
     }
     ensure!(
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
-        "{action} requires an interactive human terminal; no noninteractive approval is supported"
+        "{action} requires an interactive human terminal; run yoke {action} in your own terminal without piping input or output"
     );
     Ok(())
 }

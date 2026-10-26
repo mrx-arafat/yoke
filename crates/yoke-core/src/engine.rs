@@ -305,12 +305,8 @@ fn run_gate(
         None
     } else {
         Some(gate.message.clone().unwrap_or_else(|| {
-            let text = String::from_utf8_lossy(&output.stderr);
-            let mut offset = text.len().saturating_sub(OUTPUT_CAP);
-            while !text.is_char_boundary(offset) {
-                offset += 1;
-            }
-            let text = text[offset..].trim();
+            let (stderr, _) = captured_stream(&output.stderr, output.stderr_truncated);
+            let text = stderr.trim();
             if text.is_empty() {
                 format!(
                     "gate '{}' failed (exit {})",
@@ -325,7 +321,7 @@ fn run_gate(
     if let Some(reason) = &mut reason {
         if !output.timed_out && matches!(output.exit_code, Some(126 | 127)) {
             // A friendly gate message must not hide a broken command or its shell error.
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let (stderr, _) = captured_stream(&output.stderr, output.stderr_truncated);
             if gate.message.is_some() && !stderr.trim().is_empty() {
                 reason.push('\n');
                 reason.push_str(stderr.trim());
@@ -352,6 +348,8 @@ fn run_gate(
             let diagnostic = format!("\nWithheld environment names: {}{}; pass only required names with [gates].pass_env or this [[gate]].pass_env, then run yoke trust in your own terminal.", withheld.join(", "), if count > 12 { " (first 12)" } else { "" });
             reason.push_str(&diagnostic);
         }
+        // Redact before removing a prefix that may contain a credential's label.
+        *reason = crate::redact::redact(reason);
         let mut start = reason.len().saturating_sub(OUTPUT_CAP);
         while !reason.is_char_boundary(start) {
             start += 1;
@@ -999,7 +997,7 @@ mod tests {
             [[gate]]
             name = "noisy"
             on = "pre_tool_use"
-            run = "i=0; while [ $i -lt 10000 ]; do printf 1234567890; printf abcdefghij >&2; i=$((i+1)); done; printf TAIL >&2; exit 2"
+            run = "i=0; while [ $i -lt 10000 ]; do printf 1234567890; printf abcdefghij >&2; i=$((i+1)); done; printf '\\nTAIL' >&2; exit 2"
         "#).unwrap();
         let mut event = bash_event("ls");
         event.session_id = "session".into();
@@ -1108,6 +1106,11 @@ run="i=0; while [ $i -lt 3000 ]; do printf 'éé\\n'; i=$((i+1)); done; printf '
         assert_eq!(stderr, "useful error\n");
         assert_eq!(output["stdout_truncated"], true);
         assert_eq!(output["stderr_truncated"], true);
+        assert!(
+            out.reasons[0].starts_with("useful error"),
+            "{:?}",
+            out.reasons
+        );
 
         // Redaction may expand a stream that fit the raw buffer; cap it afterwards.
         let raw = format!("{} token=x", "🙂".repeat(1022));

@@ -345,7 +345,12 @@ fn a_closed_output_pipe_ends_the_command_quietly() {
 #[test]
 fn log_rows_name_agent_tool_and_command_in_local_time_and_json_flags_cut_payloads() {
     let home = seeded_home();
-    let all = text(&yoke(home.path(), home.path(), &["log", "--all"]));
+    let all = text(&yoke_width(
+        home.path(),
+        home.path(),
+        &["log", "--all"],
+        240,
+    ));
     assert!(all.starts_with("project: all\ndecisions: 3\n"), "{all}");
     assert!(
         all.lines().any(|line| line.split_whitespace().eq([
@@ -353,19 +358,18 @@ fn log_rows_name_agent_tool_and_command_in_local_time_and_json_flags_cut_payload
         ])),
         "{all}"
     );
-    for (time, agent, outcome) in [
-        ("16:02:00", "claude", "deny"),
-        ("16:01:00", "codex", "allow"),
-        ("16:00:00", "codex", "allow"),
-    ] {
-        assert!(
-            all.lines()
-                .any(|line| line.contains(time) && line.contains(agent) && line.contains(outcome)),
-            "{all}"
-        );
-    }
-    assert!(
-        all.contains("force push blocked") && all.contains("git status"),
+    let rows: Vec<_> = all
+        .lines()
+        .filter(|line| line.trim_start().starts_with("2026-10-16 "))
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "2026-10-16 16:02:00 claude s1 /work/beta pre_tool_use Bash deny no-force-push force push blocked - git push --force",
+            "2026-10-16 16:01:00 codex s1 /work/alpha post_tool_use Bash allow - git status second line",
+            "2026-10-16 16:00:00 codex s1 /work/alpha stop - allow - -",
+        ],
         "{all}"
     );
     assert!(!all.contains("\",\""), "{all}");

@@ -47,14 +47,14 @@ pub fn validate_plan(
     command.current_dir(Path::new(project)).env("YOKE_OFF", "1");
     super::prompt::notice(command, "plan", prompt.len());
     let output = execute_bounded(command, prompt.as_bytes(), timeout, RESPONSE_CAP)
-        .context("execute plan reviewer")?;
+        .context("execute plan reviewer; check that the selected agent is installed and signed in, then rerun yoke plan validate with the same arguments")?;
     ensure!(!String::from_utf8_lossy(&output.stdout).contains(&boundary), "plan reviewer echoed the private data boundary; rerun validation and inspect the plan for instructions");
     if output.timed_out {
-        bail!("plan reviewer timed out");
+        bail!("plan reviewer timed out; check the selected agent's service and sign-in, then rerun yoke plan validate with the same arguments");
     }
     ensure!(
         output.success,
-        "plan reviewer failed (exit {:?}): {}",
+        "plan reviewer failed (exit {:?}): {}; correct the reported agent or model error, then rerun yoke plan validate with the same arguments",
         output.exit_code,
         String::from_utf8_lossy(&output.stderr)
             .chars()
@@ -63,7 +63,7 @@ pub fn validate_plan(
     );
     ensure!(
         !output.stdout_truncated,
-        "plan reviewer response exceeded 256 KiB"
+        "plan reviewer response exceeded 256 KiB; shorten or split the plan, then rerun yoke plan validate"
     );
     Ok(PlanReview {
         findings: parse(&output.stdout, anchors)?,
@@ -75,18 +75,39 @@ pub fn validate_plan(
 /// Accept only the plan findings contract with anchors that exist in the reviewed plan.
 fn parse(bytes: &[u8], anchors: &BTreeSet<String>) -> Result<Vec<PlanFinding>> {
     let findings: Vec<PlanFinding> =
-        serde_json::from_slice(bytes).context("malformed plan reviewer findings JSON")?;
-    ensure!(findings.len() <= 1000, "too many plan findings");
+        serde_json::from_slice(bytes).context("malformed plan reviewer findings JSON; rerun yoke plan validate with the same arguments; if it persists, check the selected agent's output for the required findings schema")?;
+    ensure!(
+        findings.len() <= 1000,
+        "too many plan findings; shorten or split the plan, then rerun yoke plan validate"
+    );
     for finding in &findings {
         ensure!(
             anchors.contains(&finding.anchor),
-            "plan finding uses unknown anchor {:?}",
+            "plan finding uses unknown anchor {:?}; rerun yoke plan validate against the current plan to obtain findings using its declared anchors",
             finding.anchor
         );
         ensure!(
             !finding.summary.trim().is_empty(),
-            "plan finding needs a summary"
+            "plan finding needs a summary; rerun yoke plan validate to obtain findings with nonempty explanations"
         );
     }
     Ok(findings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_plan_findings_explain_how_to_rerun_validation() {
+        let anchors = BTreeSet::from(["task-1".to_owned()]);
+        for response in [
+            "not JSON",
+            r#"[{"severity":"blocking","anchor":"missing","summary":"Bug"}]"#,
+            r#"[{"severity":"blocking","anchor":"task-1","summary":""}]"#,
+        ] {
+            let error = format!("{:#}", parse(response.as_bytes(), &anchors).unwrap_err());
+            assert!(error.contains("rerun yoke plan validate"), "{error}");
+        }
+    }
 }

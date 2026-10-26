@@ -111,6 +111,40 @@ fn payload() -> Value {
 }
 
 #[test]
+fn failing_gate_diagnostics_keep_secrets_redacted_in_persisted_reasons() {
+    const CANARY: &str = "W3AUDITCANARY";
+    for (exit, size) in [(1, 3950), (127, 32), (127, 3950)] {
+        let f = Fixture::new();
+        let secret = CANARY.repeat(size / CANARY.len() + 1);
+        fs::write(
+            f.project.join("diagnostic"),
+            format!("password={}\n", &secret[..size]),
+        )
+        .unwrap();
+        f.snapshot(&format!("mode='enforce'\n[update]\ncheck=false\n[[gate]]\nname='diagnostic'\non='pre_tool_use'\nrun='cat diagnostic >&2; exit {exit}'\nmessage='Run the checks first.'\n"));
+        for agent in ["claude", "codex"] {
+            let output = f.hook(agent, "PreToolUse", payload());
+            success(&output);
+            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+            let rows = f.store().decisions(&DecisionFilter::default()).unwrap();
+            let row = &rows[0];
+            assert_eq!(row.outcome, "deny");
+            assert_eq!(row.gates[0]["exit_code"], exit);
+            let reason = row.reason.as_deref().unwrap();
+            assert!(
+                !reason.contains(CANARY),
+                "{agent}, exit {exit}, size {size}"
+            );
+            if exit == 127 {
+                assert!(reason.contains("[REDACTED]"), "{reason}");
+                assert!(reason.contains("yoke gates --verbose"), "{reason}");
+            }
+        }
+    }
+}
+
+#[test]
 fn hook_records_the_loaded_policy_across_retrust_and_untrusted_disk_changes() {
     let f = Fixture::new();
     let first = "mode='enforce'\n[log]\npayload_cap=32\n[[gate]]\nname='first-policy'\non='pre_tool_use'\naction='deny'\nmatch_contains='echo test'\nmessage='First policy denied this command'\n";
@@ -1836,7 +1870,22 @@ fn submodules_and_nested_repositories_complete_and_keep_or_reopen_a_done_plan() 
     assert_eq!(
         stop_anchor_plan(&f),
         None,
-        "committing the checked submodule keeps the plan done"
+        "committing the checked submodule keeps the plan done; inventory={:?}; untracked={:?}",
+        git_in(
+            &f.project,
+            &[
+                "--no-optional-locks",
+                "diff",
+                "--raw",
+                "--no-abbrev",
+                yoke_core::plan::get(&f.store(), &f.project, "anchor")
+                    .unwrap()
+                    .base_ref
+                    .as_deref()
+                    .unwrap()
+            ]
+        ),
+        git_in(&f.project, &["ls-files", "--others", "--exclude-standard"]),
     );
 }
 

@@ -14,7 +14,7 @@ const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) fn check_size(content: &str) -> Result<()> {
     ensure!(
         content.len() as u64 <= MAX_FILE_BYTES,
-        "settings or ownership record exceeds 8 MiB"
+        "settings or ownership record exceeds 8 MiB; back up the file, reduce it below 8 MiB without removing other tools' settings, then retry"
     );
     Ok(())
 }
@@ -27,12 +27,12 @@ pub(super) fn read(path: &Path) -> Result<Option<String>> {
     };
     ensure!(
         metadata.is_file() && !metadata.file_type().is_symlink(),
-        "refusing non-regular file: {}",
+        "refusing non-regular file: {}; in your own terminal replace the link or special file with a regular settings file, then retry",
         path.display()
     );
     ensure!(
         metadata.len() <= MAX_FILE_BYTES,
-        "settings or receipt exceeds 8 MiB: {}",
+        "settings or receipt exceeds 8 MiB: {}; back up the file and reduce it below 8 MiB, then retry",
         path.display()
     );
     let mut raw = String::new();
@@ -49,7 +49,7 @@ pub(super) fn read(path: &Path) -> Result<Option<String>> {
     file.take(MAX_FILE_BYTES + 1).read_to_string(&mut raw)?;
     ensure!(
         raw.len() as u64 <= MAX_FILE_BYTES,
-        "settings grew beyond 8 MiB"
+        "settings grew beyond 8 MiB; stop the other writer, back up and reduce the file below 8 MiB, then retry"
     );
     Ok(Some(raw))
 }

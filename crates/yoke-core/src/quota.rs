@@ -485,6 +485,16 @@ pub fn read_file(path: &Path, agent: &str) -> Result<Option<Quota>> {
     quota.checked(agent).map(Some)
 }
 
+struct QuotaLock(std::fs::File);
+
+impl Drop for QuotaLock {
+    fn drop(&mut self) {
+        // A fork can inherit this open file description until exec closes it.
+        // Unlock explicitly: closing only the parent's descriptor can leave it held.
+        let _ = self.0.unlock();
+    }
+}
+
 /// Merge a reading into the quota file with one atomic rename. It never creates the state
 /// directory, and skips the write when nothing changed recently. Returns whether it wrote.
 pub fn record_file(path: &Path, incoming: &Quota, now: i64) -> Result<bool> {
@@ -515,6 +525,7 @@ pub fn record_file(path: &Path, incoming: &Quota, now: i64) -> Result<bool> {
         }
         return Err(error).context("lock quota file");
     }
+    let _lock = QuotaLock(lock);
     // A damaged file is replaced rather than blocking every later reading.
     let current = read_file(path, &incoming.agent).unwrap_or(None);
     let mut merged = current.clone().unwrap_or_else(|| incoming.clone());
@@ -724,6 +735,30 @@ mod tests {
         );
         assert!(!record_file(&path, &reading, NOW + 600).unwrap());
         assert_eq!(read_file(&path, "claude").unwrap().unwrap(), reading);
+    }
+
+    #[test]
+    fn quota_write_releases_its_lock_even_if_a_child_inherits_the_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("quota.json");
+        let reading = claude((10.0, NOW + 7200), (20.0, NOW + 86400), NOW);
+        assert!(record_file(&path, &reading, NOW).unwrap());
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(directory.path().join(".quota.lock"))
+            .unwrap();
+        // SAFETY: the descriptor is live and owned by this test.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+        // dup and fork share the same open file description and flock ownership.
+        let inherited = lock.try_clone().unwrap();
+        drop(QuotaLock(lock));
+        assert!(
+            record_file(&path, &reading, NOW + 61).unwrap(),
+            "a finished writer must release its lock before inherited descriptors close"
+        );
+        assert_eq!(read_file(&path, "claude").unwrap().unwrap(), reading);
+        drop(inherited);
     }
 
     #[test]

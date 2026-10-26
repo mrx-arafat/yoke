@@ -4,6 +4,28 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+fn invalid_codex_hook_features_name_the_setting_to_repair() {
+    for (raw, recovery) in [
+        ("features = 1", "[features] table"),
+        (
+            "[features]\nhooks = 'yes'",
+            "true or false in Codex config.toml",
+        ),
+        (
+            "[features]\nhooks = true\ncodex_hooks = false",
+            "set features.hooks and features.codex_hooks to the same boolean",
+        ),
+        (
+            "allow_managed_hooks_only = true",
+            "ask your administrator to allow local hooks",
+        ),
+    ] {
+        let error = format!("{:#}", features::check_enabled(raw).unwrap_err());
+        assert!(error.contains(recovery), "{error}");
+    }
+}
+
+#[test]
 fn hook_diagnostics_reports_codex_managed_only_after_install() {
     let (dir, options) = fixture();
     install(&options).unwrap();

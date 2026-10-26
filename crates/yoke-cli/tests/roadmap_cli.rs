@@ -133,7 +133,12 @@ fn memory_transfer_preserves_identity_and_fresh_home_dry_run_writes_nothing() {
     let repeated = json(run(&fresh, &destination, &args, b""));
     assert_eq!(repeated["additions"], 0);
     assert_eq!(repeated["duplicates"], 1);
-    let conflicting_mapping = format!("{}={}", source.display(), source.display());
+    let canonical_source = source.canonicalize().unwrap();
+    let conflicting_mapping = format!(
+        "{}={}",
+        canonical_source.display(),
+        canonical_source.display()
+    );
     let conflict = run(
         &fresh,
         &destination,
