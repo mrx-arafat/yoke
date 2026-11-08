@@ -685,9 +685,21 @@ fn knowledge_lock(directory: &Path) -> Result<fs::File> {
     if !file.metadata()?.is_file() {
         bail!("knowledge lock must be a regular file; stop other knowledge writers, back up .yoke/knowledge.lock and restore a regular lock file before retrying yoke share <id>");
     }
-    file.try_lock()
-        .context("project knowledge is locked; retry after the other writer finishes")?;
-    Ok(file)
+    // A child process spawned by another thread shares this descriptor between fork and exec,
+    // so a lock this process just released can still look held for a moment: wait briefly.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => {
+                return Err(error)
+                    .context("project knowledge is locked; retry after the other writer finishes")
+            }
+        }
+    }
 }
 
 /// The `.yoke` directory and knowledge file of a project, refusing symlinks at either.

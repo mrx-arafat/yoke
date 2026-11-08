@@ -829,3 +829,20 @@ fn knowledge_lock_serializes_separate_database_writers_and_recovers_on_drop() ->
     assert!(fs::read_to_string(directory.path().join(".yoke/knowledge.md"))?.contains("second"));
     Ok(())
 }
+
+#[test]
+fn knowledge_lock_waits_for_a_lock_released_moments_later() -> Result<()> {
+    // A child spawned by another thread can keep a just-released lock alive until it execs.
+    let directory = tempfile::tempdir()?;
+    let state = directory.path().join(".yoke");
+    fs::create_dir_all(&state)?;
+    let held = knowledge_lock(&state)?;
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(held);
+    });
+    let acquired = knowledge_lock(&state);
+    releaser.join().unwrap();
+    assert!(acquired.is_ok(), "a briefly held lock was refused at once");
+    Ok(())
+}
