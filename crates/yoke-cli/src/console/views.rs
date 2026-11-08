@@ -83,6 +83,10 @@ pub(super) fn plans(
     );
     if let Some(slug) = params.get("slug") {
         out.push_str(&super::plan_detail::page(store, c, slug)?);
+    } else if let Some(worktree) = params.get("worktree") {
+        out.push_str(&super::dashboard::plan_worktrees::detail(
+            store, c, worktree,
+        )?);
     } else {
         let plans = plan::list(store, &c.project)?;
         if plans.is_empty() {
@@ -92,6 +96,8 @@ pub(super) fn plans(
                 "yoke plan new --help",
             ));
         }
+        out.push_str(&super::dashboard::plan_stats::panel(store, c)?);
+        out.push_str(&super::dashboard::plan_worktrees::panel(store, c)?);
         for p in plans {
             out.push_str(&format!(r#"<article class="panel"><div class="list-caption"><h2><a data-nav data-row href="{}">{}</a></h2><span class="badge {}">{}</span></div><p class="muted">Updated <time data-time="{}">{}</time> &middot; revision {}</p></article>"#,render::href("plans",&format!("slug={}",encode(&p.slug))),escape(&p.slug),escape(&p.state),escape(&p.state),p.updated_at,p.updated_at,p.revision));
         }

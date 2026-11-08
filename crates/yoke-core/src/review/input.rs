@@ -77,7 +77,7 @@ fn collect_changes(project: &Path, base_ref: Option<&str>) -> Result<String> {
     )?))
 }
 
-fn secret_path(path: &Path) -> bool {
+pub(crate) fn secret_path(path: &Path) -> bool {
     path.components().any(|part| {
         let name = part.as_os_str().to_string_lossy().to_ascii_lowercase();
         name.starts_with(".env")

@@ -8,7 +8,7 @@ use anyhow::{bail, ensure, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use serde::Serialize;
 
-use super::{files, get, now, storage, Actor, PlanRecord};
+use super::{files, get, line_anchor, now, storage, Actor, PlanRecord};
 use crate::redact::redact_payload;
 use crate::review::PlanSeverity;
 use crate::store::Store;
@@ -99,7 +99,7 @@ fn slug(heading: &str) -> String {
 
 /// Every stable anchor in a plan: `plan`, header ids, and Markdown heading slugs.
 pub fn anchors(content: &str) -> Result<BTreeSet<String>> {
-    let (raw, header) = files::parse(content)?;
+    let (_, header) = files::parse(content)?;
     let mut anchors = BTreeSet::from(["plan".to_owned()]);
     anchors.extend(
         header
@@ -114,10 +114,18 @@ pub fn anchors(content: &str) -> Result<BTreeSet<String>> {
             .iter()
             .map(|item| format!("check:{}", item.name)),
     );
+    anchors.extend(heading_anchors(content)?);
+    Ok(anchors)
+}
+
+/// The `heading:<slug>` anchor of each Markdown heading in document order, repeats included.
+pub fn heading_anchors(content: &str) -> Result<Vec<String>> {
+    let (raw, _) = files::parse(content)?;
     let opening = if content.starts_with("+++\r\n") { 5 } else { 4 };
     let body = content[opening + raw.len()..]
         .split_once('\n')
         .map_or("", |(_, body)| body);
+    let mut headings = Vec::new();
     let mut fenced = false;
     for line in body.lines() {
         let trimmed = line.trim_start();
@@ -138,10 +146,10 @@ pub fn anchors(content: &str) -> Result<BTreeSet<String>> {
         }
         let slug = slug(text.trim().trim_end_matches('#'));
         if !slug.is_empty() {
-            anchors.insert(format!("heading:{slug}"));
+            headings.push(format!("heading:{slug}"));
         }
     }
-    Ok(anchors)
+    Ok(headings)
 }
 
 /// All feedback on a plan, oldest first, marked against the current plan file.
@@ -152,22 +160,24 @@ pub(super) fn list(store: &Store, plan: &PlanRecord, content: &str) -> Result<Ve
     let items = statement
         .query_map([plan.id], row)?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(mark(items, content))
+    Ok(mark(items, content, &plan.project))
 }
 
-/// Mark each item against the current plan file's digest and anchors.
-fn mark(mut items: Vec<Feedback>, content: &str) -> Vec<Feedback> {
+/// Mark each item against the current plan file's digest and anchors; a `file:` anchor is
+/// checked against the project's working tree instead.
+fn mark(mut items: Vec<Feedback>, content: &str, project: &str) -> Vec<Feedback> {
     let digest = files::hash(content.as_bytes());
     let anchors = anchors(content).unwrap_or_default();
     for item in &mut items {
         item.current = item.digest == digest;
-        item.anchored = anchors.contains(&item.anchor);
+        item.anchored =
+            anchors.contains(&item.anchor) || line_anchor::exists(Path::new(project), &item.anchor);
     }
     items
 }
 
-fn marked(item: Feedback, content: &str) -> Feedback {
-    mark(vec![item], content).remove(0)
+fn marked(item: Feedback, content: &str, project: &str) -> Feedback {
+    mark(vec![item], content, project).remove(0)
 }
 
 fn text(input: &str) -> Result<String> {
@@ -205,7 +215,9 @@ fn insert(tx: &Transaction<'_>, plan: &PlanRecord, ts: i64, item: NewItem<'_>) -
     by_id(tx, plan.id, id)?.context("feedback disappeared")
 }
 
-/// Anchor feedback to a stable plan location; unknown anchors are rejected.
+/// Anchor feedback to a stable plan location (`plan`, `requirement:<id>`, `task:<id>`,
+/// `check:<name>`, `heading:<slug>`) or to a line of a project file (`file:<path>:<line>`);
+/// unknown anchors are rejected.
 pub fn comment(
     store: &Store,
     project: &Path,
@@ -216,12 +228,16 @@ pub fn comment(
 ) -> Result<Feedback> {
     let plan = get(store, project, slug)?;
     let content = files::read(&plan)?;
-    let known = anchors(&content)?;
-    ensure!(
-        known.contains(anchor),
-        "unknown anchor {anchor:?}; use one of: {}",
-        known.into_iter().collect::<Vec<_>>().join(", ")
-    );
+    if line_anchor::is_line_anchor(anchor) {
+        line_anchor::check(Path::new(&plan.project), anchor)?;
+    } else {
+        let known = anchors(&content)?;
+        ensure!(
+            known.contains(anchor),
+            "unknown anchor {anchor:?}; use file:<path>:<line> or one of: {}",
+            known.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
     let item = NewItem {
         parent: None,
         author: author.as_str(),
@@ -232,7 +248,7 @@ pub fn comment(
     };
     let ts = now()?;
     let item = store.transaction(|tx| insert(tx, &plan, ts, item))?;
-    Ok(marked(item, &content))
+    Ok(marked(item, &content, &plan.project))
 }
 
 /// Reply to a finding or comment. Anyone may reply; replies never change its state.
@@ -263,7 +279,7 @@ pub fn reply(
     };
     let ts = now()?;
     let item = store.transaction(|tx| insert(tx, &plan, ts, reply))?;
-    Ok(marked(item, &content))
+    Ok(marked(item, &content, &plan.project))
 }
 
 /// Human action only: resolve or acknowledge an open finding or comment. Repeating is a no-op.
@@ -297,7 +313,7 @@ pub fn close(
         by_id(tx, plan.id, id)?.context("feedback disappeared")
     })?;
     Ok(match files::read(&plan) {
-        Ok(content) => marked(item, &content),
+        Ok(content) => marked(item, &content, &plan.project),
         Err(_) => item,
     })
 }
@@ -371,7 +387,7 @@ pub fn validate(
             .map(|item| insert(tx, &plan, ts, item))
             .collect::<Result<Vec<_>>>()
     })?;
-    let findings = mark(findings, &content);
+    let findings = mark(findings, &content, &plan.project);
     Ok(Validation {
         blocking: review
             .findings

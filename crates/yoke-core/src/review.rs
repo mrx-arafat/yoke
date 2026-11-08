@@ -13,6 +13,7 @@ const RESPONSE_CAP: usize = 256 * 1024;
 mod input;
 mod plan;
 mod prompt;
+pub(crate) use input::secret_path;
 pub use plan::{validate_plan, PlanFinding, PlanReview, PlanSeverity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

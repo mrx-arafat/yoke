@@ -501,7 +501,7 @@ impl Live {
         let _ = serve(
             &self.c,
             &self.store,
-            &mut self.actions,
+            &self.actions,
             &self.connections,
             request,
         );
@@ -945,7 +945,7 @@ fn hostile_records_render_escaped_and_secrets_redacted_on_every_page() {
         csrf: "csrf".into(),
         host: "127.0.0.1:1".into(),
     };
-    let mut actions = actions::Actions::default();
+    let actions = actions::Actions::default();
     let confirmation = actions
         .apply(
             &store,

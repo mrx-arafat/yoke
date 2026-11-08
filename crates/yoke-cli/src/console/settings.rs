@@ -118,6 +118,18 @@ pub(super) fn page(store: &Store, c: &Console) -> Result<String> {
     Ok(out)
 }
 
+/// Delegated `settings.*` console actions. Owner: parity-extensions (Pilot parity fleet).
+/// Edits may write a config file but never trust it; the human runs `yoke trust`.
+pub(super) fn act(
+    _store: &Store,
+    _c: &Console,
+    _name: &str,
+    _params: &serde_json::Value,
+    _confirmed: bool,
+) -> Result<super::actions::Outcome> {
+    anyhow::bail!("Unknown action")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

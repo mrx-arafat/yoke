@@ -101,7 +101,7 @@ pub(super) fn respond(console: &Console, launch: &mut Launch, request: Request) 
     eprintln!("Yoke console: launch link used; it no longer works.");
     let base = base(console);
     let mut headers = security_headers("text/plain; charset=utf-8");
-    headers.push(("Location".into(), format!("{base}decisions")));
+    headers.push(("Location".into(), format!("{base}dashboard")));
     // RFC 6265 8.5: cookies ignore ports, so Path keeps the secret off every other 127.0.0.1
     // server; their URLs never fall under this run's unguessable prefix.
     headers.push((
@@ -373,7 +373,7 @@ mod tests {
         let response = read(client);
         let cookie = format!("{}={}", cookie_name(&c), c.token);
         assert!(response.starts_with("HTTP/1.1 303"), "{response}");
-        assert!(response.contains(&format!("Location: {base}decisions\r\n")));
+        assert!(response.contains(&format!("Location: {base}dashboard\r\n")));
         assert!(response.contains(&format!(
             "Set-Cookie: {cookie}; Path={base}; HttpOnly; SameSite=Strict\r\n"
         )));
@@ -398,7 +398,7 @@ mod tests {
         for secret in [c.token.as_str(), code, &cookie_name(&c), "Set-Cookie"] {
             assert!(!response.contains(secret), "{secret} leaked: {response}");
         }
-        let mut actions = super::super::actions::Actions::default();
+        let actions = super::super::actions::Actions::default();
         let connections = Arc::new(AtomicUsize::new(0));
         let other_run = format!("/c/{}/decisions", "0".repeat(32));
         for (target, sent, status) in [
@@ -416,7 +416,7 @@ mod tests {
             (base.trim_end_matches('/').to_owned(), cookie.clone(), "404"),
         ] {
             let (request, client) = get(&server, &host, &target, &sent);
-            super::super::serve(&c, &store, &mut actions, &connections, request).unwrap();
+            super::super::serve(&c, &store, &actions, &connections, request).unwrap();
             let response = read(client);
             assert!(
                 response.starts_with(&format!("HTTP/1.1 {status}")),

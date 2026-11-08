@@ -515,8 +515,30 @@ It listens on `127.0.0.1` only, and it refuses to start from an agent because it
 The link works once, within five minutes, and signs that browser in with a cookie.
 Ctrl-C stops the server.
 
-It covers Projects, Sessions, Plans, Decisions, Memory, Trust & config, Usage, Notifications and Workflow settings.
+It opens on the Dashboard and covers Decisions, Projects, Sessions, Memory, Requirements, Plans, Changes, Extensions, Trust & config, Usage, Notifications, Workflow settings and Documentation.
+Press `g` and then a page's key to jump there; `?` lists the keys.
 Trusting a configuration stays a terminal operation.
+Actions that delete, discard, push or overwrite always show what will happen and wait for you to confirm.
+
+The **Dashboard** summarises every project this Yoke home has recorded.
+It shows status counts and the newest sessions, plans, memories and requirement documents, each with a **Show all** link.
+Plans, memory and requirements open for the project you launched the console in; other projects appear as plain text.
+
+**Plans** adds statistics: totals by state, the mean number of check rounds per done plan, and completions over the last 30 days.
+An unfinished plan has **Cancel this plan**, which is the console form of `yoke plan cancel`.
+It needs a reason and a confirmation, and it cannot be undone.
+
+If a plan was started inside a linked Git worktree of the project, Plans also lists that worktree.
+Its page shows the uncommitted changes and the diff against the main checkout's branch.
+**Sync** squash-merges the branch into the main checkout and commits it there; it does not push and runs no repository hooks.
+**Discard** removes the worktree with `git worktree remove` and no force, and the branch is kept.
+Both ask you to confirm, and both refuse while anything is uncommitted, in conflict, or not yet in the base branch.
+
+**Requirements** lists the Markdown files in `docs/prd` in the project.
+Start a file with a `# title`, optional `Author:`, `Status:` and `Category:` lines, and `##` sections such as Problem Statement and Core User Flows.
+Deleting one asks you to confirm and says whether Git can restore it.
+
+**Documentation** shows Yoke's manual and reference pages built into the binary, with a table of contents and links between pages, and needs no network.
 
 Decisions show a short command or file path and the recorded reason before you expand a row.
 Expand it for the full reason, gate results and redacted payload.
@@ -553,6 +575,36 @@ Notifications collect hook errors, observe-mode would-deny summaries, waiting or
 A summary table lists each notification, and a separate next-steps table maps its id to the recovery command; `--json` includes the full recovery URL in `doc`.
 `yoke notifications` prints the same list for the current project and the global configuration.
 Acknowledging one with `yoke notifications ack <id|all>` is a **your terminal** step, because an agent that acknowledges an alert hides it from you.
+
+### Changes and notes
+
+The Changes page (`g c`) reviews the working tree of the console's project.
+Files are grouped as staged, changes and untracked, as a flat list or a tree.
+Select a file for its diff, unified or split, with optional line wrapping.
+You can stage or unstage one file or all, commit with a message and a longer description, switch or create branches, fetch, pull and push, and stash.
+Yoke never forces anything: a push asks you first and shows what it will send, and dropping a stash asks first.
+Pull with merge or rebase needs a clean tracked tree, and an unfinished merge or rebase must be finished in a terminal.
+
+"Draft message with claude" (or codex) is off until you click it.
+Yoke first shows which staged files, and how much, would be sent after secret-looking values are redacted, and sends nothing until you press the second button.
+
+Notes are plan comments the agent reads with `yoke plan status`.
+On a plan page, hover the plan, a heading, a requirement, a task or a check and press +.
+On the Changes page, press + beside a line and the note is saved on the plan you select.
+"Export for review" saves the plan and its notes as one Markdown file on your computer; nothing is uploaded.
+
+### Extensions
+
+The Extensions page (`g e`) lists the skills, rules, commands and agents that `yoke extensions` finds for Claude Code and Codex, in global and project scope.
+Filter by category, agent and scope, or search, and select one to read it with its size in characters, lines and approximate tokens.
+You can rename one, move it between global and project scope, or delete it.
+Deleting moves it into a trash folder in Yoke's state directory instead of removing it, and Yoke never follows symbolic links or overwrites an existing file.
+
+A team remote is optional.
+Enter a Git repository URL on the page to keep a Yoke-managed clone in the state directory; the URL is stored there, not in trusted policy.
+Pull to list the remote's extensions, compare one side by side with your local copy, and install it; replacing a local file asks first and moves the old one to the trash.
+Push sends only the extensions you select, after showing the exact files and the remote, and never forces.
+Yoke uses your own Git credentials and never asks for or stores them.
 
 ## 11. Pausing Yoke, and when Yoke fails
 

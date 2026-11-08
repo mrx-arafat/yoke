@@ -1,0 +1,46 @@
+/* Owner: parity-plans. Loaded on every page after console.css; scope rules to your page, e.g. main[data-page="x"]. */
+
+/* Shared stat tiles: dashboard status row and plan statistics. */
+main[data-page="dashboard"] .stats, main[data-page="plans"] .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,10.5rem),1fr)); gap:var(--space-3); margin:0; }
+main[data-page="dashboard"] .stat, main[data-page="plans"] .stat { min-width:0; padding:var(--space-3) var(--space-4); border-radius:1rem; background:var(--well); }
+main[data-page="dashboard"] .stat dt, main[data-page="plans"] .stat dt { font-size:var(--text-small); }
+main[data-page="dashboard"] .stat dd, main[data-page="plans"] .stat dd { margin:0; font-size:2rem; font-weight:700; line-height:1.2; }
+main[data-page="dashboard"] .stat small, main[data-page="plans"] .stat small { color:var(--muted); }
+
+/* Dashboard */
+main[data-page="dashboard"] .dash-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr)); gap:var(--space-4); margin-top:var(--space-4); align-items:start; }
+main[data-page="dashboard"] .dash-section { margin:0; min-width:0; }
+main[data-page="dashboard"] .dash-list { list-style:none; margin:0; padding:0; display:grid; gap:var(--space-3); }
+main[data-page="dashboard"] .dash-list li { min-width:0; padding-bottom:var(--space-3); border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+main[data-page="dashboard"] .dash-list li:last-child { border-bottom:0; padding-bottom:0; }
+
+/* Section chips (requirements list and detail) */
+main[data-page="requirements"] .chips { list-style:none; display:flex; flex-wrap:wrap; gap:var(--space-2); margin:var(--space-2) 0 0; padding:0; }
+main[data-page="requirements"] .chips li { padding:.125rem .625rem; border-radius:999px; background:var(--well); font-size:var(--text-small); overflow-wrap:anywhere; }
+
+/* Plan completion timeline */
+main[data-page="plans"] .timeline { list-style:none; margin:0 0 var(--space-4); padding:0; display:grid; gap:var(--space-2); }
+main[data-page="plans"] .timeline li { display:grid; grid-template-columns:6.5rem minmax(0,1fr) 2rem; gap:var(--space-3); align-items:center; }
+main[data-page="plans"] .timeline progress { width:100%; height:.75rem; accent-color:var(--accent); }
+main[data-page="plans"] .dash-list { list-style:none; margin:0; padding:0; display:grid; gap:var(--space-2); }
+
+/* Human-only controls: reason and confirmation forms */
+main[data-page="plans"] [data-field], main[data-page="requirements"] [data-field] { display:block; width:100%; margin-top:var(--space-1); padding:.5rem .75rem; border:1px solid var(--line); border-radius:.75rem; background:var(--surface); color:var(--ink); font:inherit; }
+main[data-page="plans"] .action-zone > summary, main[data-page="requirements"] .action-zone > summary { cursor:pointer; font-weight:600; }
+main[data-page="plans"] .action-zone label { display:block; margin-top:var(--space-3); }
+
+/* Documentation */
+main[data-page="docs"] .doc-pages { display:flex; flex-wrap:wrap; gap:var(--space-2); margin:var(--space-3) 0; }
+main[data-page="docs"] .doc-pages a { padding:.25rem .75rem; border-radius:999px; background:var(--well); font-size:var(--text-small); text-decoration:none; }
+main[data-page="docs"] .doc-pages a[aria-current] { background:var(--accent); color:var(--accent-ink); }
+main[data-page="docs"] .doc-toc ul { list-style:none; margin:0; padding:0; columns:16rem; column-gap:var(--space-5); }
+main[data-page="docs"] .doc-toc li { break-inside:avoid; overflow-wrap:anywhere; }
+main[data-page="docs"] .doc-toc li.toc-3 { padding-left:var(--space-4); font-size:var(--text-small); }
+main[data-page="docs"] .doc-body { margin-top:var(--space-4); overflow-wrap:anywhere; }
+main[data-page="docs"] .doc-body table { display:block; max-width:100%; overflow:auto; }
+main[data-page="docs"] .doc-body [id] { scroll-margin-top:var(--space-4); }
+
+/* Plan worktree diff */
+main[data-page="plans"] .wt-diff { margin-top:var(--space-3); }
+main[data-page="plans"] .wt-diff .wt-file { color:var(--muted); font-weight:600; }
+main[data-page="plans"] .wt-diff .wt-hunk { color:var(--muted); background:var(--well); }

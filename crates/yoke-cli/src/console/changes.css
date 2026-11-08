@@ -1,0 +1,76 @@
+/* Owner: parity-changes. Changes page rules are scoped to main[data-page="changes"]; note rules apply wherever notes appear. */
+main[data-page="changes"] .changes-bar { display: grid; gap: .5rem; }
+main[data-page="changes"] .changes-branch { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+main[data-page="changes"] .changes-bar .actions { margin: 0; }
+main[data-page="changes"] .changes-bar form.inline { display: flex; gap: .5rem; flex-wrap: wrap; }
+main[data-page="changes"] .changes-layout { display: grid; gap: 1.25rem; grid-template-columns: minmax(0, 1fr); align-items: start; }
+@media (min-width: 64rem) {
+  main[data-page="changes"] .changes-layout { grid-template-columns: minmax(18rem, 24rem) minmax(0, 1fr); }
+}
+main[data-page="changes"] .changes-side, main[data-page="changes"] .changes-main { min-width: 0; }
+main[data-page="changes"] .changes-side .panel:first-child, main[data-page="changes"] .changes-main .panel:first-child { margin-top: 0; }
+main[data-page="changes"] .changes-tools { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: space-between; align-items: center; }
+main[data-page="changes"] .seg { display: inline-flex; gap: .25rem; }
+main[data-page="changes"] .seg button[aria-pressed="true"], main[data-page="changes"] [data-changes-wrap][aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+main[data-page="changes"] .file-group h3 { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; font-size: 1rem; margin: 1rem 0 .5rem; }
+main[data-page="changes"] .count { font: 600 .75rem/1.4 var(--mono); padding: .1rem .45rem; background: var(--well); border-radius: .2rem; }
+main[data-page="changes"] .file-list, main[data-page="changes"] .file-list ul { list-style: none; margin: 0; padding: 0; }
+main[data-page="changes"] .file-list ul { padding-left: 1rem; border-left: 1px solid var(--line); margin-left: .5rem; }
+main[data-page="changes"] .changes-layout[data-layout="flat"] .file-list.tree, main[data-page="changes"] .changes-layout[data-layout="tree"] .file-list.flat { display: none; }
+main[data-page="changes"] .file { display: flex; align-items: center; gap: .25rem; border-radius: .5rem; }
+main[data-page="changes"] .file.selected { background: var(--accent-soft); }
+main[data-page="changes"] .file a { flex: 1; min-width: 0; display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; padding: 0 .5rem; color: var(--ink); text-decoration: none; }
+main[data-page="changes"] .file .path { overflow-wrap: anywhere; font: .8125rem/1.4 var(--mono); }
+main[data-page="changes"] .file .icon { min-width: 2.75rem; padding: .25rem; font: 700 1rem/1 var(--mono); }
+main[data-page="changes"] .kind { flex: none; width: 1.5rem; text-align: center; font: 700 .75rem/1.5 var(--mono); border-radius: .2rem; background: var(--well); }
+main[data-page="changes"] .kind-added, main[data-page="changes"] .kind-untracked { background: var(--accent-soft); color: var(--accent); }
+main[data-page="changes"] .kind-deleted, main[data-page="changes"] .kind-conflicted { background: var(--danger-soft); color: var(--danger); }
+main[data-page="changes"] .kind-renamed, main[data-page="changes"] .kind-copied, main[data-page="changes"] .kind-type { background: var(--warn-soft); color: var(--warn); }
+main[data-page="changes"] summary { cursor: pointer; min-height: 2.75rem; display: flex; align-items: center; font: .8125rem/1.4 var(--mono); }
+main[data-page="changes"] textarea, main[data-page="changes"] .note-form textarea, .note-form textarea { width: 100%; min-height: 5rem; padding: .5rem .75rem; border: 1px solid var(--line); border-radius: .875rem; background: var(--surface); color: var(--ink); font: inherit; resize: vertical; }
+main[data-page="changes"] .changes-commit form { display: grid; gap: .5rem; }
+main[data-page="changes"] .changes-commit label, main[data-page="changes"] .changes-notes label { font-weight: 600; }
+main[data-page="changes"] .draft-preview { border: 1px solid var(--line); border-radius: .875rem; padding: 1rem; background: var(--well); }
+main[data-page="changes"] .stash { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; padding: .5rem 0; border-top: 1px solid var(--line); }
+main[data-page="changes"] .stash .actions { margin: 0; }
+main[data-page="changes"] .changes-stash form.inline { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.confirm-text { white-space: pre-line; overflow-wrap: anywhere; }
+
+main[data-page="changes"] .diff-head { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .75rem; }
+main[data-page="changes"] .diff-head h2 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; flex: 1 1 100%; }
+main[data-page="changes"] .stat { font: 700 .8125rem/1 var(--mono); }
+main[data-page="changes"] .stat.add { color: var(--accent); }
+main[data-page="changes"] .stat.del { color: var(--danger); }
+main[data-page="changes"] .diff-scroll { overflow: auto; border: 1px solid var(--line); border-radius: .5rem; max-height: 70vh; }
+main[data-page="changes"] .diff-table { width: 100%; border-collapse: collapse; font: .8125rem/1.6 var(--mono); table-layout: auto; }
+main[data-page="changes"] .diff-table td { padding: 0 .5rem; vertical-align: top; border: 0; }
+main[data-page="changes"] .diff-table .num { width: 1%; min-width: 3rem; text-align: right; color: var(--muted); user-select: none; white-space: nowrap; }
+main[data-page="changes"] .diff-table .sign { width: 1%; color: var(--muted); user-select: none; }
+main[data-page="changes"] .diff-table .text code { font: inherit; white-space: pre; }
+main[data-page="changes"] .changes-layout[data-wrap="on"] .diff-table .text code { white-space: pre-wrap; overflow-wrap: anywhere; }
+main[data-page="changes"] .diff-table .hunk td { background: var(--well); color: var(--muted); }
+main[data-page="changes"] .diff-table .add .text, main[data-page="changes"] .diff-table .add.text, main[data-page="changes"] tr.add td { background: var(--accent-soft); }
+main[data-page="changes"] .diff-table .del .text, main[data-page="changes"] .diff-table .del.text, main[data-page="changes"] tr.del td { background: var(--danger-soft); }
+main[data-page="changes"] .diff-table .empty { background: var(--well); }
+main[data-page="changes"] .diff-table tr.meta .text { color: var(--muted); }
+main[data-page="changes"] .diff-split { table-layout: fixed; }
+main[data-page="changes"] .diff-split .num { width: 3.5rem; }
+main[data-page="changes"] .diff-split td.text + td.num, main[data-page="changes"] .diff-split td.text:last-child { border-left: 1px solid var(--line); }
+main[data-page="changes"] .changes-layout[data-diff-view="unified"] .diff-split, main[data-page="changes"] .changes-layout[data-diff-view="split"] .diff-unified { display: none; }
+main[data-page="changes"] .diff-table .note-row td, main[data-page="changes"] .diff-table .note-form-host td { background: var(--surface); padding: .5rem 1rem; white-space: normal; }
+
+/* Notes: used on the Changes diff and the plan page. */
+.note-add { min-height: 1.5rem; min-width: 1.5rem; padding: 0 .35rem; margin-left: .35rem; border-radius: .35rem; font: 700 .875rem/1 var(--mono); opacity: 0; background: var(--accent); color: var(--accent-ink); }
+.note-add:focus-visible, :hover > .note-add, :focus-within > .note-add, tr:hover .note-add { opacity: 1; }
+@media (hover: none) { .note-add { opacity: 1; min-height: 2.75rem; min-width: 2.75rem; } }
+.note-count { display: inline-block; min-width: 1.25rem; padding: 0 .3rem; border-radius: .6rem; background: var(--warn-soft); color: var(--warn); font: 700 .75rem/1.25rem var(--mono); text-align: center; }
+.note-inline { padding: .5rem .75rem; margin: .25rem 0; border-radius: .5rem; background: var(--accent-soft); overflow-wrap: anywhere; font: .875rem/1.5 var(--body); }
+.note-form { display: grid; gap: .5rem; max-width: 40rem; }
+.note-form-host { margin: .5rem 0; }
+[data-notes-root] { display: grid; gap: 1.25rem; grid-template-columns: minmax(0, 1fr); align-items: start; }
+@media (min-width: 72rem) { [data-notes-root] { grid-template-columns: minmax(0, 1fr) 20rem; } }
+[data-notes-root] .notes-main { min-width: 0; }
+.notes-sidebar { position: sticky; top: 1rem; margin-top: 1.25rem; }
+.notes-sidebar ul { list-style: none; margin: 0; padding: 0; display: grid; gap: .75rem; }
+.notes-sidebar h3 { margin: 0; font-size: 1rem; }
+@media (prefers-reduced-motion: no-preference) { .note-add { transition: opacity var(--motion); } }

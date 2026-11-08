@@ -1,4 +1,5 @@
 use super::{
+    changes::notes,
     content,
     render::{self, encode, escape},
     Console,
@@ -20,10 +21,11 @@ pub(super) fn page(store: &Store, c: &Console, slug: &str) -> Result<String> {
     let detail = plan::detail(store, &c.project, slug)?;
     let state = detail.plan.state.as_str();
     let mut out = format!(
-        r#"<p><a data-nav href="{}">All plans</a></p><section class="panel"><div class="list-caption"><h2>{}</h2>{}</div>"#,
+        r#"<p><a data-nav href="{}">All plans</a></p><section class="panel"><div class="list-caption"><h2>{}</h2>{}{}</div>"#,
         render::link(c, "plans"),
         escape(slug),
-        badge(state, state)
+        badge(state, state),
+        notes::button("plan", "the whole plan")
     );
     match state {
         "draft" => out.push_str(&format!(r#"<div class="action-zone"><button data-action="prepare-approval" data-slug="{}">Review approval</button></div>"#, escape(slug))),
@@ -31,7 +33,8 @@ pub(super) fn page(store: &Store, c: &Console, slug: &str) -> Result<String> {
         "checking" => out.push_str(&format!(r#"<div class="action-zone"><p class="muted">If the check process died, recovery returns the plan to building and records the interrupted check as invalid evidence. It is refused while a live check still runs.</p><button data-action="resume" data-slug="{}">Recover interrupted check</button></div>"#, escape(slug))),
         _ => {}
     }
-    progress(&mut out, &detail.progress);
+    out.push_str(&super::dashboard::plan_stats::cancel_zone(&detail.plan));
+    progress(&mut out, &detail.progress, &detail.feedback);
     feedback(&mut out, slug, &detail.feedback);
     let (header, body) = split_header(&detail.content);
     out.push_str(&format!(
@@ -42,7 +45,7 @@ pub(super) fn page(store: &Store, c: &Console, slug: &str) -> Result<String> {
                 content::highlight(header)
             ))
             .unwrap_or_default(),
-        content::markdown(body)
+        notes::decorate_headings(&content::markdown(body), &detail.content, &detail.feedback)
     ));
     if let Some(header) = &detail.plan.approved_header {
         out.push_str(&format!("<details class=\"panel\"><summary>Frozen approved header</summary><pre><code>{}</code></pre></details>", content::highlight(header)));
@@ -72,7 +75,7 @@ pub(super) fn page(store: &Store, c: &Console, slug: &str) -> Result<String> {
         );
     }
     for check in &detail.checks {
-        out.push_str(&format!("<details class=\"check\"><summary data-row>{} - {} ({} ms)</summary><p>{} &middot; exit {}</p><pre><code>{}</code></pre>{}<h3>Review findings</h3><pre><code>{}</code></pre>", escape(&check.name), escape(&check.result), check.ms, if check.blocking { "Blocking" } else { "Advisory" }, check.exit_code.map(|v| v.to_string()).unwrap_or_else(|| "unavailable".into()), content::highlight(&check.command), if check.output_tail.is_empty() { "<p class=\"muted\">No output captured.</p>".to_owned() } else { format!("<pre><code>{}</code></pre>", escape(&check.output_tail)) }, escape(&serde_json::to_string_pretty(&check.findings)?)));
+        out.push_str(&format!("<details class=\"check\"{}><summary data-row>{} - {} ({} ms)</summary><p>{} &middot; exit {} {}{}</p><pre><code>{}</code></pre>{}<h3>Review findings</h3><pre><code>{}</code></pre>", notes::attrs(&format!("check:{}", check.name)), escape(&check.name), escape(&check.result), check.ms, if check.blocking { "Blocking" } else { "Advisory" }, check.exit_code.map(|v| v.to_string()).unwrap_or_else(|| "unavailable".into()), notes::count(&detail.feedback, &format!("check:{}", check.name)), notes::button(&format!("check:{}", check.name), &format!("check {}", check.name)), content::highlight(&check.command), if check.output_tail.is_empty() { "<p class=\"muted\">No output captured.</p>".to_owned() } else { format!("<pre><code>{}</code></pre>", escape(&check.output_tail)) }, escape(&serde_json::to_string_pretty(&check.findings)?)));
         for (index, path) in check.artifacts.iter().enumerate() {
             let status = detail
                 .evidence
@@ -99,7 +102,11 @@ pub(super) fn page(store: &Store, c: &Console, slug: &str) -> Result<String> {
         out.push_str("</details>");
     }
     out.push_str("</section>");
-    Ok(out)
+    Ok(format!(
+        r#"<div data-notes-root data-note-plan="{}"><div class="notes-main">{out}</div>{}</div>"#,
+        escape(slug),
+        notes::sidebar(slug, &detail.feedback)
+    ))
 }
 
 /// Separate the `+++` TOML header from the Markdown body so the header renders as code.
@@ -120,7 +127,7 @@ fn split_header(content: &str) -> (Option<&str>, &str) {
     (None, content)
 }
 
-fn progress(out: &mut String, progress: &plan::Progress) {
+fn progress(out: &mut String, progress: &plan::Progress, items: &[plan::Feedback]) {
     if progress.tasks.is_empty() && progress.requirements.is_empty() {
         return;
     }
@@ -148,7 +155,8 @@ fn progress(out: &mut String, progress: &plan::Progress) {
                 .and_then(|done| done.evidence.as_deref())
                 .map(|text| format!("<br><span class=\"muted\">{}</span>", escape(text)))
                 .unwrap_or_default();
-            out.push_str(&format!("<tr><th scope=\"row\"><code>{}</code><br>{}{evidence}</th><td>{}</td><td>{status}</td></tr>", escape(&item.requirement.id), escape(&item.requirement.text), escape(&by)));
+            let anchor = format!("requirement:{}", item.requirement.id);
+            out.push_str(&format!("<tr{}><th scope=\"row\"><code>{}</code>{}{}<br>{}{evidence}</th><td>{}</td><td>{status}</td></tr>", notes::attrs(&anchor), escape(&item.requirement.id), notes::count(items, &anchor), notes::button(&anchor, &format!("requirement {}", item.requirement.id)), escape(&item.requirement.text), escape(&by)));
         }
         out.push_str("</tbody></table></div>");
     }
@@ -170,7 +178,8 @@ fn progress(out: &mut String, progress: &plan::Progress) {
             } else {
                 item.task.depends_on.join(", ")
             };
-            out.push_str(&format!("<tr><th scope=\"row\"><code>{}</code><br>{}</th><td>{}</td><td>{}</td><td>{status}</td></tr>", escape(&item.task.id), escape(&item.task.title), item.task.owner.as_str(), escape(&depends)));
+            let anchor = format!("task:{}", item.task.id);
+            out.push_str(&format!("<tr{}><th scope=\"row\"><code>{}</code>{}{}<br>{}</th><td>{}</td><td>{}</td><td>{status}</td></tr>", notes::attrs(&anchor), escape(&item.task.id), notes::count(items, &anchor), notes::button(&anchor, &format!("task {}", item.task.id)), escape(&item.task.title), item.task.owner.as_str(), escape(&depends)));
         }
         out.push_str("</tbody></table></div>");
     }

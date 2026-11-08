@@ -63,6 +63,7 @@
       hydrate();
       if (focus) { main.focus({preventScroll:true}); window.scrollTo(0,0); }
       announce("View updated");
+      document.dispatchEvent(new CustomEvent("yoke:view"));
       return true;
     } catch(error) {
       if (error.name === "AbortError") return;
@@ -136,7 +137,7 @@
     }
     if (document.querySelector("dialog[open]") || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
     if(event.key==="?") {help.showModal();return;}
-    if(prefix) {prefix=false;const pages={d:"decisions",o:"projects",s:"sessions",p:"plans",m:"memory",t:"trust",u:"usage",n:"notifications",w:"settings"};if(pages[event.key]){event.preventDefault();navigate(pages[event.key]);}return;}
+    if(prefix) {prefix=false;const pages={h:"dashboard",d:"decisions",o:"projects",s:"sessions",m:"memory",r:"requirements",p:"plans",c:"changes",e:"extensions",t:"trust",u:"usage",n:"notifications",w:"settings",i:"docs"};if(pages[event.key]){event.preventDefault();navigate(pages[event.key]);}return;}
     if(event.key==="g") {prefix=true;return;}
     if(event.key==="j" || event.key==="k") {
       event.preventDefault();const rows=[...document.querySelectorAll("[data-row]")];const at=rows.indexOf(document.activeElement);
@@ -172,6 +173,26 @@
       const message=document.createElement("p");message.className="action-error error";message.setAttribute("role","alert");message.textContent=error.message;zone.append(message);
     } finally {button.disabled=false;focusTarget?.focus({preventScroll:true});}
   }
+  // Page scripts (changes.js, plans.js, ...) post actions with free-form params and re-init on "yoke:view".
+  async function act(action, params) {
+    const response=await fetch("actions",{method:"POST",headers:{"X-Yoke-CSRF":csrf,"Content-Type":"application/json"},body:JSON.stringify({action,params})});
+    const result=await response.json();
+    if(!response.ok)throw new Error(result.error?.message || "Action failed. Try again.");
+    return result.data;
+  }
+  function notify(message) {
+    const toast=document.getElementById("toast");toast.replaceChildren(document.createTextNode(message));toast.hidden=false;
+    const dismiss=document.createElement("button");dismiss.textContent="Dismiss";dismiss.setAttribute("aria-label","Dismiss notification");dismiss.addEventListener("click",()=>{toast.hidden=true;});toast.append(dismiss);
+    announce(message);
+  }
+  // Second step of an Outcome::Confirm: re-runs the stored action once with confirmed = true.
+  async function confirm(ticket) {
+    const response=await fetch("actions",{method:"POST",headers:{"X-Yoke-CSRF":csrf,"Content-Type":"application/json"},body:JSON.stringify({action:"confirm",ticket})});
+    const result=await response.json();
+    if(!response.ok)throw new Error(result.error?.message || "Action failed. Try again.");
+    return result.data;
+  }
+  window.yoke=Object.freeze({act,confirm,navigate,notify,announce,refresh:()=>navigate(location.href,false,false)});
   let currentImage;
   const lightbox=document.getElementById("lightbox");
   function showImage(button) {

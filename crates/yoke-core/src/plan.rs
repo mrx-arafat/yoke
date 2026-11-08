@@ -12,14 +12,18 @@ mod acceptance;
 mod checks;
 mod feedback;
 mod files;
+mod line_anchor;
 mod storage;
 pub use acceptance::{
     accept_requirement, complete_task, task, Actor, Completion, Progress, Requirement,
     RequirementProgress, RequirementStatus, Task, TaskProgress, TaskState,
 };
 pub use checks::{check, record_review, record_review_with_fingerprint};
-pub use feedback::{anchors, close, comment, reply, validate, Closure, Feedback, Validation};
+pub use feedback::{
+    anchors, close, comment, heading_anchors, reply, validate, Closure, Feedback, Validation,
+};
 pub use files::{content_fingerprint, fingerprint};
+pub use line_anchor::{format as line_anchor, is_line_anchor, parse as parse_line_anchor};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

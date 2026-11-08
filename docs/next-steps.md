@@ -131,6 +131,16 @@ An agent cannot complete these and must not bypass their guards; record the exac
    Investigate each incident before expanding features.
    Then run the release workflow for all four targets, verify assets, provenance and notices as in [verifying releases](verifying-releases.md), complete clean-account install checks and compliance review, and test hosted updates when a published predecessor and successor exist, following [release acceptance](release-acceptance.md).
    Close #22 and reconcile #23 only with attached evidence, and keep unresolved limitations explicit rather than describing the system as defect-free.
+6. **Finish console parity with the Pilot Shell Console.**
+   Why: the console should cover what a coding-agent workbench console offers, adapted to Yoke's rules (local only, human-trusted policy, confirmation before anything destructive or outward).
+   Done so far: Dashboard, Changes (Git) with notes and review export, Requirements, plan statistics, cancel and worktrees, Extensions with an opt-in team remote, and Documentation.
+   Remaining, each done when its server-side tests pass and a human-run browser pass has clicked its primary controls:
+   - **Editable workflow settings.** How: a form for the fields in `config.rs` (gates stay file-only) that shows the exact file diff, writes `yoke.toml` or `~/.yoke/config.toml` with `toml_edit` only if the file still matches what was reviewed, and tells the human to run `yoke trust`; settings with no Yoke meaning are listed as handled by the agent. Add a cancelable `yoke:before-navigate` event to `console.js` for the unsaved-edit warning.
+   - **Typed memory.** How: memory types like decision, discovery, bugfix, feature, refactor and change (`yoke remember --type`, `yoke recall --type --file`, a schema migration), a type filter, file search and memory detail on the Memory page, the session-start injection preview, pending facts with a click-only "Digest now", and a short explainer.
+   - **Session detail.** How: a session page with its event and decision timeline, tool counts, redacted files touched, memories, usage and cost, plus Sessions search by prompt text, project and session ID.
+   - **Usage extras and analytics.** How: cost by model, average daily cost and tokens, a straight-line monthly forecast, Git correlation (commits during recorded sessions, cost per commit), commands rewritten by `rewrite` gates labelled as such, memories by type over time and per-project activity.
+   - **System page.** How: logs, state database backups (restore stays a human terminal command), retention policy and run-now, background jobs with retry, memory export and import, and health; confirm the header notification count updates on every page.
+   - **Cleanup.** How: fold `crates/yoke-core/src/gitcmd.rs` into `git.rs` so there is one Git helper, and refresh Requirements live when `docs/prd` files change.
 
 ## Safe console review with a database copy
 

@@ -536,10 +536,17 @@ mod tests {
 
     #[test]
     fn a_chosen_port_binds_loopback_only_and_a_taken_port_is_refused() {
-        let probe = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-        let server = Server::bind_loopback_on(port).unwrap();
+        // A freed port can be taken by a parallel test's bind(0) before we rebind it, so retry.
+        let (server, port) = (0..20)
+            .find_map(|_| {
+                let probe = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).ok()?;
+                let port = probe.local_addr().ok()?.port();
+                drop(probe);
+                Server::bind_loopback_on(port)
+                    .ok()
+                    .map(|server| (server, port))
+            })
+            .expect("no free loopback port after 20 tries");
         assert_eq!(
             server.local_addr().unwrap(),
             SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))
@@ -587,9 +594,15 @@ mod tests {
             }
         }
         drop(server);
-        assert!(
-            TcpListener::bind(address).is_ok(),
-            "the console port stayed bound after shutdown"
-        );
+        // Drop joins the acceptor, so the port is free now; a parallel test's bind(0) may
+        // briefly hold the same port, so allow it a moment to let go.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while TcpListener::bind(address).is_err() {
+            assert!(
+                Instant::now() < deadline,
+                "the console port stayed bound after shutdown"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 }

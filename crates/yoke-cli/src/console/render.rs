@@ -64,6 +64,12 @@ pub(super) fn title(page: &str) -> &'static str {
         "usage" => "Usage",
         "notifications" => "Notifications",
         "settings" => "Workflow settings",
+        "dashboard" => "Dashboard",
+        "changes" => "Changes",
+        "requirements" => "Requirements",
+        "docs" => "Documentation",
+        "extensions" => "Extensions",
+        "system" => "System",
         _ => "Decisions",
     }
 }
@@ -92,6 +98,24 @@ fn nav_icon(page: &str) -> String {
         "settings" => {
             r#"<path d="M4 6h10m4 0h2M4 12h4m4 0h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>"#
         }
+        "dashboard" => {
+            r#"<rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="5" rx="2"/><rect x="13" y="10" width="8" height="11" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/>"#
+        }
+        "changes" => {
+            r#"<circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 8v8M8 6h4a4 4 0 0 1 4 4"/>"#
+        }
+        "requirements" => {
+            r#"<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.7.7 1 1.5 1 2.5h6c0-1 .3-1.8 1-2.5A6 6 0 0 0 12 3Z"/>"#
+        }
+        "docs" => {
+            r#"<path d="M4 5a2 2 0 0 1 2-2h5v18H6a2 2 0 0 1-2-2V5Zm16 0a2 2 0 0 0-2-2h-5v18h5a2 2 0 0 0 2-2V5Z"/>"#
+        }
+        "extensions" => {
+            r#"<path d="M10 3h4v3a2 2 0 1 0 4 0V3h3v7h-3a2 2 0 1 0 0 4h3v7h-7v-3a2 2 0 1 0-4 0v3H3v-7h3a2 2 0 1 0 0-4H3V3h7Z"/>"#
+        }
+        "system" => {
+            r#"<rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/>"#
+        }
         _ => {
             r#"<rect x="3" y="3" width="18" height="18" rx="4"/><path d="m7 8 1 1 2-2m3 1h4m-10 5 1 1 2-2m3 1h4m-10 5h10"/>"#
         }
@@ -105,15 +129,20 @@ pub(super) fn shell(console: &Console, page: &str, body: &str, unread: i64) -> S
     let mut nav = String::new();
     let mut palette = String::new();
     for (name, key) in [
+        ("dashboard", "h"),
         ("decisions", "d"),
         ("projects", "o"),
         ("sessions", "s"),
-        ("plans", "p"),
         ("memory", "m"),
+        ("requirements", "r"),
+        ("plans", "p"),
+        ("changes", "c"),
+        ("extensions", "e"),
         ("trust", "t"),
         ("usage", "u"),
         ("notifications", "n"),
         ("settings", "w"),
+        ("docs", "i"),
     ] {
         let current = if name == page {
             " aria-current=\"page\""
@@ -138,14 +167,22 @@ pub(super) fn shell(console: &Console, page: &str, body: &str, unread: i64) -> S
         palette.push_str(&format!(r##"<button type="button" data-destination="{}"><span>{}</span><kbd>g {key}</kbd></button>"##,link(console,name),title(name)));
     }
     let icon = include_str!("yoke.svg");
+    let mut page_assets = String::new();
+    for name in ["changes", "plans", "extensions", "memory", "system"] {
+        page_assets.push_str(&format!(
+            r#"<link rel="stylesheet" href="{}"><script defer src="{}"></script>"#,
+            link(console, &format!("assets/{name}.css")),
+            link(console, &format!("assets/{name}.js"))
+        ));
+    }
     format!(
-        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="yoke-csrf" content="{}"><meta name="description" content="Yoke local review console: decisions, plans, memory and evidence."><title>{} &middot; Yoke</title><link rel="icon" href="{}"><link rel="stylesheet" href="{}"><script defer src="{}"></script></head><body><a class="skip" href="#main">Skip to content</a><div class="app"><aside class="rail"><a class="brand" data-nav href="{}"><span class="brand-mark" aria-hidden="true">{icon}</span><span>yoke<small>Local workbench</small></span></a><nav aria-label="Workspace">{nav}</nav><div class="rail-bottom"><span class="local-mark">Local only</span><p>Your evidence stays on this machine.</p><button id="help-open" class="quiet" type="button">Keyboard shortcuts <kbd>?</kbd></button></div></aside><div class="workspace"><header class="topbar"><span class="project" title="{}">{}</span><div class="tools"><span id="connection" class="connection offline" role="status">Connecting...</span><label class="theme-label"><span class="sr-only">Color theme</span><select id="theme" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button id="palette-open" type="button" aria-label="Open command palette">Commands <kbd>Cmd K</kbd></button></div></header><div id="notice" class="notice" hidden><span>New activity is available.</span><button type="button" data-refresh>Refresh view</button></div><div id="view">{body}</div><footer class="footer"><span>Evidence before confidence.</span><span>Yoke &middot; Private by design</span></footer></div></div><div id="announcement" class="sr-only" role="status" aria-live="polite"></div><div id="toast" class="toast" role="status" hidden></div><dialog id="palette" aria-labelledby="palette-title"><div class="dialog-heading"><h2 id="palette-title">Go to your work</h2><button type="button" data-close aria-label="Close command palette">x</button></div><label class="sr-only" for="command-search">Find a page or action</label><input id="command-search" placeholder="Find a page..." autocomplete="off"><div class="command-list">{palette}</div><p class="muted">Up Down to move &middot; Enter to open &middot; Escape to close</p></dialog><dialog id="help" aria-labelledby="help-title"><div class="dialog-heading"><h2 id="help-title">Keep your hands on the keyboard</h2><button type="button" data-close aria-label="Close shortcuts">x</button></div><dl class="shortcuts"><dt>Command palette</dt><dd><kbd>Cmd / Ctrl K</kbd></dd><dt>Move through records</dt><dd><kbd>j</kbd> <kbd>k</kbd></dd><dt>Open focused record</dt><dd><kbd>Enter</kbd></dd><dt>Go to page</dt><dd><kbd>g</kbd> then <kbd>d / o / s / p / m / t / u / n / w</kbd></dd><dt>Close a dialog</dt><dd><kbd>Esc</kbd></dd></dl></dialog><dialog id="lightbox" aria-label="Check screenshot"><div class="dialog-heading"><p id="image-caption"></p><button type="button" data-close aria-label="Close screenshot">x</button></div><img id="lightbox-image" alt="Check evidence screenshot"><div class="actions"><button type="button" id="image-prev">Previous</button><button type="button" id="image-next">Next</button></div></dialog></body></html>"##,
+        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="yoke-csrf" content="{}"><meta name="description" content="Yoke local review console: decisions, plans, memory and evidence."><title>{} &middot; Yoke</title><link rel="icon" href="{}"><link rel="stylesheet" href="{}"><script defer src="{}"></script>{page_assets}</head><body><a class="skip" href="#main">Skip to content</a><div class="app"><aside class="rail"><a class="brand" data-nav href="{}"><span class="brand-mark" aria-hidden="true">{icon}</span><span>yoke<small>Local workbench</small></span></a><nav aria-label="Workspace">{nav}</nav><div class="rail-bottom"><span class="local-mark">Local only</span><p>Your evidence stays on this machine.</p><button id="help-open" class="quiet" type="button">Keyboard shortcuts <kbd>?</kbd></button></div></aside><div class="workspace"><header class="topbar"><span class="project" title="{}">{}</span><div class="tools"><span id="connection" class="connection offline" role="status">Connecting...</span><label class="theme-label"><span class="sr-only">Color theme</span><select id="theme" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button id="palette-open" type="button" aria-label="Open command palette">Commands <kbd>Cmd K</kbd></button></div></header><div id="notice" class="notice" hidden><span>New activity is available.</span><button type="button" data-refresh>Refresh view</button></div><div id="view">{body}</div><footer class="footer"><span>Evidence before confidence.</span><span>Yoke &middot; Private by design</span></footer></div></div><div id="announcement" class="sr-only" role="status" aria-live="polite"></div><div id="toast" class="toast" role="status" hidden></div><dialog id="palette" aria-labelledby="palette-title"><div class="dialog-heading"><h2 id="palette-title">Go to your work</h2><button type="button" data-close aria-label="Close command palette">x</button></div><label class="sr-only" for="command-search">Find a page or action</label><input id="command-search" placeholder="Find a page..." autocomplete="off"><div class="command-list">{palette}</div><p class="muted">Up Down to move &middot; Enter to open &middot; Escape to close</p></dialog><dialog id="help" aria-labelledby="help-title"><div class="dialog-heading"><h2 id="help-title">Keep your hands on the keyboard</h2><button type="button" data-close aria-label="Close shortcuts">x</button></div><dl class="shortcuts"><dt>Command palette</dt><dd><kbd>Cmd / Ctrl K</kbd></dd><dt>Move through records</dt><dd><kbd>j</kbd> <kbd>k</kbd></dd><dt>Open focused record</dt><dd><kbd>Enter</kbd></dd><dt>Go to page</dt><dd><kbd>g</kbd> then <kbd>h / d / o / s / m / r / p / c / e / t / u / n / w / i</kbd></dd><dt>Close a dialog</dt><dd><kbd>Esc</kbd></dd></dl></dialog><dialog id="lightbox" aria-label="Check screenshot"><div class="dialog-heading"><p id="image-caption"></p><button type="button" data-close aria-label="Close screenshot">x</button></div><img id="lightbox-image" alt="Check evidence screenshot"><div class="actions"><button type="button" id="image-prev">Previous</button><button type="button" id="image-next">Next</button></div></dialog></body></html>"##,
         console.csrf,
         title(page),
         link(console, "icon.svg"),
         link(console, "assets/console.css"),
         link(console, "assets/console.js"),
-        link(console, "decisions"),
+        link(console, "dashboard"),
         escape(&console.project.display().to_string()),
         escape(
             console

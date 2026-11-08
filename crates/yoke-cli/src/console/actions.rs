@@ -6,6 +6,7 @@ use std::{
     collections::HashMap,
     fs::OpenOptions,
     io::Read,
+    sync::{Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 use yoke_core::{
@@ -14,10 +15,26 @@ use yoke_core::{
     store::Store,
 };
 
+/// Console action state, shared by every request thread.
 #[derive(Default)]
-pub(super) struct Actions {
+pub(super) struct Actions(Mutex<State>);
+
+#[derive(Default)]
+struct State {
     approvals: HashMap<String, (Instant, PreparedApproval)>,
     forgotten: HashMap<String, (Instant, MemorySnapshot)>,
+    /// Delegated actions waiting for the human to confirm: ticket -> (created, action, params).
+    confirmations: HashMap<String, (Instant, String, Value)>,
+}
+
+/// What a page module's `act` returns for a delegated action (`<prefix>.<verb>`).
+#[allow(dead_code)] // Constructed by page modules as they gain actions.
+pub(super) enum Outcome {
+    /// Finished; the value becomes the response's `data` (include a `message` for the toast).
+    Done(Value),
+    /// Needs the human to confirm first; the message says exactly what will happen.
+    /// The browser gets `data.confirm = {ticket, message}` and confirms with action `confirm`.
+    Confirm(String),
 }
 
 #[derive(Deserialize)]
@@ -29,14 +46,80 @@ pub(super) struct Action {
     value: Option<bool>,
     ticket: Option<String>,
     ids: Option<Vec<i64>>,
+    /// Free-form arguments for delegated page actions.
+    #[serde(default)]
+    params: Option<Value>,
 }
 
 impl Actions {
-    pub(super) fn apply(&mut self, store: &Store, c: &Console, action: Action) -> Result<Value> {
+    pub(super) fn apply(&self, store: &Store, c: &Console, action: Action) -> Result<Value> {
+        if action.action == "confirm" || action.action.contains('.') {
+            return self.delegate(store, c, action);
+        }
+        self.lock().apply(store, c, action)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Route `<prefix>.<verb>` to the page module that owns the prefix. The page action runs
+    /// without the lock, so a slow one (a push, a reviewer CLI) never blocks another request.
+    fn delegate(&self, store: &Store, c: &Console, action: Action) -> Result<Value> {
+        let (name, params, confirmed) = if action.action == "confirm" {
+            let ticket = action.ticket.context("Missing confirmation ticket")?;
+            let mut state = self.lock();
+            state.expire();
+            let (_, name, params) = state
+                .confirmations
+                .remove(&ticket)
+                .context("This confirmation expired or was already used; start the action again")?;
+            (name, params, true)
+        } else {
+            (action.action, action.params.unwrap_or(Value::Null), false)
+        };
+        let outcome = match name.split('.').next().unwrap_or_default() {
+            "changes" | "note" => super::changes::act(store, c, &name, &params, confirmed)?,
+            "plans" | "prd" | "docs" => super::dashboard::act(store, c, &name, &params, confirmed)?,
+            "ext" => super::extensions::act(store, c, &name, &params, confirmed)?,
+            "settings" => super::settings::act(store, c, &name, &params, confirmed)?,
+            "memory" | "session" | "usage" => {
+                super::insights::act(store, c, &name, &params, confirmed)?
+            }
+            "system" => super::system::act(store, c, &name, &params, confirmed)?,
+            _ => anyhow::bail!("Unknown action"),
+        };
+        match outcome {
+            Outcome::Done(data) => Ok(json!({ "data": data })),
+            Outcome::Confirm(message) => {
+                let mut state = self.lock();
+                state.expire();
+                ensure!(
+                    state.confirmations.len() < 32,
+                    "Too many pending confirmations; wait for expiry."
+                );
+                let ticket = random_token()?;
+                state
+                    .confirmations
+                    .insert(ticket.clone(), (Instant::now(), name, params));
+                Ok(json!({ "data": { "confirm": { "ticket": ticket, "message": message } } }))
+            }
+        }
+    }
+}
+
+impl State {
+    fn expire(&mut self) {
         self.approvals
             .retain(|_, (at, _)| at.elapsed() < Duration::from_secs(300));
         self.forgotten
             .retain(|_, (at, _)| at.elapsed() < Duration::from_secs(30));
+        self.confirmations
+            .retain(|_, (at, ..)| at.elapsed() < Duration::from_secs(300));
+    }
+
+    fn apply(&mut self, store: &Store, c: &Console, action: Action) -> Result<Value> {
+        self.expire();
         match action.action.as_str() {
             "prepare-approval" => {
                 ensure!(

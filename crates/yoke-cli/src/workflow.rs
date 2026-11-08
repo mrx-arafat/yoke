@@ -61,11 +61,11 @@ pub enum PlanCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Anchor feedback to `plan`, `requirement:<id>`, `task:<id>`, `check:<name>` or `heading:<slug>`.
+    /// Anchor feedback to `plan`, `requirement:<id>`, `task:<id>`, `check:<name>`, `heading:<slug>` or a project file line `file:<path>:<line>`.
     Comment {
         /// Plan slug.
         slug: String,
-        /// Where the feedback applies, for example task:<id> or check:<name>.
+        /// Where the feedback applies, for example task:<id>, check:<name> or file:<path>:<line>.
         #[arg(long)]
         anchor: String,
         /// Comment text.

@@ -216,7 +216,7 @@ A repository too slow for that shows its branch alone and is not retried for a m
 | `yoke plan approve <slug> [--json]` | Human-only approval of frozen checks; refused while a blocking validation finding is open |
 | `yoke plan task done <slug> <task-id> [--evidence '<text>'] [--json]` | Mark an approved task done after its dependencies; tasks with `owner = "human"` need a human terminal |
 | `yoke plan accept <slug> <requirement-id> --evidence '<text>' [--json]` | Human-only evidence for a requirement declared with `human = true` |
-| `yoke plan comment <slug> --anchor <anchor> --text '<text>' [--json]` | Record feedback anchored to `plan`, `requirement:<id>`, `task:<id>`, `check:<name>`, or `heading:<slug>` |
+| `yoke plan comment <slug> --anchor <anchor> --text '<text>' [--json]` | Record feedback anchored to `plan`, `requirement:<id>`, `task:<id>`, `check:<name>`, `heading:<slug>`, or a line of a project file as `file:<path>:<line>` (the file and line must exist now) |
 | `yoke plan reply <slug> <id> --text '<text>' [--json]` | Reply to a finding or comment without changing its state; `plan status` shows the reply under the item it answers |
 | `yoke plan resolve <slug> <id> [--note '<text>'] [--json]` | Human-only: close a finding or comment as resolved |
 | `yoke plan acknowledge <slug> <id> [--note '<text>'] [--json]` | Human-only: accept the risk of a finding or comment without changing the plan |

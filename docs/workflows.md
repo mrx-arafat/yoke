@@ -135,6 +135,7 @@ A failed or malformed reviewer response stores nothing and the command fails.
 
 Anyone can record feedback with `yoke plan comment <slug> --anchor <anchor> --text '<text>'`.
 Anchors stay stable across edits: `plan`, `requirement:<id>`, `task:<id>`, `check:<name>`, or `heading:<slug>`, where the heading slug is the lowercase heading text with spaces replaced by hyphens.
+A note on code uses `file:<path>:<line>` instead, with a project-relative path and a line from 1; it is checked against the working tree when written and shows as missing in `yoke plan status` once that line no longer exists.
 Unknown anchors are rejected, and `yoke plan status` marks feedback whose anchor later disappears.
 Agents may answer with `yoke plan reply <slug> <id> --text '<text>'`, but only a human resolves or acknowledges an item, and the closing actor and time are recorded.
 None of these commands change the approved header; editing approved checks still requires fresh approval.

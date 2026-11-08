@@ -1213,3 +1213,34 @@ fn plans_need_a_head_commit_and_standalone_review_needs_a_started_plan() {
     };
     ensure_started(&building).unwrap();
 }
+
+#[test]
+fn file_line_anchors_attach_notes_to_working_tree_lines_and_go_stale_when_the_line_goes() {
+    let f = Fixture::new();
+    f.plan("title='x'");
+    fs::write(f.root.join("code.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+    for bad in [
+        "file:code.rs:3",
+        "file:missing.rs:1",
+        "file:../code.rs:1",
+        "file:code.rs:0",
+        "bogus",
+    ] {
+        let rejected = comment(&f.store, &f.root, "example", bad, "x", Actor::Human);
+        assert!(rejected.is_err(), "{bad} must be rejected");
+    }
+    let note = comment(
+        &f.store,
+        &f.root,
+        "example",
+        "file:code.rs:2",
+        "Why b?",
+        Actor::Human,
+    )
+    .unwrap();
+    assert_eq!(note.anchor, "file:code.rs:2");
+    assert!(note.anchored);
+    fs::write(f.root.join("code.rs"), "fn a() {}\n").unwrap();
+    let after = detail(&f.store, &f.root, "example").unwrap();
+    assert!(!after.feedback[0].anchored, "the line no longer exists");
+}

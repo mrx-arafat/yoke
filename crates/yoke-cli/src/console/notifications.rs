@@ -304,8 +304,8 @@ mod tests {
             "data-action=\"acknowledge-all\" data-ids=\"{mine}\""
         )));
 
-        let mut actions = super::super::actions::Actions::default();
-        let mut apply = |value| actions.apply(&store, &c, serde_json::from_value(value).unwrap());
+        let actions = super::super::actions::Actions::default();
+        let apply = |value| actions.apply(&store, &c, serde_json::from_value(value).unwrap());
         assert!(apply(serde_json::json!({"action":"acknowledge","id":foreign})).is_err());
         let result = apply(serde_json::json!({"action":"acknowledge-all","ids":[mine]})).unwrap();
         assert_eq!(result["data"]["message"], "Notification acknowledged.");

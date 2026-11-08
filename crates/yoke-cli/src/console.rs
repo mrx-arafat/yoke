@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{atomic::AtomicUsize, Arc, Mutex, PoisonError};
 
 use self::http::{Request, Server};
 use anyhow::{ensure, Context, Result};
@@ -12,12 +12,22 @@ use yoke_core::store::Store;
 
 #[path = "console/actions.rs"]
 mod actions;
+#[path = "console/changes.rs"]
+mod changes;
 #[path = "console/content.rs"]
 mod content;
+#[path = "console/dashboard.rs"]
+mod dashboard;
+#[path = "console/docs.rs"]
+mod docs;
 #[path = "console/events.rs"]
 mod events;
+#[path = "console/extensions.rs"]
+mod extensions;
 #[path = "console/http.rs"]
 mod http;
+#[path = "console/insights.rs"]
+mod insights;
 #[path = "console/launch.rs"]
 mod launch;
 #[path = "console/notifications.rs"]
@@ -32,8 +42,12 @@ mod policy;
 mod projects;
 #[path = "console/render.rs"]
 mod render;
+#[path = "console/requirements.rs"]
+mod requirements;
 #[path = "console/settings.rs"]
 mod settings;
+#[path = "console/system.rs"]
+mod system;
 #[path = "console/usage.rs"]
 mod usage;
 #[path = "console/views.rs"]
@@ -87,7 +101,9 @@ pub fn run(home: &Path, project: &Path, open_browser: bool, port: u16) -> Result
     let state = home.join(".yoke");
     std::fs::create_dir_all(&state)?;
     let database = state.join("state.db");
-    let store = Store::open(&database)?;
+    // Open once up front so a broken or newer database fails before the link is printed;
+    // each request then opens its own connection.
+    Store::open(&database)?;
     let server = Server::bind_loopback_on(port).with_context(|| {
         format!("listen on 127.0.0.1:{port}; another process may already use that port")
     })?;
@@ -101,7 +117,7 @@ pub fn run(home: &Path, project: &Path, open_browser: bool, port: u16) -> Result
         csrf: random_token()?,
         host,
     };
-    let mut launch = launch::Launch::new()?;
+    let launch = launch::Launch::new()?;
     let url = launch.url(&console);
     println!("Yoke console: {url}");
     eprintln!("This link works once, within five minutes, and signs that browser in.");
@@ -123,21 +139,43 @@ pub fn run(home: &Path, project: &Path, open_browser: bool, port: u16) -> Result
     if env("SSH_CONNECTION").is_some() {
         eprintln!("{}", tunnel_hint(address.port()));
     }
-    let mut actions = actions::Actions::default();
+    let console = Arc::new(console);
+    let actions = Arc::new(actions::Actions::default());
+    let launch = Arc::new(Mutex::new(launch));
     let connections = Arc::new(AtomicUsize::new(0));
     loop {
         let request = server.recv()?;
-        let result = if launch::requested(&console, &request) {
-            launch::respond(&console, &mut launch, request)
-        } else {
-            serve(&console, &store, &mut actions, &connections, request)
-        };
-        if let Err(error) = result {
-            eprintln!(
-                "yoke console: {}",
-                yoke_core::redact::redact(&error.to_string())
-            );
-        }
+        let (console, actions, launch, connections) = (
+            Arc::clone(&console),
+            Arc::clone(&actions),
+            Arc::clone(&launch),
+            Arc::clone(&connections),
+        );
+        // One thread and one database connection per request, so a slow action (a push, a
+        // reviewer CLI) never stalls page loads. The server already caps open connections.
+        std::thread::spawn(move || {
+            let result = if launch::requested(&console, &request) {
+                let mut launch = launch.lock().unwrap_or_else(PoisonError::into_inner);
+                launch::respond(&console, &mut launch, request)
+            } else {
+                match Store::open(&console.database) {
+                    Ok(store) => serve(&console, &store, &actions, &connections, request),
+                    Err(error) => respond(
+                        request,
+                        503,
+                        "text/plain; charset=utf-8",
+                        "The Yoke state database could not be opened; retry, and run yoke health in a terminal if it persists",
+                    )
+                    .and(Err(error)),
+                }
+            };
+            if let Err(error) = result {
+                eprintln!(
+                    "yoke console: {}",
+                    yoke_core::redact::redact(&error.to_string())
+                );
+            }
+        });
     }
 }
 
@@ -246,7 +284,7 @@ pub(super) fn query(url: &str) -> Result<(&str, BTreeMap<String, String>)> {
 fn serve(
     console: &Console,
     store: &Store,
-    actions: &mut actions::Actions,
+    actions: &actions::Actions,
     connections: &Arc<AtomicUsize>,
     request: Request,
 ) -> Result<()> {
@@ -298,6 +336,9 @@ fn serve(
             Err(error)=>respond(request,409,"application/json",&serde_json::json!({"error":{"code":"action_failed","message":yoke_core::redact::redact(&format!("{error}; refresh this view and retry using its current controls"))}}).to_string()),
         };
     }
+    if let Some((_, kind, body)) = PAGE_ASSETS.iter().find(|(asset, ..)| *asset == path) {
+        return respond(request, 200, kind, body);
+    }
     match path {
         "/assets/console.css" => respond(
             request,
@@ -334,9 +375,16 @@ fn serve(
             ),
         },
         "/" | "/decisions" | "/projects" | "/sessions" | "/plans" | "/memory" | "/trust"
-        | "/usage" | "/notifications" | "/settings" | "/policy" => {
-            let page = if path == "/" { "decisions" } else { &path[1..] };
+        | "/usage" | "/notifications" | "/settings" | "/policy" | "/dashboard" | "/changes"
+        | "/requirements" | "/docs" | "/extensions" | "/system" => {
+            let page = if path == "/" { "dashboard" } else { &path[1..] };
             let result = match page {
+                "dashboard" => dashboard::page(store, console, &params),
+                "changes" => changes::page(store, console, &params),
+                "requirements" => requirements::page(store, console, &params),
+                "docs" => docs::page(store, console, &params),
+                "extensions" => extensions::page(store, console, &params),
+                "system" => system::page(store, console, &params),
                 "notifications" => notifications::page(store, console, &params),
                 "settings" => settings::page(store, console),
                 "projects" => projects::overview(store, console),
@@ -366,6 +414,60 @@ fn serve(
         _ => respond(request, 404, "text/plain; charset=utf-8", "Page not found"),
     }
 }
+
+/// Per-page scripts and styles, each owned by one page; `render::shell` links every one.
+const PAGE_ASSETS: &[(&str, &str, &str)] = &[
+    (
+        "/assets/changes.js",
+        "text/javascript; charset=utf-8",
+        include_str!("console/changes.js"),
+    ),
+    (
+        "/assets/changes.css",
+        "text/css; charset=utf-8",
+        include_str!("console/changes.css"),
+    ),
+    (
+        "/assets/plans.js",
+        "text/javascript; charset=utf-8",
+        include_str!("console/plans.js"),
+    ),
+    (
+        "/assets/plans.css",
+        "text/css; charset=utf-8",
+        include_str!("console/plans.css"),
+    ),
+    (
+        "/assets/extensions.js",
+        "text/javascript; charset=utf-8",
+        include_str!("console/extensions.js"),
+    ),
+    (
+        "/assets/extensions.css",
+        "text/css; charset=utf-8",
+        include_str!("console/extensions.css"),
+    ),
+    (
+        "/assets/memory.js",
+        "text/javascript; charset=utf-8",
+        include_str!("console/memory.js"),
+    ),
+    (
+        "/assets/memory.css",
+        "text/css; charset=utf-8",
+        include_str!("console/memory.css"),
+    ),
+    (
+        "/assets/system.js",
+        "text/javascript; charset=utf-8",
+        include_str!("console/system.js"),
+    ),
+    (
+        "/assets/system.css",
+        "text/css; charset=utf-8",
+        include_str!("console/system.css"),
+    ),
+];
 
 fn security_headers(kind: &str) -> Vec<(String, String)> {
     [
