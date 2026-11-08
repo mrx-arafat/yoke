@@ -47,6 +47,12 @@ fn fixture() -> Fixture {
     let project = base.join("repo");
     std::fs::create_dir(&project).unwrap();
     git(&project, &["init", "-q", "-b", "main"]);
+    // The console's own commit runs plain `git commit`; CI homes have no global identity.
+    git(&project, &["config", "user.name", "Fixture"]);
+    git(
+        &project,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
     std::fs::write(project.join("a.txt"), "one\ntwo\nthree\n").unwrap();
     git(&project, &["add", "-A"]);
     git(&project, &["commit", "-qm", "initial"]);

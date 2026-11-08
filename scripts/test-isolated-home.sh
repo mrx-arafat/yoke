@@ -9,8 +9,11 @@ fi
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 original_home=$HOME
-test -d "$CARGO_HOME" && test -d "$RUSTUP_HOME" || {
-    printf '%s\n' 'Rust toolchain directories are missing; install Rust before running tests.' >&2
+# Homebrew's rustup keeps its proxies outside CARGO_HOME, so a fresh machine may not have
+# created it yet; cargo would create it anyway. Only the toolchain directory is required.
+mkdir -p "$CARGO_HOME"
+test -d "$RUSTUP_HOME" || {
+    printf 'Rust toolchain directory %s is missing; install Rust before running tests.\n' "$RUSTUP_HOME" >&2
     exit 2
 }
 isolated=$(mktemp -d)
