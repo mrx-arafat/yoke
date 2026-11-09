@@ -27,6 +27,8 @@
   async function navigate(href, history = true, focus = true, live = false) {
     const url = new URL(href, location.href);
     if (url.origin !== location.origin) return;
+    // A page with unsaved edits (Workflow settings) may cancel; a cancelled live refresh waits for the human.
+    if (!document.dispatchEvent(new CustomEvent("yoke:before-navigate", {cancelable: true, detail: {href: url.href, live}}))) { if (live) pending(); return false; }
     if (navigation) navigation.abort();
     const request = new AbortController();
     navigation = request;
@@ -48,11 +50,12 @@
       if (!response.ok) throw new Error(parsed.querySelector("main")?.textContent || text || `Request failed (${response.status})`);
       const main = parsed.querySelector("main");
       if (!main) throw new Error("The server returned an incomplete page.");
+      // The badge sits outside the view, so it stays current even when a reader defers the refresh.
+      const unread=parsed.querySelector("[data-unread-update]"),badge=document.querySelector("[data-unread-count]");
+      if(unread&&badge){badge.hidden=unread.dataset.unreadUpdate==="0";badge.querySelector("[data-unread-value]").textContent=unread.dataset.unreadUpdate;}
       // Interaction can begin after the request was sent.
       if (live && reading()) { pending(); return; }
       view.replaceChildren(main);
-      const unread=parsed.querySelector("[data-unread-update]"),badge=document.querySelector("[data-unread-count]");
-      if(unread&&badge){badge.hidden=unread.dataset.unreadUpdate==="0";badge.querySelector("[data-unread-value]").textContent=unread.dataset.unreadUpdate;}
       if (history) window.history.pushState({}, "", url);
       document.querySelectorAll("nav[aria-label='Workspace'] a").forEach(a => {
         if (new URL(a.href).pathname === url.pathname) a.setAttribute("aria-current","page");
@@ -137,7 +140,7 @@
     }
     if (document.querySelector("dialog[open]") || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
     if(event.key==="?") {help.showModal();return;}
-    if(prefix) {prefix=false;const pages={h:"dashboard",d:"decisions",o:"projects",s:"sessions",m:"memory",r:"requirements",p:"plans",c:"changes",e:"extensions",t:"trust",u:"usage",n:"notifications",w:"settings",i:"docs"};if(pages[event.key]){event.preventDefault();navigate(pages[event.key]);}return;}
+    if(prefix) {prefix=false;const pages={h:"dashboard",d:"decisions",o:"projects",s:"sessions",m:"memory",r:"requirements",p:"plans",c:"changes",e:"extensions",t:"trust",u:"usage",n:"notifications",w:"settings",y:"system",i:"docs"};if(pages[event.key]){event.preventDefault();navigate(pages[event.key]);}return;}
     if(event.key==="g") {prefix=true;return;}
     if(event.key==="j" || event.key==="k") {
       event.preventDefault();const rows=[...document.querySelectorAll("[data-row]")];const at=rows.indexOf(document.activeElement);

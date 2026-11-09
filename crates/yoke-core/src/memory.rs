@@ -19,6 +19,7 @@ use crate::{
 
 mod digest;
 mod portable;
+mod view;
 pub use digest::{
     digest_due, digest_identity, digest_with_command, orphaned_sessions, DigestReport,
     ORPHAN_IDLE_SECS,
@@ -26,9 +27,14 @@ pub use digest::{
 pub use portable::{
     export_archive, import_archive, ExportReport, ImportOptions, ImportPreview, ImportReport,
 };
+pub use view::{
+    detail, digest_state, digest_states, files_in_text, memories_of_session, parse_type,
+    recall_filtered, DigestState, MemoryDetail, RecallFilter, MEMORY_TYPES, NOTE_TYPE,
+};
 
 pub(crate) const TEXT_LIMIT: usize = 65_536;
-pub(crate) const MEMORY_COLUMNS: &str = "id,identity,ts,project,source,text,pinned,shared";
+pub(crate) const MEMORY_COLUMNS: &str =
+    "id,identity,ts,project,source,text,pinned,shared,memory_type";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +47,13 @@ pub struct Memory {
     pub text: String,
     pub pinned: bool,
     pub shared: bool,
+    /// `note` unless a person or a digest classified it; see `MEMORY_TYPES`.
+    #[serde(rename = "type", default = "default_type")]
+    pub memory_type: String,
+}
+
+fn default_type() -> String {
+    NOTE_TYPE.to_owned()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,12 +83,25 @@ pub fn remember(
     pinned: bool,
     now: i64,
 ) -> Result<Memory> {
+    remember_typed(store, project, text, NOTE_TYPE, pinned, now)
+}
+
+/// `remember` with a type from `MEMORY_TYPES`; anything else is refused before it is written.
+pub fn remember_typed(
+    store: &Store,
+    project: &str,
+    text: &str,
+    memory_type: &str,
+    pinned: bool,
+    now: i64,
+) -> Result<Memory> {
     validate_project(project)?;
     validate_text(text)?;
+    let memory_type = parse_type(memory_type)?;
     store.transaction(|tx| {
         tx.execute(
-            "INSERT INTO memories(ts,project,source,text,pinned) VALUES (?1,?2,'remember',?3,?4)",
-            params![now, project, redact(text), pinned],
+            "INSERT INTO memories(ts,project,source,text,pinned,memory_type) VALUES (?1,?2,'remember',?3,?4,?5)",
+            params![now, project, redact(text), pinned, memory_type],
         )?;
         get_on(tx, tx.last_insert_rowid())?.context("memory missing after insert")
     })
@@ -97,7 +123,7 @@ pub fn recall(store: &Store, project: &str, query: &str, limit: usize) -> Result
     }
     let query = fts_query(query)?;
     let mut statement = store.connection().prepare(
-        "SELECT m.id,m.identity,m.ts,m.project,m.source,m.text,m.pinned,m.shared
+        "SELECT m.id,m.identity,m.ts,m.project,m.source,m.text,m.pinned,m.shared,m.memory_type
          FROM memories m JOIN memories_fts ON m.id=memories_fts.rowid
          WHERE m.project=?1 AND memories_fts MATCH ?2
          ORDER BY bm25(memories_fts),m.pinned DESC,m.ts DESC,m.id DESC LIMIT ?3",
@@ -239,8 +265,8 @@ pub fn restore_snapshot(store: &Store, snapshot: &MemorySnapshot) -> Result<()> 
         }
         let occupied: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)", [memory.id], |row| row.get(0))?;
         let preferred_id = (!occupied).then_some(memory.id);
-        tx.execute("INSERT INTO memories(id,identity,ts,project,source,text,pinned,shared) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![preferred_id,memory.identity,memory.ts,memory.project,memory.source,redact(&memory.text),memory.pinned,memory.shared])?;
+        tx.execute("INSERT INTO memories(id,identity,ts,project,source,text,pinned,shared,memory_type) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![preferred_id,memory.identity,memory.ts,memory.project,memory.source,redact(&memory.text),memory.pinned,memory.shared,parse_type(&memory.memory_type)?])?;
         let restored_id = tx.last_insert_rowid();
         for fact_id in &snapshot.fact_ids {
             tx.execute("INSERT INTO memory_facts(memory_id,fact_id) VALUES (?1,?2)", params![restored_id,fact_id])?;
@@ -792,6 +818,7 @@ pub(crate) fn memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
         text: row.get(5)?,
         pinned: row.get(6)?,
         shared: row.get(7)?,
+        memory_type: row.get(8)?,
     })
 }
 

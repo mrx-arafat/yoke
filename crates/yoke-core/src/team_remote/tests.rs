@@ -26,7 +26,7 @@ fn identify(state: &Path) {
         ("user.email", "t@example.com"),
         ("commit.gpgsign", "false"),
     ] {
-        gitcmd::run_ok(&dir, &["config", key, value]).unwrap();
+        git::run_ok(&dir, &["config", key, value]).unwrap();
     }
 }
 
@@ -59,7 +59,7 @@ fn two_people_share_extensions_through_a_remote_without_overwriting_silently() {
     let base = temp.path().canonicalize().unwrap();
     let bare = base.join("team.git");
     fs::create_dir_all(&bare).unwrap();
-    gitcmd::run_ok(&bare, &["init", "--bare", "--quiet"]).unwrap();
+    git::run_ok(&bare, &["init", "--bare", "--quiet"]).unwrap();
     let url = bare.display().to_string();
 
     // Ana shares a command and a skill with a script into the still-empty remote.

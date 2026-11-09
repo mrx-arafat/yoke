@@ -18,6 +18,10 @@
 - Plan and code notes in the console, stored as plan comments the agent reads (including new file:<path>:<line> anchors), with a local Markdown review export.
 - A console Extensions page to browse, view, rename, move and delete Claude Code and Codex skills, rules, commands and agents, plus an opt-in Git team remote to compare, install and push them.
 - Concurrent console requests, so a slow Git or reviewer action no longer stalls other pages.
+- Editable console workflow settings that show the exact file diff and write it only after confirmation, never trusting it, plus Sessions search and a session detail page.
+- Memory types (yoke remember --type, yoke recall --type --file; schema 18), and console memory filters, memory detail, a session-start injection preview and a confirm-first Digest now.
+- Console usage pace, a monthly forecast, cost by model, sessions that landed commits and rewrite-gate counts, plus 30-day charts of memories by type and project activity.
+- A console System page for health, logs, background jobs, state database backups, retention and memory export, plus the human-only yoke backup restore.
 - Statusline mode, plan state, alerts, optional existing-command wrapping, and usage estimates that leave unsupported costs unknown.
 - Readable git-safety, web-redirect, token-saver, and UI presets that require explicit configuration trust before activation.
 - Checksum-verified self-update with atomic binary replacement.
@@ -25,7 +29,7 @@
 ### Pending acceptance
 
 - Version 0.1.0 remains unreleased; local focused checks and browser journeys are not a completed release acceptance run.
-- The new console pages (Dashboard, Changes, notes, Requirements, plan worktrees, Extensions, Documentation) are covered by server-side tests only; their browser acceptance remains pending.
+- The new console pages (Dashboard, Changes, notes, Requirements, plan worktrees, Extensions, Documentation, editable settings, session detail, memory, usage extras and System) are covered by server-side tests only; their browser acceptance remains pending.
 - The full-working-day observe-mode trial and a week of real work with Yoke as the only enforce-mode harness for both agents remain pending.
 - Cross-platform runtime acceptance across all supported release targets remains pending.
 - Lighthouse performance acceptance and a recorded before/after performance baseline remain pending.

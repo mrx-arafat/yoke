@@ -1,5 +1,5 @@
 //! Requirements: requirement documents (`docs/prd/*.md`) for the launch project.
-//! Owner: parity-plans (Pilot parity fleet). Its `prd.` actions arrive through `dashboard::act`.
+//! Its `prd.` actions arrive through `dashboard::act`.
 use super::{
     actions::Outcome,
     content,

@@ -1,1 +1,37 @@
-/* Owner: parity-memory. Loaded on every page after console.css; scope rules to your page, e.g. main[data-page="x"]. */
+/* Memory page (type chips, badges, injection and digest panels) and the activity
+   panels it shares with Usage. Scoped to the pages that render them. */
+main[data-page="memory"] .memory-types { display:flex; flex-wrap:wrap; gap:var(--space-2); margin:0 0 var(--space-4); }
+main[data-page="memory"] .memory-type { display:inline-flex; align-items:center; gap:var(--space-2); min-height:2.75rem; padding:var(--space-2) var(--space-4); border:1px solid var(--line); border-radius:999px; background:var(--surface); color:var(--ink); text-decoration:none; }
+main[data-page="memory"] .memory-type span { color:var(--muted); font-variant-numeric:tabular-nums; }
+main[data-page="memory"] .memory-type[aria-current] { border-color:var(--accent); background:var(--accent-soft); font-weight:600; }
+main[data-page="memory"] .memory-badge { text-transform:lowercase; }
+main[data-page="memory"] .memory-files { margin:0; padding-left:1.25rem; }
+main[data-page="memory"] .memory-inject pre { max-height:24rem; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+main[data-page="memory"] .memory-digest td.action-zone { min-width:10rem; }
+main[data-page="memory"] .memory-digest .confirmation p { max-width:60ch; }
+main[data-page="memory"] .memory-how summary h2 { display:inline; margin:0; font-size:1.125rem; }
+main[data-page="memory"] .memory-how ol { margin:var(--space-3) 0 0; padding-left:1.25rem; }
+main[data-page="memory"] .memory-how li + li { margin-top:var(--space-2); }
+/* Activity panels on Memory and Usage: stacked bars by memory type, project table with meters. */
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-chart { display:block; width:100%; height:9rem; border-bottom:1px solid var(--line); }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-axis { display:flex; justify-content:space-between; color:var(--muted); font-size:var(--text-small); }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-legend { display:flex; flex-wrap:wrap; gap:var(--space-2) var(--space-4); margin:var(--space-3) 0; padding:0; list-style:none; font-size:var(--text-small); }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-legend li { display:inline-flex; align-items:center; gap:var(--space-2); }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-legend svg { width:.75rem; height:.75rem; border-radius:.2rem; }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-note { fill:var(--line); }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-decision { fill:var(--chart-sage); }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-discovery { fill:var(--chart-sky); }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-bugfix { fill:var(--danger); }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-feature { fill:var(--chart-lavender); }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-refactor { fill:var(--chart-amber); }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-change { fill:var(--accent); }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-projects td:last-child { min-width:12rem; }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-tokens { display:block; font-variant-numeric:tabular-nums; }
+:is(main[data-page="memory"], main[data-page="usage"]) .activity-projects meter { width:100%; }
+/* Usage extras: stat tiles for today, pace, forecast and landed code. */
+main[data-page="usage"] .usage-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,11rem),1fr)); gap:var(--space-3); margin:0 0 var(--space-3); }
+main[data-page="usage"] .usage-stat { min-width:0; padding:var(--space-3) var(--space-4); border-radius:1rem; background:var(--well); }
+main[data-page="usage"] .usage-stat dt { font-size:var(--text-small); }
+main[data-page="usage"] .usage-stat dd { margin:0; font-size:1.75rem; font-weight:700; line-height:1.2; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+main[data-page="usage"] .usage-stat small { color:var(--muted); }
+main[data-page="usage"] progress { width:100%; }

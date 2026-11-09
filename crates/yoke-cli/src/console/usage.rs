@@ -14,6 +14,16 @@ use yoke_core::{
     usage::{self, Period, UsageRange, UsageTotals},
 };
 
+#[path = "usage_extras.rs"]
+mod extras;
+
+/// Memories by type and activity by project for the last 30 days.
+fn activity_panels(store: &Store, project: &str, now: i64, offset: i32) -> Result<String> {
+    use super::insights::activity;
+    Ok(activity::type_timeline(store, Some(project), now, offset)?
+        + &activity::project_activity(store, now, offset, project)?)
+}
+
 fn quota_panel(reading: &Quota, now: i64, offset: i64) -> String {
     let mut out = format!("<section class=\"panel\"><h2>{} account quota</h2><p class=\"muted\">Account-wide; independent of project and date filters. Reported percentages, with estimates from recent burn.</p>", escape(&reading.agent));
     for window in &reading.windows {
@@ -135,7 +145,7 @@ fn offset_value(minutes: i32) -> String {
 }
 
 /// The console is loopback-only, so the host's current offset is the viewer's default.
-fn host_offset_minutes() -> i32 {
+pub(super) fn host_offset_minutes() -> i32 {
     // SAFETY: time and localtime_r only write to the locals passed in.
     let minutes = unsafe {
         let now = libc::time(std::ptr::null_mut());
@@ -300,6 +310,7 @@ pub(super) fn page(
             "Usage appears when supported local transcript samples are available. Unknown prices stay unknown.",
             "yoke statusline",
         ));
+        out.push_str(&activity_panels(store, &scope.path, now, offset)?);
         out.push_str("</main>");
         return Ok(out);
     }
@@ -319,6 +330,7 @@ pub(super) fn page(
         ));
     }
     out.push_str("<p class=\"muted\">Unknown prices are never guessed: a total that includes them shows the priced part plus the unknown samples.</p></section>");
+    out.push_str(&extras::panels(store, c, &scope.path, &range, now)?);
 
     let max = report
         .periods
@@ -378,7 +390,9 @@ pub(super) fn page(
             row.input_tokens, row.output_tokens, row.cache_read_tokens, row.cache_write_tokens,
             escape(&cost(row.estimated_cost_usd.as_deref(), row.known_cost_usd.as_deref(), row.unknown_pricing_samples))));
     }
-    out.push_str("</tbody></table></div></section></main>");
+    out.push_str("</tbody></table></div></section>");
+    out.push_str(&activity_panels(store, &scope.path, now, offset)?);
+    out.push_str("</main>");
     Ok(out)
 }
 

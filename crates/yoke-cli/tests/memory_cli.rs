@@ -406,3 +406,46 @@ fn import_drops_pins_by_default_and_a_dry_run_shows_the_text() {
     assert!(kept.status.success(), "{}", err(&kept));
     assert!(out(&run(&restored, &b, &["recall", "--json"])).contains("\"pinned\":true"));
 }
+
+#[test]
+fn typed_notes_are_saved_and_recalled_by_type_and_file() {
+    let (_temp, home, _a, b) = fresh();
+    let plain = run(&home, &b, &["remember", "Plain note about src/lib.rs"]);
+    assert!(plain.status.success(), "{}", err(&plain));
+    assert!(
+        !out(&plain).contains("type:"),
+        "a plain note prints as it always did"
+    );
+    let decided = run(
+        &home,
+        &b,
+        &[
+            "remember",
+            "Use WAL for the state database",
+            "--type",
+            "decision",
+        ],
+    );
+    assert!(decided.status.success(), "{}", err(&decided));
+    assert!(out(&decided).contains("type: decision"));
+    let wrong = run(&home, &b, &["remember", "x", "--type", "thought"]);
+    assert!(!wrong.status.success());
+    assert!(
+        err(&wrong).contains("use one of note, decision"),
+        "{}",
+        err(&wrong)
+    );
+
+    let only = out(&run(&home, &b, &["recall", "--type", "decision"]));
+    assert!(
+        only.contains("memories[1]{id,time,pinned,type,text}:"),
+        "{only}"
+    );
+    assert!(only.contains("decision,\"Use WAL"), "{only}");
+    let by_file = out(&run(&home, &b, &["recall", "--file", "src/lib.rs"]));
+    assert!(
+        by_file.contains("memories[1]{id,time,pinned,text}:"),
+        "{by_file}"
+    );
+    assert!(by_file.contains("Plain note"), "{by_file}");
+}

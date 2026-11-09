@@ -1,4 +1,4 @@
-/* Owner: parity-plans. Loaded on every page after console.css; scope rules to your page, e.g. main[data-page="x"]. */
+/* Loaded on every page after console.css; scope rules to your page, e.g. main[data-page="x"]. */
 
 /* Shared stat tiles: dashboard status row and plan statistics. */
 main[data-page="dashboard"] .stats, main[data-page="plans"] .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,10.5rem),1fr)); gap:var(--space-3); margin:0; }

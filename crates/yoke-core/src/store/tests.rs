@@ -396,6 +396,7 @@ const DOWNS: &[&str] = &[
     include_str!("015-usage-summaries.down.sql"),
     include_str!("016-quota-warnings.down.sql"),
     include_str!("017-policy-versions.down.sql"),
+    include_str!("018-memory-types.down.sql"),
 ];
 
 #[test]

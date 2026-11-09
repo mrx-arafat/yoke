@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
 
-use crate::gitcmd::{run, run_ok};
+use crate::git::{run, run_ok};
 
 /// Ignored top-level entries that `git worktree remove` may delete with the worktree. Anything
 /// else ignored (an `.env`, local notes) blocks discarding, because Git would delete it silently.

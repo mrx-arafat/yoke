@@ -1,0 +1,11 @@
+/* Loaded on every page after console.css; every rule is scoped to the Settings page. */
+main[data-page="settings"] .settings-form td input,
+main[data-page="settings"] .settings-form td select { width: 100%; min-width: 9rem; }
+main[data-page="settings"] .settings-pending { margin: .35rem 0 0; color: var(--warn); font-size: .875rem; overflow-wrap: anywhere; }
+main[data-page="settings"] .settings-target { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; margin: 1rem 0 0; padding: .75rem 1rem; border: 1px solid var(--line); border-radius: var(--radius); }
+main[data-page="settings"] .settings-target legend { padding: 0 .25rem; font-weight: 600; }
+main[data-page="settings"] .settings-target label { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-height: 2.75rem; overflow-wrap: anywhere; }
+main[data-page="settings"] .settings-target input { min-height: auto; }
+main[data-page="settings"] .settings-form .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
+main[data-page="settings"] .settings-diff { max-height: 28rem; margin: 0 0 1rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+main[data-page="settings"] .settings-message { margin: .75rem 0 0; }

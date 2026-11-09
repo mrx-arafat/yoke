@@ -283,10 +283,14 @@ The console covers Projects, Sessions, Plans, Decisions, Memory, Trust & config,
 Notifications shows actionable problems with an unread count in the navigation, a How to recover section on each item, and searchable recovery help; Acknowledge uses the same session cookie and CSRF protection as other console actions.
 Notifications and its count cover the launch project and the global configuration only.
 After an upgrade with a long history, older notifications appear over the first few page loads, because each load reads at most a quarter second of history.
-Workflow settings is read-only: it shows observe or enforce activation, each Yoke-owned setting with its effective value and source file, the trust state of every configuration snapshot, and which choices stay with Claude Code or Codex.
+Workflow settings shows observe or enforce activation, the trust state of every configuration snapshot, and each Yoke-owned setting as a form with its effective value and source file.
+Saving shows the exact diff of `yoke.toml` or `~/.yoke/config.toml` and writes it only after you confirm and only if the file is unchanged since the page loaded; comments and layout are kept.
+A save never trusts: the edit applies after you run `yoke trust` (or `yoke trust --global`) in your own terminal, and until then the page marks the value as waiting for trust.
+Gates and environment allowances stay file-only, and the page lists which choices stay with Claude Code or Codex.
 Trust & config uses the same trust-state wording and shows the trusted content that still applies when its disk file has been deleted.
 Projects lists every recorded project; Decisions, Sessions and Usage accept a project selection, while Plans, Memory and Trust & config stay on the launch project.
 Sessions show a resume command to copy (`claude --resume <id>` or `codex resume <id>`); Yoke never runs it.
+Search Sessions by prompt text, session ID or project path, within the selected project or across all projects, and open a session for its timeline, tool counts, files touched, memories, usage, estimated cost and a Copy session ID button.
 Cmd+K or Ctrl+K opens the command palette; `?` shows shortcuts.
 Memory deletion offers a 30-second Undo, and plan approval displays the frozen contract before confirmation.
 Configuration trust remains a terminal operation.

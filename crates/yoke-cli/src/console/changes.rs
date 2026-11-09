@@ -1,6 +1,4 @@
 //! Changes: Git status, diffs, staging, commits, branches and stashes, plus annotations.
-//! Owner: parity-changes (Pilot parity fleet).
-//!
 //! The browser is the human's. Local, reversible Git actions run at once; pushing and dropping a
 //! stash ask for confirmation; sending the staged diff to a reviewer CLI needs two explicit clicks
 //! and never runs on its own. Nothing here forces, and policy files are never touched.

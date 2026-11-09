@@ -170,10 +170,9 @@ pub fn run(home: &Path, project: &Path, open_browser: bool, port: u16) -> Result
                 }
             };
             if let Err(error) = result {
-                eprintln!(
-                    "yoke console: {}",
-                    yoke_core::redact::redact(&error.to_string())
-                );
+                let message = yoke_core::redact::redact(&error.to_string());
+                system::record_console_error(&message);
+                eprintln!("yoke console: {message}");
             }
         });
     }
@@ -374,6 +373,21 @@ fn serve(
                 &yoke_core::redact::redact(&format!("{error}; reopen the screenshot from Plans; if it is still unavailable, regenerate its project-local PNG, JPEG or WebP file under 10 MiB and rerun the matching yoke plan check <slug> --agent <claude|codex>, then refresh Plans")),
             ),
         },
+        "/system/download" => match system::download(store, console, &params) {
+            Ok(download) => download.send(request),
+            Err(error) => respond(
+                request,
+                if error.downcast_ref::<BadRequest>().is_some() {
+                    400
+                } else {
+                    404
+                },
+                "text/plain; charset=utf-8",
+                &yoke_core::redact::redact(&format!(
+                    "{error}; reopen System and choose the backup or export again"
+                )),
+            ),
+        },
         "/" | "/decisions" | "/projects" | "/sessions" | "/plans" | "/memory" | "/trust"
         | "/usage" | "/notifications" | "/settings" | "/policy" | "/dashboard" | "/changes"
         | "/requirements" | "/docs" | "/extensions" | "/system" => {
@@ -466,6 +480,26 @@ const PAGE_ASSETS: &[(&str, &str, &str)] = &[
         "/assets/system.css",
         "text/css; charset=utf-8",
         include_str!("console/system.css"),
+    ),
+    (
+        "/assets/settings.js",
+        "text/javascript; charset=utf-8",
+        include_str!("console/settings.js"),
+    ),
+    (
+        "/assets/settings.css",
+        "text/css; charset=utf-8",
+        include_str!("console/settings.css"),
+    ),
+    (
+        "/assets/sessions.js",
+        "text/javascript; charset=utf-8",
+        include_str!("console/sessions.js"),
+    ),
+    (
+        "/assets/sessions.css",
+        "text/css; charset=utf-8",
+        include_str!("console/sessions.css"),
     ),
 ];
 

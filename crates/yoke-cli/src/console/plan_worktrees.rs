@@ -1,6 +1,5 @@
 //! Plan worktrees on the Plans page: status, diff, sync (squash merge) and discard.
-//! Owner: parity-plans. Loaded as a child of `dashboard`.
-//!
+//! Loaded as a child of `dashboard`.
 //! A plan "lives in" a linked worktree when its recorded project is that worktree's path. The
 //! browser names a worktree only by an opaque id that must match one `git worktree list` reports.
 use super::super::{

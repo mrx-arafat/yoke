@@ -1,75 +1,23 @@
 use super::{
-    content, projects,
+    content,
     render::{self, encode, escape},
     Console,
 };
 use anyhow::{ensure, Result};
 use std::collections::BTreeMap;
 use std::io::Read;
-use yoke_core::{config, memory, plan, store::Store};
+use yoke_core::{config, plan, store::Store};
+
+#[path = "session_page.rs"]
+mod session_page;
 
 pub(super) fn sessions(
     store: &Store,
     c: &Console,
     params: &BTreeMap<String, String>,
 ) -> Result<String> {
-    let scope = projects::scope(store, c, params)?;
-    let rows = store.sessions(Some(&scope.path), 200)?;
-    let mut out = render::heading(
-        "sessions",
-        "Trace each agent session from its first event to its latest decision.",
-    );
-    out.push_str(&format!(r#"<form class="filters" data-filter action="sessions" method="get">{}<button type="submit">Show sessions</button></form>"#,projects::picker(&scope)));
-    out.push_str(&projects::banner(c, &scope, "sessions"));
-    if rows.is_empty() {
-        out.push_str(&render::empty(
-            "No sessions yet",
-            "Start Claude or Codex with Yoke hooks to record a session.",
-            "yoke install --dry-run",
-        ));
-    } else {
-        out.push_str(&format!(
-            "<p class=\"scope\">Protection now: {}</p>",
-            projects::protection(c, store, &scope.path)
-        ));
-    }
-    for row in rows {
-        let plan = match (&row.plan_slug, &row.plan_state) {
-            (Some(slug), Some(state)) if scope.launch => format!(
-                r#"<a data-nav href="{}">{}</a> ({})"#,
-                render::href("plans", &format!("slug={}", encode(slug))),
-                escape(slug),
-                escape(state)
-            ),
-            (Some(slug), Some(state)) => format!("{} ({})", escape(slug), escape(state)),
-            _ => "No plan bound".into(),
-        };
-        let resume = projects::resume_command(&row.agent, &row.project, &row.id)
-            .map(|command| format!("<code class=\"resume\">{}</code>", escape(&command)))
-            .unwrap_or_else(|| "Unavailable for this agent or session id".into());
-        // Hook payloads that failed before parsing record their decisions under an empty id.
-        let heading = if row.id.is_empty() {
-            "<h2>No session id recorded</h2>".to_owned()
-        } else {
-            format!(
-                r#"<h2><a data-row data-nav href="{}">{}</a></h2>"#,
-                render::href(
-                    "decisions",
-                    &format!("session={}{}", encode(&row.id), scope.query())
-                ),
-                escape(&row.id)
-            )
-        };
-        out.push_str(&format!(r#"<article class="panel"><div class="list-caption">{heading}<span class="badge">{}</span></div><dl class="facts oversight"><dt>Lifecycle</dt><dd>Started <time data-time="{}">{}</time> &middot; {}</dd><dt>Last event</dt><dd>{}</dd><dt>Decisions</dt><dd>{}</dd><dt>Plan binding</dt><dd>{}</dd><dt>Mode at last event</dt><dd>{}</dd><dt>Resume</dt><dd>{}</dd></dl></article>"#,
-            escape(&row.agent),row.started_at,row.started_at,
-            row.ended_at.map(|v|format!("ended <time data-time=\"{v}\">{v}</time>")).unwrap_or_else(||"no end event recorded".into()),
-            row.last_event_at.map(|v|format!("<time data-time=\"{v}\">{v}</time>")).unwrap_or_else(||"No decisions recorded".into()),
-            row.decision_count,plan,
-            row.last_mode.as_deref().map(escape).unwrap_or_else(||"Unknown (no decisions)".into()),
-            resume));
-    }
-    out.push_str("<p class=\"muted\">Up to 200 recent sessions in this project. Yoke shows resume commands for you to copy and never runs them; a session without an end event may still be running elsewhere.</p></main>");
-    Ok(out)
+    // Session search and the session detail page (`sessions?id=`).
+    session_page::page(store, c, params)
 }
 
 pub(super) fn plans(
@@ -111,25 +59,8 @@ pub(super) fn memories(
     c: &Console,
     params: &BTreeMap<String, String>,
 ) -> Result<String> {
-    let query = params.get("q").map(String::as_str).unwrap_or("");
-    let rows = memory::recall(store, &c.project.to_string_lossy(), query, 100)?;
-    let mut out = render::heading(
-        "memory",
-        "Keep useful context close. Search what the project has learned, and choose what stays.",
-    );
-    out.push_str(&format!(r#"<form data-filter action="memory" class="filters"><label class="grow">Search memories<input name="q" value="{}" placeholder="Search project knowledge"></label><button>Search</button></form>"#,escape(query)));
-    if rows.is_empty() {
-        out.push_str(&render::empty(
-            "No matching memories",
-            "Try another search, or save a useful fact from your terminal.",
-            "yoke remember --help",
-        ));
-    }
-    for m in rows {
-        out.push_str(&format!(r#"<article class="panel memory" tabindex="0" data-row><div class="list-caption"><span>{} {}</span><time data-time="{}">{}</time></div><div class="prose">{}</div><p class="muted">Source: {}</p><div class="actions action-zone"><button class="quiet" data-action="pin" data-id="{}" data-value="{}">{}</button><button class="quiet" data-action="share" data-id="{}" {}>{}</button><button class="quiet" data-confirm-forget="{}">Forget</button></div></article>"#,if m.pinned{"Pinned"}else{"Memory"},if m.shared{" / Shared"}else{""},m.ts,m.ts,content::markdown(&m.text),escape(&m.source),m.id,!m.pinned,if m.pinned{"Unpin"}else{"Pin"},m.id,if m.shared{"disabled"}else{""},if m.shared{"Shared"}else{"Share"},m.id));
-    }
-    out.push_str("<p class=\"muted\">Up to 100 matching memories. Sharing writes project knowledge; forgetting can be undone for 30 seconds.</p></main>");
-    Ok(out)
+    // Type and file search, memory detail and the session-start preview.
+    super::insights::memory_page(store, c, params)
 }
 
 pub(super) fn trust(store: &Store, c: &Console) -> Result<String> {

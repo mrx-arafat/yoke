@@ -515,7 +515,7 @@ It listens on `127.0.0.1` only, and it refuses to start from an agent because it
 The link works once, within five minutes, and signs that browser in with a cookie.
 Ctrl-C stops the server.
 
-It opens on the Dashboard and covers Decisions, Projects, Sessions, Memory, Requirements, Plans, Changes, Extensions, Trust & config, Usage, Notifications, Workflow settings and Documentation.
+It opens on the Dashboard and covers Decisions, Projects, Sessions, Memory, Requirements, Plans, Changes, Extensions, Trust & config, Usage, Notifications, Workflow settings, System and Documentation.
 Press `g` and then a page's key to jump there; `?` lists the keys.
 Trusting a configuration stays a terminal operation.
 Actions that delete, discard, push or overwrite always show what will happen and wait for you to confirm.
@@ -538,7 +538,25 @@ Both ask you to confirm, and both refuse while anything is uncommitted, in confl
 Start a file with a `# title`, optional `Author:`, `Status:` and `Category:` lines, and `##` sections such as Problem Statement and Core User Flows.
 Deleting one asks you to confirm and says whether Git can restore it.
 
+**Sessions** can be searched by prompt text, session ID or project path; tick **All projects** to search every recorded project.
+Open a session for its first prompt, a timeline of its recorded events and decisions, tool counts, the files its tool calls read or modified, the memories made from its facts, its token usage and estimated cost, and **Copy session ID**.
+Files come from the recorded inputs of Read, Edit, Write, MultiEdit, NotebookEdit and apply_patch, with secrets redacted; shell commands are not parsed.
+
+**Workflow settings** lets you change Yoke's own settings.
+Choose the project or the global file and press **Review the change** to see the exact diff; **Write the file** saves it, keeping comments, only if the file has not changed since the page loaded.
+Nothing applies until you run `yoke trust` (or `yoke trust --global`) in your own terminal; until then the page shows the value as waiting for trust.
+Gates and environment allowances stay in the file.
+
 **Documentation** shows Yoke's manual and reference pages built into the binary, with a table of contents and links between pages, and needs no network.
+
+**Memory** filters notes by words, type and file, and **Details** opens one memory with the sessions and files it came from.
+It shows exactly what session start injects for the project and why, the same as `yoke recall --explain`.
+Pending facts are listed per session.
+**Digest now** is off until you click it, says which facts go to which agent CLI, and sends nothing until you confirm; it needs `digest = true` under `[memory]`, trusted with `yoke trust`.
+
+**Usage** adds today, the average day over the last 14 days, a straight-line forecast for the month, cost by model, and the commands that rewrite gates changed.
+For the console's project it also matches commits on the current branch to recorded sessions: a commit counts when it was authored between a session's first usage sample and one hour after its last.
+Memory and Usage both chart memories by type and activity by project over the last 30 days.
 
 Decisions show a short command or file path and the recorded reason before you expand a row.
 Expand it for the full reason, gate results and redacted payload.
@@ -605,6 +623,20 @@ Enter a Git repository URL on the page to keep a Yoke-managed clone in the state
 Pull to list the remote's extensions, compare one side by side with your local copy, and install it; replacing a local file asks first and moves the old one to the trash.
 Push sends only the extensions you select, after showing the exact files and the remote, and never forces.
 Yoke uses your own Git credentials and never asks for or stores them.
+
+### System
+
+The System page (`g y`) holds the maintenance views a daemon's admin screens would show.
+**Health** is the `yoke health` report for the console's project, read-only.
+**Logs** lists hook errors recorded as decisions, failed background jobs, the end of `~/.yoke/error.log` and the console's own errors since it started, filtered by level and project.
+**Clear error.log** asks you to confirm and refuses if new lines arrived since the view loaded; decisions and jobs are history and are never cleared there.
+**Jobs** lists unfinished background jobs with their last error.
+**Retry** on a dead job says what the job will do, including which agent a memory digest sends facts to, and waits for you to confirm.
+**Backups** copies the whole state database with SQLite's online backup API into `~/.yoke/state-backups` while agents keep working, and lists, inspects, downloads and deletes the copies; deleting asks first.
+Restoring is never a console action: a backup's page shows the exact `yoke backup restore` command to run in your own terminal with your agents stopped.
+**Retention** shows `log.retention_days` and where it comes from, what the hourly pass removes, and how many records it would remove now; **Run retention now** asks you to confirm those counts.
+**Export** downloads this project's or every project's memory archive.
+Importing stays `yoke memory import <file> --dry-run --map <source>=<destination>` in your terminal, because the console cannot receive an archive and does not read arbitrary paths.
 
 ## 11. Pausing Yoke, and when Yoke fails
 
@@ -678,6 +710,7 @@ They hold redacted tool inputs, memories and configuration snapshots.
 | `error.log` | Errors, warnings, skips and pauses; it rotates to `error.log.1` past 1 MiB |
 | `install-claude.json`, `install-codex.json` | Ownership receipts for the hooks Yoke added |
 | `backups/` | Timestamped copies of your agent files taken before Yoke changed them |
+| `state-backups/` | State database backups made on the console's System page, one 0600 file each |
 
 Each project holds `yoke.toml`, plans under `.yoke/plans` and shared notes in `.yoke/knowledge.md`.
 They are ordinary files, and whether to commit them is your call.

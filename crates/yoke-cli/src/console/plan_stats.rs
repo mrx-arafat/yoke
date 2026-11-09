@@ -1,5 +1,5 @@
 //! Plan statistics for the Plans page and the human-only cancel action.
-//! Owner: parity-plans. Loaded as a child of `dashboard`.
+//! Loaded as a child of `dashboard`.
 use super::super::{
     actions::Outcome,
     render::{self, escape},

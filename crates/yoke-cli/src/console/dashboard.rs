@@ -1,5 +1,4 @@
 //! Dashboard: overview across all recorded projects. Also handles plans., prd. and docs. actions.
-//! Owner: parity-plans (Pilot parity fleet).
 use super::{
     actions::Outcome,
     projects,

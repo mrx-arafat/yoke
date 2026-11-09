@@ -1,5 +1,5 @@
 "use strict";
-// Owner: parity-extensions. Extensions page. Loaded on every page after console.js.
+// Extensions page. Loaded on every page after console.js.
 // The server renders every control with data-* attributes; this script posts actions through window.yoke,
 // shows the confirmation the server asks for (its text names the exact paths), and refreshes the view.
 (() => {

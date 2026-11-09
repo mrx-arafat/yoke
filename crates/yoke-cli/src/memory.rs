@@ -109,7 +109,7 @@ fn require_person(action: &str, why: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn remember(text: &str, pinned: bool, json: bool) -> Result<()> {
+pub fn remember(text: &str, pinned: bool, memory_type: Option<&str>, json: bool) -> Result<()> {
     if pinned {
         require_person(
             "yoke remember --pinned",
@@ -118,7 +118,14 @@ pub fn remember(text: &str, pinned: bool, json: bool) -> Result<()> {
     }
     let (store, loaded) = commands::load_memory_project()?;
     let project = project_of(&loaded)?;
-    let row = memory::remember(&store, project, text, pinned, timestamp()?)?;
+    let row = memory::remember_typed(
+        &store,
+        project,
+        text,
+        memory_type.unwrap_or(memory::NOTE_TYPE),
+        pinned,
+        timestamp()?,
+    )?;
     if json {
         println!("{}", serde_json::to_string(&row)?);
     } else {
@@ -129,6 +136,10 @@ pub fn remember(text: &str, pinned: bool, json: bool) -> Result<()> {
             row.pinned,
             commands::quote(&row.text)
         );
+        // A plain note prints exactly what it always did.
+        if row.memory_type != memory::NOTE_TYPE {
+            println!("type: {}", row.memory_type);
+        }
     }
     // Said once, with the first note of a project, so a new user learns it without a nag per note.
     if let Some(notice) = injection_notice(loaded.config.mode) {
@@ -139,7 +150,14 @@ pub fn remember(text: &str, pinned: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn recall(query: &str, limit: u16, json: bool, explain: bool) -> Result<()> {
+pub fn recall(
+    query: &str,
+    limit: u16,
+    json: bool,
+    explain: bool,
+    memory_type: Option<&str>,
+    file: Option<&str>,
+) -> Result<()> {
     let (store, loaded) = commands::load_memory_project()?;
     let project = loaded
         .project_root
@@ -148,12 +166,28 @@ pub fn recall(query: &str, limit: u16, json: bool, explain: bool) -> Result<()> 
     if explain {
         return explain_context(&store, &loaded, project, query, json);
     }
-    let rows = memory::recall(&store, project, query, usize::from(limit))?;
+    let rows = memory::recall_filtered(
+        &store,
+        project,
+        &memory::RecallFilter {
+            query,
+            memory_type,
+            file,
+        },
+        usize::from(limit),
+    )?;
     if json {
         println!("{}", serde_json::to_string(&rows)?);
     } else {
+        // The type column appears only when a listed memory has one, so a project of plain
+        // notes keeps the layout scripts already read.
+        let typed = rows.iter().any(|row| row.memory_type != memory::NOTE_TYPE);
         println!("project: {}", commands::quote(project));
-        println!("memories[{}]{{id,time,pinned,text}}:", rows.len());
+        println!(
+            "memories[{}]{{id,time,pinned,{}text}}:",
+            rows.len(),
+            if typed { "type," } else { "" }
+        );
         if rows.is_empty() {
             println!(
                 "help: \"{}\"",
@@ -166,10 +200,15 @@ pub fn recall(query: &str, limit: u16, json: bool, explain: bool) -> Result<()> 
         }
         for row in rows {
             println!(
-                "  {},{},{},{}",
+                "  {},{},{},{}{}",
                 row.id,
                 commands::quote(&yoke_core::timefmt::local_time(row.ts)),
                 row.pinned,
+                if typed {
+                    format!("{},", row.memory_type)
+                } else {
+                    String::new()
+                },
                 commands::quote(&row.text)
             );
         }
@@ -590,6 +629,18 @@ pub fn schedule_orphan_digests(
 
 fn dedupe_key(session: &str, project: &str) -> String {
     format!("digest:{}", memory::digest_identity(session, project))
+}
+
+/// Queue a digest of this session's pending facts at once, because a person asked for it in the
+/// console; `false` means nothing was pending or an attempt was claimed in the last 30 seconds.
+/// The caller starts the worker.
+pub(crate) fn queue_digest(store: &Store, project: &str, session: &str, now: i64) -> Result<bool> {
+    enqueue_digest(store, project, session, None, now, false)
+}
+
+/// The digest job of this session that is queued, running, failed or dead, if any.
+pub(crate) fn digest_job(store: &Store, project: &str, session: &str) -> Result<Option<jobs::Job>> {
+    jobs::unfinished(store, &dedupe_key(session, project))
 }
 
 /// Queue the digest when it is due and no attempt was claimed recently; `true` means a job is

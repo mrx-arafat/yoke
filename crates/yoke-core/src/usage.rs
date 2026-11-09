@@ -18,6 +18,11 @@ use crate::{
 };
 
 mod child;
+mod extras;
+pub use extras::{
+    by_model, correlate, pace, rewrites, session_windows, Correlation, ModelUsage, Pace,
+    SessionWindow, Spend, LANDING_GRACE_SECS,
+};
 
 /// The most transcript bytes one import counts: the newest ones.
 const MAX_BYTES: u64 = 32 * 1024 * 1024;

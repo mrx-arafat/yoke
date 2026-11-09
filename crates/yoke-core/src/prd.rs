@@ -10,7 +10,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::gitcmd;
+use crate::git;
 
 pub const DIR: &str = "docs/prd";
 const MAX_BYTES: u64 = 1024 * 1024;
@@ -242,13 +242,13 @@ pub fn recovery(project: &Path, file: &str) -> Recovery {
     let Some(dir) = directory(project) else {
         return Recovery::Unknown;
     };
-    let Ok(inside) = gitcmd::run(&dir, &["rev-parse", "--is-inside-work-tree"]) else {
+    let Ok(inside) = git::run(&dir, &["rev-parse", "--is-inside-work-tree"]) else {
         return Recovery::Unknown;
     };
     if !inside.success {
         return Recovery::Unknown;
     }
-    let Ok(tracked) = gitcmd::run(&dir, &["ls-files", "--error-unmatch", "--", file]) else {
+    let Ok(tracked) = git::run(&dir, &["ls-files", "--error-unmatch", "--", file]) else {
         return Recovery::Unknown;
     };
     if !tracked.success {
@@ -259,7 +259,7 @@ pub fn recovery(project: &Path, file: &str) -> Recovery {
             Recovery::Unknown
         };
     }
-    match gitcmd::run(&dir, &["status", "--porcelain", "--", file]) {
+    match git::run(&dir, &["status", "--porcelain", "--", file]) {
         Ok(status) if status.success && status.stdout.trim().is_empty() => Recovery::Committed,
         Ok(status) if status.success => Recovery::Edited,
         _ => Recovery::Unknown,

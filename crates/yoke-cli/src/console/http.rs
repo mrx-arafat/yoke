@@ -206,6 +206,33 @@ impl Request {
         write_until(&mut self.connection.stream, bytes, deadline)
     }
 
+    /// Send `length` bytes of `file` without holding them in memory, for downloads larger than
+    /// the response cap. Call only after authentication. The deadline grows by one second per
+    /// MiB, so a large backup still finishes over a slow SSH tunnel.
+    pub(super) fn respond_file(
+        mut self,
+        status: u16,
+        headers: Vec<(String, String)>,
+        file: &mut impl Read,
+        length: u64,
+    ) -> io::Result<()> {
+        let size = usize::try_from(length).map_err(|_| invalid("file too large"))?;
+        let head = response_head(status, headers, Some(size))?;
+        let deadline = Instant::now() + IO_TIME + Duration::from_secs(length / (1024 * 1024));
+        write_until(&mut self.connection.stream, &head, deadline)?;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        let mut left = size;
+        while left > 0 {
+            let read = file.read(&mut buffer[..left.min(64 * 1024)])?;
+            if read == 0 {
+                return Err(invalid("file shrank while it was sent"));
+            }
+            write_until(&mut self.connection.stream, &buffer[..read], deadline)?;
+            left -= read;
+        }
+        Ok(())
+    }
+
     /// Call only after authentication; the console separately limits streams to four.
     pub(super) fn into_stream(
         mut self,

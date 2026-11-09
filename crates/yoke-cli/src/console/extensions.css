@@ -1,4 +1,4 @@
-/* Owner: parity-extensions. Loaded on every page after console.css; every rule is scoped to the Extensions or Settings page. */
+/* Loaded on every page after console.css; every rule is scoped to the Extensions or Settings page. */
 main[data-page="extensions"] .ext-path { overflow-wrap: anywhere; font: .75rem/1.4 var(--mono); }
 main[data-page="extensions"] th[scope="row"] a[aria-current="true"] { font-weight: 700; text-decoration: underline; }
 main[data-page="extensions"] .ext-detail .facts { grid-template-columns: 8rem minmax(0, 1fr); }

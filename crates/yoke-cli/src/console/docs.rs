@@ -1,5 +1,5 @@
 //! Documentation: Yoke's own docs, embedded at build time (see `build.rs`).
-//! Owner: parity-plans (Pilot parity fleet). Read-only, so it has no actions.
+//! Read-only, so it has no actions.
 use super::{
     content,
     render::{self, encode, escape},

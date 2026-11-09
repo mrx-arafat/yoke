@@ -1,5 +1,5 @@
 "use strict";
-// Owner: parity-changes. Changes page and plan notes. Loaded on every page after console.js.
+// Changes page and plan notes. Loaded on every page after console.js.
 // Server-rendered buttons carry data-* attributes; this script only posts actions, shows the
 // confirmation the server asks for, and remembers view preferences. No inline script or style.
 (() => {

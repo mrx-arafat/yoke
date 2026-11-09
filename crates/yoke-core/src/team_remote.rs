@@ -23,8 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::extension_files::{self as files, Target};
 use crate::extensions::{Kind, Owner, Roots, Scope};
-use crate::git::Repo;
-use crate::gitcmd;
+use crate::git::{self, Repo};
 use crate::redact::redact;
 
 pub use lines::{side_by_side, Row, RowKind};
@@ -179,8 +178,8 @@ fn open_clone(state_dir: &Path, state: &State) -> Result<(Repo, PathBuf)> {
     let dir = clone_dir(state_dir);
     if !dir.join(".git").exists() {
         fs::create_dir_all(&dir)?;
-        gitcmd::run_ok(&dir, &["init", "--quiet"])?;
-        gitcmd::run_ok(&dir, &["remote", "add", "origin", &state.url])?;
+        git::run_ok(&dir, &["init", "--quiet"])?;
+        git::run_ok(&dir, &["remote", "add", "origin", &state.url])?;
     }
     let repo = Repo::open(&dir)?;
     // A damaged clone folder must never resolve to some enclosing repository.
@@ -188,7 +187,7 @@ fn open_clone(state_dir: &Path, state: &State) -> Result<(Repo, PathBuf)> {
         repo.root() == dir.canonicalize()?,
         "The team clone is not a repository of its own; disconnect and connect again"
     );
-    gitcmd::run_ok(&dir, &["remote", "set-url", "origin", &state.url])?;
+    git::run_ok(&dir, &["remote", "set-url", "origin", &state.url])?;
     Ok((repo, dir))
 }
 
@@ -204,7 +203,7 @@ pub fn pull(state_dir: &Path) -> Result<Synced> {
     let state = load(state_dir)?.context("No team remote is connected")?;
     let (repo, dir) = open_clone(state_dir, &state)?;
     repo.fetch()?;
-    let listed = gitcmd::run_ok(
+    let listed = git::run_ok(
         &dir,
         &[
             "for-each-ref",
@@ -219,7 +218,7 @@ pub fn pull(state_dir: &Path) -> Result<Synced> {
         .collect();
     if branches.is_empty() {
         let branch = state.branch.clone().unwrap_or_else(|| "main".into());
-        gitcmd::run_ok(
+        git::run_ok(
             &dir,
             &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
         )?;
@@ -249,7 +248,7 @@ pub fn pull(state_dir: &Path) -> Result<Synced> {
                 )
             })?,
     };
-    gitcmd::run_ok(
+    git::run_ok(
         &dir,
         &[
             "checkout",
@@ -718,7 +717,7 @@ pub fn plan_push(state_dir: &Path, items: &[Shared]) -> Result<SharePlan> {
         !changes.is_empty(),
         "Nothing to push: the remote already has these extensions as they are"
     );
-    let branch = gitcmd::run_ok(&clone, &["symbolic-ref", "--short", "HEAD"])?
+    let branch = git::run_ok(&clone, &["symbolic-ref", "--short", "HEAD"])?
         .trim()
         .to_owned();
     Ok(SharePlan {

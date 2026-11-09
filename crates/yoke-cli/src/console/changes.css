@@ -1,4 +1,4 @@
-/* Owner: parity-changes. Changes page rules are scoped to main[data-page="changes"]; note rules apply wherever notes appear. */
+/* Changes page rules are scoped to main[data-page="changes"]; note rules apply wherever notes appear. */
 main[data-page="changes"] .changes-bar { display: grid; gap: .5rem; }
 main[data-page="changes"] .changes-branch { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 main[data-page="changes"] .changes-bar .actions { margin: 0; }

@@ -1,12 +1,13 @@
 //! Core engine for Yoke: config loading, agent events, and gate evaluation.
 
+pub mod analytics;
+pub mod backup;
 pub mod config;
 pub mod engine;
 pub mod event;
 pub mod extension_files;
 pub mod extensions;
 pub mod git;
-mod gitcmd;
 pub mod guard;
 pub mod jobs;
 pub mod memory;
@@ -20,11 +21,14 @@ pub mod process;
 pub mod project;
 pub mod quota;
 pub mod redact;
+pub mod retention;
 pub mod review;
+pub mod session_detail;
 pub mod stop_guard;
 pub mod store;
 pub mod team_remote;
 pub mod timefmt;
+pub mod touched;
 pub mod trial;
 pub mod trust;
 pub mod usage;

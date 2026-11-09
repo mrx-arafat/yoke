@@ -163,6 +163,9 @@ There is no Jobs page; background jobs are listed only by `yoke jobs`, and the f
 3. Follow a session's Decisions count.
    Verify Decisions shows `Session: <id>` with `Clear session filter` and only that session's rows.
 4. After step 2 (expected): Plan binding links read `lockout-done (done)`, `pagination-stalled (stalled)`, `auth-header-waiting (waiting)`, `rate-limit-building (building)` and `retry-policy-checking (checking)`.
+5. Type a word from a recorded prompt into Search and press Show sessions; expect only sessions with that prompt. Tick All projects; expect a Project row on each panel.
+6. Open a session from its heading link.
+   Expect Usage and estimated cost, Tools, Files, Memories from this session and Timeline panels, and Copy session ID, which shows `Session ID copied.`
 
 ### 4. Plans list
 
@@ -252,11 +255,14 @@ There is no Jobs page; background jobs are listed only by `yoke jobs`, and the f
 ### 10. Workflow settings
 
 1. Open Workflow settings or press `g` then `w`.
-   Expect the sections Activation, Configuration trust, Decided by Yoke and Decided by your coding agent, and no settings-edit or trust controls. The shared theme, command-palette and keyboard-help buttons remain available.
+   Expect the sections Activation, Configuration trust, Decided by Yoke (a form with Save to, Review the change and Discard edits), Decided by your coding agent and Handled outside these settings, and no trust controls. The shared theme, command-palette and keyboard-help buttons remain available.
 2. \* Read Activation and Configuration trust.
    Expect the badge `enforce` after step 2 and the same wording per file as Trust & config.
 3. Read Decided by Yoke.
    Expect `stop.max_blocks` with value `2` and the full path of the launch project's `yoke.toml` as its source after step 2, and `default` sources before it.
+4. Change `stop.max_blocks` to `3`, keep Project file and press Review the change.
+   Expect a diff of the launch project's `yoke.toml` with `- ` and `+ ` lines for `max_blocks` and the sentence that it applies after `yoke trust`. Press Write the file; expect a toast naming `yoke trust`, the input back at `2` with `Waiting for yoke trust: 3`, and the file shown as changed on disk (stale) under Configuration trust.
+5. Edit any value, then follow a rail link; expect a prompt to leave or stay. Choose stay and verify the edit is still there.
 
 ### 11. Chrome, keyboard and live updates
 

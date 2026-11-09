@@ -27,6 +27,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/015-usage-summaries.sql"),
     include_str!("store/016-quota-warnings.sql"),
     include_str!("store/017-policy-versions.sql"),
+    include_str!("store/018-memory-types.sql"),
 ];
 
 mod policy;

@@ -1,5 +1,5 @@
 "use strict";
-// Owner: parity-plans. Loaded on every page after console.js; uses window.yoke (act, refresh, navigate, notify).
+// Loaded on every page after console.js; uses window.yoke (act, refresh, navigate, notify).
 // One generic flow serves every plans., prd. and docs. control: a button carries the action name and its
 // parameters; inputs marked data-field in the same zone add to them. An action that needs the human's
 // confirmation shows exactly what will happen, and only the Confirm button runs it.

@@ -289,12 +289,14 @@ yoke recall --explain
 Notes belong to the current project, and recognizable secrets are redacted before they are stored: known token prefixes, `key=value`, `--key value` and `key: value` pairs for names like `password` and `api_key`, bearer headers and the password in a URL such as `postgres://user:password@host`.
 In enforce mode, session start injects pinned notes, trusted shared knowledge and recent notes within `memory.inject_tokens` (default 1500), and `--explain` shows exactly what would be injected and why.
 `yoke memory export` and `yoke memory import` move memory between machines with explicit project-path mapping, and optional session digests are off by default.
+The console's Memory page filters notes by type and file, opens one memory with the sessions and files it came from, shows exactly what session start injects, and lists pending facts per session with a **Digest now** button that says what it will send and waits for you to confirm.
 
 ### Usage, trials and extensions
 
 - Yoke's statusline adds its mode, git branch, allowed and blocked counts, plan, alert and quota line to Claude Code (the 5-hour and weekly percent used and the reset time, when Claude reports them; `--style detailed` adds a second line). The install script adds it when you have no statusline; otherwise run `yoke install --agent claude --statusline`, which wraps an existing statusline command. Without it, none of this shows inside the agent.
 - `yoke usage` prints each agent's quota (percent used and left, reset times), token and estimated-cost totals for today and the last 7 days, and the newest sessions, read-only.
 - The console Usage page and `yoke usage` estimate API token prices from agent transcripts; an unpriced model shows as unknown rather than a guessed amount, and the figures are not invoices.
+- The console Usage page also shows today, a 14-day daily average, a straight-line forecast for the month, cost by model, which recorded sessions landed commits on the console project's current branch, and how many commands rewrite gates changed (a count, not a savings estimate).
 - `yoke trial report --since <date>` summarizes recorded decisions into release-trial evidence, read-only.
 - `yoke extensions` inventories Claude Code and Codex skills, agents, plugins, MCP servers, hooks and memory files read-only, and exits 1 when it finds stale or dangling definitions (shadowed names are reported without failing).
 

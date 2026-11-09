@@ -124,6 +124,19 @@ pub(crate) fn first_problem() -> Result<Option<String>> {
     Ok(report.problems.into_iter().next())
 }
 
+/// The `yoke health --json` report for `project`, for the console's read-only Health view. It
+/// reads exactly what `run` reads and writes nothing.
+pub(crate) fn report_json(home: &Path, project: &Path) -> Result<serde_json::Value> {
+    let executable = std::env::current_exe()?;
+    let report = collect(Inputs {
+        options: install::options(home, executable.clone(), Vec::new()),
+        cwd: project.to_owned(),
+        home: home.to_owned(),
+        executable,
+    })?;
+    Ok(serde_json::to_value(&report)?)
+}
+
 fn check_private_permissions(path: &Path, required: &str, problems: &mut Vec<String>) {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::symlink_metadata(path) {

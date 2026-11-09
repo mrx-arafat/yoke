@@ -1,0 +1,17 @@
+/* Loaded on every page after console.css; every rule is scoped to the Sessions page. */
+main[data-page="sessions"] .filters .sessions-all { flex: 0 0 auto; flex-direction: row; align-items: center; gap: .5rem; min-height: 2.75rem; }
+main[data-page="sessions"] .filters .sessions-all input { min-height: auto; }
+main[data-page="sessions"] #session-id code { overflow-wrap: anywhere; }
+main[data-page="sessions"] .session-actions { margin: 0 0 1rem; }
+main[data-page="sessions"] .panel h3 { margin: 1rem 0 .5rem; font-size: 1rem; }
+main[data-page="sessions"] .session-files,
+main[data-page="sessions"] .session-memories { display: grid; gap: .35rem; margin: 0; padding: 0; list-style: none; }
+main[data-page="sessions"] .session-scroll { max-height: 24rem; overflow: auto; }
+main[data-page="sessions"] .session-files code { overflow-wrap: anywhere; }
+main[data-page="sessions"] .session-memories li { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem; overflow-wrap: anywhere; }
+main[data-page="sessions"] .session-timeline { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
+main[data-page="sessions"] .session-timeline li { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem .75rem; padding: .5rem 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+main[data-page="sessions"] .session-timeline time { min-width: 9rem; color: var(--muted); font-size: .875rem; }
+main[data-page="sessions"] .session-timeline .session-tool { font: .8125rem/1.4 var(--mono); }
+main[data-page="sessions"] .session-timeline .decision-preview { flex-basis: 100%; }
+main[data-page="sessions"] .session-timeline .decision-reason { flex-basis: 100%; margin-top: 0; }

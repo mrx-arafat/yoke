@@ -55,6 +55,14 @@ struct PortableMemory {
     text: String,
     pinned: bool,
     shared_reference: bool,
+    /// Left out for a plain note, so an archive without typed memories reads as it always did.
+    #[serde(default = "super::default_type", skip_serializing_if = "is_note")]
+    memory_type: String,
+}
+
+#[allow(clippy::ptr_arg)] // serde's `skip_serializing_if` passes a reference to the field.
+fn is_note(memory_type: &String) -> bool {
+    memory_type == super::NOTE_TYPE
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -171,6 +179,7 @@ pub fn export_archive(
                 text: row.text,
                 pinned: row.pinned,
                 shared_reference: row.shared,
+                memory_type: row.memory_type,
             })
             .collect(),
         facts: facts
@@ -414,8 +423,8 @@ pub fn import_archive(
     }
     for memory in &archive.memories {
         if !memory_ids.contains_key(&memory.identity) {
-            tx.execute("INSERT INTO memories(identity,ts,project,source,text,pinned,shared) VALUES (?1,?2,?3,?4,?5,?6,0)",
-                params![memory.identity,memory.ts,mappings[&memory.project],memory.source,memory.text,memory.pinned])?;
+            tx.execute("INSERT INTO memories(identity,ts,project,source,text,pinned,shared,memory_type) VALUES (?1,?2,?3,?4,?5,?6,0,?7)",
+                params![memory.identity,memory.ts,mappings[&memory.project],memory.source,memory.text,memory.pinned,memory.memory_type])?;
             memory_ids.insert(memory.identity.clone(), tx.last_insert_rowid());
         }
         insert_identity(
@@ -525,6 +534,7 @@ fn validate(archive: &Archive, now: i64) -> Result<()> {
         }
         if !projects.contains(&memory.project)
             || !matches!(memory.source.as_str(), "fact" | "remember" | "digest")
+            || !super::MEMORY_TYPES.contains(&memory.memory_type.as_str())
             || memories.insert(&memory.identity, memory).is_some()
         {
             bail!("invalid or duplicate memory {}", memory.identity);

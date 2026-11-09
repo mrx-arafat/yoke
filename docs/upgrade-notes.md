@@ -10,6 +10,14 @@ Later imports can recover retained child records within the existing bounded rea
 Historical closed rollouts are not automatically searched or reopened.
 Keep rollouts that report unrelated identities, conflicting counters or missing attributed response records and report the diagnostic; do not rewrite IDs or reset state.
 
+### Schema 18 adds memory types
+
+- Writable opens upgrade existing state through schema 18, adding a type to every memory; existing memories become `note`.
+- Replace all hook binaries together: binaries supporting only schema 17 or earlier refuse a schema-18 database.
+  Keep a consistent backup of the database and its sidecars before upgrading if you may need to restore an older binary; the console's System page can make one, and `yoke backup restore` puts it back.
+  There is no supported downgrade command.
+- A memory archive that contains typed memories carries a `memory_type` field that older Yoke versions refuse to import; archives of plain notes are unchanged.
+
 ### Schema 17 records the policy behind each decision
 
 - Writable opens upgrade existing state through schema 17, adding historical policy archives and a policy hash on new decisions.

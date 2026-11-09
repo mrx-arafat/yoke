@@ -40,6 +40,20 @@ pub(crate) fn schedule(store: &Store, now: i64, retention_days: u32) -> Result<b
     Ok(true)
 }
 
+/// Queue the same pass now, for a human who asked for it in the console; an active retention
+/// job is returned instead of a second one (`true` means a new job was queued).
+pub(crate) fn queue_now(store: &Store, now: i64, retention_days: u32) -> Result<(Job, bool)> {
+    let payload = serde_json::to_string(&Payload { retention_days })?;
+    jobs::enqueue(store, RETENTION_JOB, RETENTION_KEY, "", &payload, now)
+}
+
+/// When session start last queued the hourly pass, if ever.
+pub(crate) fn last_scheduled(store: &Store) -> Result<Option<i64>> {
+    Ok(store
+        .get_kv(CLAIM_KEY)?
+        .and_then(|value| value.parse().ok()))
+}
+
 /// Worker entry: returns true when the backlog is not finished and a follow-up should be queued.
 pub(crate) fn run_job(store: &Store, job: &Job, now: i64) -> Result<bool> {
     run(store, job, now, BUDGET, PAUSE)

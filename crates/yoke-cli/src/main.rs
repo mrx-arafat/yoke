@@ -1,3 +1,4 @@
+mod backup;
 mod bypass;
 mod commands;
 mod console;
@@ -113,6 +114,9 @@ enum Cmd {
         /// Pin the note so session start injects it before other memories.
         #[arg(long)]
         pinned: bool,
+        /// What the note records: note (the default), decision, discovery, bugfix, feature, refactor or change.
+        #[arg(long = "type", value_name = "TYPE")]
+        memory_type: Option<String>,
         /// Print the full saved memory record as JSON.
         #[arg(long)]
         json: bool,
@@ -131,6 +135,12 @@ enum Cmd {
         /// Show what session start injects in enforce mode for this query and why, within memory.inject_tokens; says when the current mode injects nothing.
         #[arg(long)]
         explain: bool,
+        /// Only memories of this type: note, decision, discovery, bugfix, feature, refactor or change.
+        #[arg(long = "type", value_name = "TYPE")]
+        memory_type: Option<String>,
+        /// Only memories that name this file, in their text or in the edits they were written from.
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
     },
     /// Delete one memory of this project, and its entry in project knowledge if it was shared.
     Forget {
@@ -162,6 +172,11 @@ enum Cmd {
         /// Print jobs as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Human-only: restore the state database from a backup made in the console.
+    Backup {
+        #[command(subcommand)]
+        command: backup::BackupCommand,
     },
     /// List or append readable bundled gate configurations.
     Preset {
